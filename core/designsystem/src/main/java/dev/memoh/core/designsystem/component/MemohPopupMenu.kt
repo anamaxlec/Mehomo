@@ -1,20 +1,8 @@
 package dev.memoh.core.designsystem.component
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,7 +12,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -39,16 +26,26 @@ import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.updateTransition
+import androidx.compose.foundation.shape.CornerBasedShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -56,12 +53,13 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 
 /** Composer menus share the input field's horizontal boundaries. */
 val LocalMemohPopupBounds = staticCompositionLocalOf<IntRect?> { null }
+
+/** Menus used while composing must leave the editor's window and IME focused. */
+val LocalMemohPopupFocusable = staticCompositionLocalOf { true }
 
 /** A menu overlapping its control and constrained to its owner's horizontal bounds. */
 @Composable
@@ -74,83 +72,78 @@ fun MemohPopupMenu(
     width: Dp? = null,
     maxHeight: Dp = 320.dp,
     scrollable: Boolean = true,
+    focusable: Boolean = LocalMemohPopupFocusable.current,
     content: @Composable () -> Unit,
 ) {
-    // The transition state outlives the toggle so the exit animation has
-    // something to run against; the Popup is composed only while it is on either
-    // side of the transition, because an invisible Popup still captures input.
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val bounds = LocalMemohPopupBounds.current
+    val maxWidth = with(density) { bounds?.width?.toDp() }?.coerceAtMost(248.dp) ?: 248.dp
+    val shadowSpace = 12.dp
+    var geometry by remember { mutableStateOf<MemohMenuGeometry?>(null) }
     val visibility = remember { MutableTransitionState(false) }
-    visibility.targetState = expanded
-
-    if (visibility.currentState || visibility.targetState) {
-        val density = androidx.compose.ui.platform.LocalDensity.current
-        val bounds = LocalMemohPopupBounds.current
-        val maxWidth = with(density) { bounds?.width?.toDp() }?.coerceAtMost(248.dp) ?: 248.dp
-        val positionProvider = remember(alignment, bounds, density) {
-            MemohMenuPositionProvider(
-                alignment = alignment,
-                ownerBounds = bounds,
-                margin = with(density) { 16.dp.roundToPx() },
-                gap = with(density) { 12.dp.roundToPx() },
+    visibility.targetState = expanded && geometry != null
+    val positionProvider = remember(alignment, bounds, density) {
+        MemohMenuPositionProvider(
+            alignment = alignment, ownerBounds = bounds,
+            margin = with(density) { 16.dp.roundToPx() },
+            gap = with(density) { 12.dp.roundToPx() },
+            shadowPadding = with(density) { shadowSpace.roundToPx() },
+            onPosition = { geometry = it },
+        )
+    }
+    @Suppress("DEPRECATION")
+    val transition = updateTransition(visibility, "menuFromTrigger")
+    val spatialSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
+    val effectsSpec = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+    val progress by transition.animateFloat(transitionSpec = { spatialSpec }, label = "menuBounds") { if (it) 1f else 0f }
+    val opacity by transition.animateFloat(transitionSpec = { effectsSpec }, label = "menuOpacity") { if (it) 1f else 0f }
+    LaunchedEffect(expanded, visibility.isIdle) {
+        if (!expanded && visibility.isIdle) geometry = null
+    }
+    if (expanded || visibility.currentState || visibility.targetState) {
+        val menuShape = MenuDefaults.groupShape(0, 1).shape
+        val measured = geometry
+        val reveal = progress.coerceIn(0f, 1f)
+        val shape = if (measured != null && menuShape is CornerBasedShape) {
+            val size = Size(measured.menuBounds.width.toFloat(), measured.menuBounds.height.toFloat())
+            val closedRadius = size.minDimension / 2f
+            fun corner(end: Float) = with(density) { (closedRadius + (end - closedRadius) * reveal).toDp() }
+            RoundedCornerShape(
+                topStart = corner(menuShape.topStart.toPx(size, density)),
+                topEnd = corner(menuShape.topEnd.toPx(size, density)),
+                bottomStart = corner(menuShape.bottomStart.toPx(size, density)),
+                bottomEnd = corner(menuShape.bottomEnd.toPx(size, density)),
             )
-        }
-        // Expressive motion, not a hand-tuned spring: the spatial spec carries
-        // the size and position change and the effects spec carries the fade,
-        // which is the pairing that makes M3E surfaces feel like they have mass.
-        val motion = MaterialTheme.motionScheme
-        val spatialFloat = motion.defaultSpatialSpec<Float>()
-        val spatialOffset = motion.defaultSpatialSpec<IntOffset>()
-        val fade = motion.defaultEffectsSpec<Float>()
-
-        Popup(
-            popupPositionProvider = positionProvider,
-            onDismissRequest = onDismiss,
-            properties = PopupProperties(
-                focusable = true,
-                dismissOnBackPress = true,
-                dismissOnClickOutside = true,
-            ),
-        ) {
-            AnimatedVisibility(
-                visibleState = visibility,
-                enter = fadeIn(fade) +
-                    scaleIn(
-                        initialScale = 0.92f,
-                        animationSpec = spatialFloat,
-                        transformOrigin = TransformOrigin(0.5f, 1f),
-                    ) +
-                    slideInVertically(animationSpec = spatialOffset, initialOffsetY = { it / 12 }),
-                exit = fadeOut(fade) +
-                    scaleOut(
-                        targetScale = 0.96f,
-                        animationSpec = spatialFloat,
-                        transformOrigin = TransformOrigin(0.5f, 1f),
-                    ) +
-                    slideOutVertically(animationSpec = spatialOffset, targetOffsetY = { it / 16 }),
-            ) {
+        } else menuShape
+        Popup(popupPositionProvider = positionProvider, onDismissRequest = onDismiss,
+            properties = PopupProperties(focusable = focusable, dismissOnBackPress = true, dismissOnClickOutside = true)) {
+            // Ordinary bounded measurement supports lazy/subcomposed content.
+            // No intrinsic sizing is used anywhere in this popup container.
+            Box(Modifier.padding(shadowSpace)) {
                 Surface(
-                    modifier = Modifier
-                        .widthIn(min = 144.dp.coerceAtMost(maxWidth), max = maxWidth)
-                        .then(if (width == null) Modifier.width(IntrinsicSize.Max)
-                            else Modifier.width(width.coerceAtMost(maxWidth)))
-                        .then(modifier),
-                    // M3E menu shape: a large rounded surface, which is the
-                    // expressive counterpart to the composer's own capsule.
-                    shape = MaterialTheme.shapes.large,
+                    modifier = Modifier.graphicsLayer {
+                        val frame = geometry?.frame(progress)
+                        scaleX = frame?.scaleX ?: 1f
+                        scaleY = frame?.scaleY ?: 1f
+                        translationX = frame?.translationX ?: 0f
+                        translationY = frame?.translationY ?: 0f
+                        transformOrigin = frame?.origin ?: TransformOrigin.Center
+                        alpha = if (frame == null) 0f else opacity
+                    }.widthIn(min = 144.dp.coerceAtMost(maxWidth), max = maxWidth)
+                        .width((width ?: maxWidth).coerceAtMost(maxWidth)).then(modifier),
+                    shape = shape,
                     color = MaterialTheme.colorScheme.surfaceContainer,
-                    tonalElevation = 3.dp,
-                    shadowElevation = 3.dp,
+                    tonalElevation = MenuDefaults.TonalElevation,
+                    shadowElevation = MenuDefaults.ShadowElevation,
                 ) {
                     Column(
-                        modifier = Modifier
-                            .heightIn(max = maxHeight)
-                            .then(if (scrollable) Modifier.verticalScroll(rememberScrollState())
-                                else Modifier)
+                        modifier = Modifier.heightIn(max = maxHeight)
+                            .then(if (scrollable) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                            .graphicsLayer { alpha = ((progress - .2f) / .8f).coerceIn(0f, 1f) }
                             .padding(6.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        content()
-                    }
+                        content = { content() },
+                    )
                 }
             }
         }
@@ -162,21 +155,31 @@ internal class MemohMenuPositionProvider(
     private val ownerBounds: IntRect?,
     private val margin: Int,
     private val gap: Int,
+    private val shadowPadding: Int = 0,
+    private val onPosition: (MemohMenuGeometry) -> Unit = {},
 ) : PopupPositionProvider {
+    var geometry: MemohMenuGeometry? = null
+        private set
+    val transformOrigin: TransformOrigin get() = geometry?.origin ?: TransformOrigin.Center
     override fun calculatePosition(
         anchorBounds: IntRect,
         windowSize: IntSize,
         layoutDirection: LayoutDirection,
         popupContentSize: IntSize,
     ): IntOffset {
+        val surfaceSize = IntSize((popupContentSize.width - shadowPadding * 2).coerceAtLeast(0),
+            (popupContentSize.height - shadowPadding * 2).coerceAtLeast(0))
         val left = maxOf(margin, ownerBounds?.left ?: margin)
         val right = minOf(windowSize.width - margin, ownerBounds?.right ?: windowSize.width - margin)
-        val aligned = alignment.align(popupContentSize, anchorBounds.size, layoutDirection)
+        val aligned = alignment.align(surfaceSize, anchorBounds.size, layoutDirection)
         val x = (anchorBounds.left + aligned.x)
-            .coerceIn(left, (right - popupContentSize.width).coerceAtLeast(left))
+            .coerceIn(left, (right - surfaceSize.width).coerceAtLeast(left))
         val y = (anchorBounds.top + aligned.y - gap)
             .coerceAtLeast(margin)
-        return IntOffset(x, y)
+        val calculated = MemohMenuGeometry(anchorBounds, IntRect(x, y, x + surfaceSize.width, y + surfaceSize.height))
+        geometry = calculated
+        onPosition(calculated)
+        return IntOffset(x - shadowPadding, y - shadowPadding)
     }
 }
 

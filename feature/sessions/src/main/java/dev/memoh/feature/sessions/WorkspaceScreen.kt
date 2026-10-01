@@ -3,7 +3,9 @@ package dev.memoh.feature.sessions
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.util.Base64
+import android.view.ContextThemeWrapper
 import android.webkit.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -16,7 +18,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.ImeAction
@@ -60,6 +61,7 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
     var input by remember(botId, surface) { mutableStateOf("") }
     var webProgress by remember { mutableIntStateOf(0) }
     var prepareConfirm by remember { mutableStateOf(false) }
+    val workspaceTheme = WorkspaceWebTheme(MaterialTheme.colorScheme)
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     fun sendInput() {
         if (input.isEmpty() || !state.connected) return
@@ -141,13 +143,13 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
                         onClick = { if (surface == WorkspaceSurface.Terminal) viewModel.connectTerminal() else viewModel.connectDesktop() },
                         enabled = state.rendererReady && if (surface == WorkspaceSurface.Terminal) state.terminalInfo?.available == true else state.displayInfo?.available == true, primary = true)
                 }
-                Surface(Modifier.fillMaxWidth().weight(1f), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.inverseSurface) {
+                Surface(Modifier.fillMaxWidth().weight(1f), shape = MaterialTheme.shapes.large, color = workspaceTheme.background) {
                     Box {
                     LocalWorkspaceView(surface, viewModel, { webView = it })
                     androidx.compose.animation.AnimatedVisibility(visible = state.loading || state.connecting,
                         enter = androidx.compose.animation.fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
                         exit = androidx.compose.animation.fadeOut(MaterialTheme.motionScheme.fastEffectsSpec())) {
-                        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.inverseSurface) {
+                        Surface(Modifier.fillMaxSize(), color = workspaceTheme.background) {
                             MemohTextSkeleton(Modifier.padding(16.dp), "正在加载${surface.title}")
                         }
                     }
@@ -206,8 +208,7 @@ private class WorkspaceBridge(private val post: ((() -> Unit) -> Unit), private 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun LocalWorkspaceView(surface: WorkspaceSurface, viewModel: WorkspaceViewModel, onView: (WebView?) -> Unit) {
-    val scheme = MaterialTheme.colorScheme
-    val theme = "{\"background\":\"${scheme.inverseSurface.css()}\",\"foreground\":\"${scheme.inverseOnSurface.css()}\",\"cursor\":\"${scheme.primary.css()}\"}"
+    val theme by rememberUpdatedState(WorkspaceWebTheme(MaterialTheme.colorScheme))
     var bridge by remember { mutableStateOf<WorkspaceBridge?>(null) }
     AndroidView(factory = { context ->
         WebView(context).apply {
@@ -218,7 +219,7 @@ private fun LocalWorkspaceView(surface: WorkspaceSurface, viewModel: WorkspaceVi
             settings.allowFileAccess = false; settings.allowContentAccess = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             settings.mediaPlaybackRequiresUserGesture = false
-            setBackgroundColor(scheme.inverseSurface.toArgb())
+            setBackgroundColor(theme.background.toArgb())
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
             val native = WorkspaceBridge({ action -> handler.post(action) }, viewModel)
             bridge = native; addJavascriptInterface(native, "NativeWorkspace")
@@ -231,35 +232,48 @@ private fun LocalWorkspaceView(surface: WorkspaceSurface, viewModel: WorkspaceVi
                     if (uri.scheme != "https" || uri.host != "workspace.memoh.invalid" || uri.path != "/$file" || (file !in allowed && !(file.startsWith("novnc/") && file.endsWith(".js") && ".." !in file)))
                         return WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0)))
                     val type = if (file.endsWith(".css")) "text/css" else if (file.endsWith(".js")) "text/javascript" else "text/html"
-                    return WebResourceResponse(type, "UTF-8", context.assets.open("workspace/$file"))
+                    val asset = context.assets.open("workspace/$file")
+                    val body = if (type == "text/html") asset.bufferedReader().use { reader ->
+                        ByteArrayInputStream(theme.initialize(reader.readText()).toByteArray(Charsets.UTF_8))
+                    } else asset
+                    return WebResourceResponse(type, "UTF-8", body)
                 }
-                override fun onPageFinished(view: WebView, url: String) { view.evaluateJavascript("if(window.workspaceTheme)workspaceTheme($theme);", null) }
+                override fun onPageFinished(view: WebView, url: String) { view.evaluateJavascript("if(window.workspaceTheme)workspaceTheme(${theme.json});", null) }
             }
             onView(this)
             loadUrl(LOCAL_ORIGIN + if (surface == WorkspaceSurface.Terminal) "terminal.html" else "desktop.html")
         }
-    }, update = { it.evaluateJavascript("if(window.workspaceTheme)workspaceTheme($theme);", null) },
+    }, update = {
+        it.setBackgroundColor(theme.background.toArgb())
+        it.evaluateJavascript("if(window.workspaceTheme)workspaceTheme(${theme.json});", null)
+    },
         onRelease = { bridge?.close(); it.removeJavascriptInterface("NativeWorkspace"); it.stopLoading(); it.destroy(); onView(null) },
         modifier = Modifier.fillMaxSize())
 }
-
-private fun Color.css(): String = "#%06x".format(toArgb() and 0xffffff)
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun BrowserPreview(url: String, onError: (String) -> Unit, onProgress: (Int) -> Unit) {
     val callbacks by rememberUpdatedState(onError to onProgress)
+    val theme = WorkspaceWebTheme(MaterialTheme.colorScheme)
     val parsed = Uri.parse(url)
     if (parsed.scheme !in listOf("https", "http") || parsed.host.isNullOrBlank()) {
         LaunchedEffect(url) { onError("服务端返回的预览地址无效") }; return
     }
-    key(url) {
-        AndroidView(factory = { context -> WebView(context).apply {
+    // A Compose-only theme override must reach WebView's isLightTheme as well,
+    // so websites' prefers-color-scheme follows the user's in-app choice.
+    key(url, theme.dark) {
+        AndroidView(factory = { context -> WebView(ContextThemeWrapper(context,
+            if (theme.dark) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar)).apply {
             layoutParams = android.view.ViewGroup.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT)
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true
             settings.allowFileAccess = false; settings.allowContentAccess = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            setBackgroundColor(theme.background.toArgb())
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                settings.isAlgorithmicDarkeningAllowed = theme.dark
+            }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
             webChromeClient = object : WebChromeClient() { override fun onProgressChanged(view: WebView, newProgress: Int) { callbacks.second(newProgress) } }
             webViewClient = object : WebViewClient() {
@@ -273,6 +287,7 @@ private fun BrowserPreview(url: String, onError: (String) -> Unit, onProgress: (
                 }
             }
             loadUrl(url)
-        } }, onRelease = { it.stopLoading(); it.destroy() }, modifier = Modifier.fillMaxSize())
+        } }, update = { it.setBackgroundColor(theme.background.toArgb()) },
+            onRelease = { it.stopLoading(); it.destroy() }, modifier = Modifier.fillMaxSize())
     }
 }

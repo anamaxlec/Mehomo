@@ -18,7 +18,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
@@ -66,9 +65,9 @@ fun MemohFloatingBar(
  * (56dp → 40dp) and keeps the icon at a fixed 20dp: the button shrinks around
  * it rather than the icon shrinking inside the button.
  *
- * A single Material FAB owns the circular outline throughout the size change.
- * Putting its shadow inside a shared-element overlay clips the shadow to that
- * overlay's rectangular bounds during the transition.
+ * The Material FAB owns both the circular surface and its shadow. An external
+ * shadow modifier is outside the FAB's minimum-touch-target layout and can use
+ * different bounds when the visual size drops below 48dp.
  */
 @Composable
 fun MemohCornerFab(
@@ -87,12 +86,11 @@ fun MemohCornerFab(
     )
     FloatingActionButton(
         onClick = onClick,
-        modifier = modifier.size(size).shadow(6.dp, CircleShape, clip = false),
+        modifier = modifier.size(size),
         shape = CircleShape,
         containerColor = containerColor,
         contentColor = contentColor,
-        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp,
-            pressedElevation = 0.dp, focusedElevation = 0.dp, hoveredElevation = 0.dp),
+        elevation = FloatingActionButtonDefaults.elevation(),
     ) {
         Icon(
             imageVector = icon,

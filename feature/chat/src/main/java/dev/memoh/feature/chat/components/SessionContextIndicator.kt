@@ -4,6 +4,7 @@ import dev.memoh.core.designsystem.component.MemohActionButton
 import androidx.compose.material.icons.filled.Compress
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Refresh
@@ -22,6 +23,7 @@ import java.util.Locale
 @Composable
 fun SessionContextIndicator(state: ChatUiState, onRefresh: () -> Unit, onCompact: () -> Unit) {
     var open by remember(state.session?.id) { mutableStateOf(false) }
+    BackHandler(open) { open = false }
     val info = state.sessionInfo
     val usage = info?.contextUsage
     val fraction = usage?.fraction(state.modelContextWindow)

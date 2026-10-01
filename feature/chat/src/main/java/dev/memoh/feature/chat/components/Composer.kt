@@ -1,6 +1,16 @@
 package dev.memoh.feature.chat.components
 
 import androidx.compose.animation.Crossfade
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.onFocusChanged
+import dev.memoh.core.designsystem.component.LocalMemohPopupFocusable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -25,6 +35,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -41,6 +52,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -55,6 +69,7 @@ import dev.memoh.core.designsystem.component.MemohPopupMenu
 import dev.memoh.core.designsystem.component.LocalMemohPopupBounds
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 
 /**
  * The composer.
@@ -68,7 +83,7 @@ import androidx.compose.ui.unit.dp
  *
  * Capability controls keep their place while their options load.
  */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun Composer(
     text: String,
@@ -111,7 +126,24 @@ fun Composer(
     modelMenu: (@Composable (expanded: Boolean, dismiss: () -> Unit) -> Unit)? = null,
 ) {
     var popupBounds by remember { mutableStateOf<IntRect?>(null) }
-    CompositionLocalProvider(LocalMemohPopupBounds provides popupBounds) {
+    var editorFocused by remember { mutableStateOf(false) }
+    var plusOpen by remember { mutableStateOf(false) }
+    var modelOpen by remember { mutableStateOf(false) }
+    val imeVisible = WindowInsets.isImeVisible
+    var imeWasVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(imeVisible, editorFocused) {
+        if (!editorFocused) imeWasVisible = false
+        else if (imeVisible) imeWasVisible = true
+    }
+    val editorExpanded = editorFocused && (imeVisible || !imeWasVisible)
+    val expansion by animateFloatAsState(if (editorExpanded) 1f else 0f,
+        tween(240, easing = FastOutSlowInEasing), label = "composerExpansion")
+    BackHandler(plusOpen) { plusOpen = false }
+    BackHandler(modelOpen) { modelOpen = false }
+    CompositionLocalProvider(
+        LocalMemohPopupBounds provides popupBounds,
+        LocalMemohPopupFocusable provides false,
+    ) {
         Column(
             modifier = modifier.fillMaxWidth().onGloballyPositioned { coordinates ->
                 val bounds = coordinates.boundsInWindow()
@@ -124,63 +156,62 @@ fun Composer(
         ) {
             above()
 
-            MemohComposerSurface(Modifier.fillMaxWidth()) {
-                MemohComposerTextField(
-                    value = text, onValueChange = onTextChange, enabled = enabled,
-                    placeholder = if (isRunning) "补充到当前回复…" else "问点什么",
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                // The field's own bottom line: attach on the left, model and send on
-                // the right. Keeping it inside the capsule is what makes the whole
-                // thing read as one input rather than a text box with a toolbar.
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (onAttachClick != null) {
-                        var plusOpen by remember { mutableStateOf(false) }
-                        Box {
+            MemohComposerSurface(Modifier.fillMaxWidth(), contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) {
+                // One editor stays composed in both layouts, preserving text,
+                // selection and IME focus while controls move to the bottom row.
+                Box(Modifier.fillMaxWidth()) {
+                    val compactStart = if (onAttachClick != null) 44.dp else 0.dp
+                    val compactEnd = if (onModelClick != null) 88.dp else 44.dp
+                    MemohComposerTextField(
+                        value = text, onValueChange = onTextChange, enabled = enabled,
+                        placeholder = if (isRunning) "补充到当前回复…" else "问点什么",
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(start = compactStart * (1f - expansion), end = compactEnd * (1f - expansion),
+                                bottom = 44.dp * expansion)
+                            .heightIn(max = 44.dp + 176.dp * expansion)
+                            .onFocusChanged { editorFocused = it.isFocused },
+                    )
+                    Row(Modifier.fillMaxWidth().height(44.dp).align(Alignment.BottomCenter),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        if (onAttachClick != null) Box {
                             MemohComposerIconButton(
                                 icon = Icons.Filled.Add,
                                 contentDescription = "添加文件或应用",
                                 enabled = enabled,
-                                onClick = { plusOpen = !plusOpen },
+                                onClick = { modelOpen = false; plusOpen = !plusOpen },
                             )
                             plusMenu?.invoke(plusOpen) { plusOpen = false }
                         }
-                    }
-
-                    if (onModelClick != null) {
-                        var modelOpen by remember { mutableStateOf(false) }
-                        Box(Modifier.weight(1f).heightIn(min = 40.dp), contentAlignment = Alignment.CenterEnd) {
-                            Crossfade(modelLoading, animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(), label = "model loaded") { loading ->
-                                if (loading) MemohSkeleton(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), "正在加载模型") {
-                                    MemohSkeletonBlock(Modifier.width(172.dp).height(18.dp), MaterialTheme.shapes.large)
-                                } else ModelSelector(
-                                    label = modelLabel ?: "暂无可用模型",
-                                    onClick = { modelOpen = !modelOpen },
-                                    enabled = enabled && modelLabel != null,
-                                )
+                        if (onModelClick != null) {
+                            Box(Modifier.weight(1f).heightIn(min = 40.dp), contentAlignment = Alignment.CenterEnd) {
+                                Box {
+                                Crossfade(modelLoading, animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(), label = "model loaded") { loading ->
+                                    if (loading) MemohSkeleton(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), "正在加载模型") {
+                                        MemohSkeletonBlock(Modifier.width(18.dp + 154.dp * expansion).height(18.dp), MaterialTheme.shapes.large)
+                                    } else ModelSelector(
+                                        label = modelLabel ?: "暂无可用模型",
+                                        onClick = { plusOpen = false; modelOpen = !modelOpen },
+                                        enabled = enabled && modelLabel != null,
+                                        expansion = expansion,
+                                    )
+                                }
+                                modelMenu?.invoke(modelOpen) { modelOpen = false }
+                                }
                             }
-                            modelMenu?.invoke(modelOpen) { modelOpen = false }
-                        }
-                        Spacer(Modifier.width(6.dp))
-                    } else Spacer(Modifier.weight(1f))
+                            Spacer(Modifier.width(6.dp))
+                        } else Spacer(Modifier.weight(1f))
 
-                    // One button, two states: send when there is text, stop while a
-                    // run is active. The icon swap is what tells the user what a tap
-                    // does, so the two never coexist.
-                    val showStop = isRunning && text.isBlank() && !hasAttachments
-                    val canPressSend = sendEnabled && (showStop || text.isNotBlank() || hasAttachments)
-                    MemohComposerIconButton(
-                        icon = if (showStop) Icons.Filled.Stop else Icons.Filled.ArrowUpward,
-                        contentDescription = if (showStop) "停止生成" else "发送",
-                        enabled = canPressSend,
-                        filled = true,
-                        danger = showStop,
-                        onClick = { if (showStop) onStop() else onSend() },
-                    )
+                        val showStop = isRunning && text.isBlank() && !hasAttachments
+                        val canPressSend = sendEnabled && (showStop || text.isNotBlank() || hasAttachments)
+                        MemohComposerIconButton(
+                            icon = if (showStop) Icons.Filled.Stop else Icons.Filled.ArrowUpward,
+                            contentDescription = if (showStop) "停止生成" else "发送",
+                            enabled = canPressSend,
+                            filled = true,
+                            danger = showStop,
+                            onClick = { if (showStop) onStop() else onSend() },
+                        )
+                    }
                 }
             }
 
@@ -200,6 +231,7 @@ private fun ModelSelector(
     label: String,
     onClick: () -> Unit,
     enabled: Boolean,
+    expansion: Float = 1f,
 ) {
     Row(
         modifier = Modifier
@@ -215,14 +247,16 @@ private fun ModelSelector(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
+            modifier = Modifier.weight(1f, fill = false).clipToBounds().layout { measurable, constraints ->
+                val label = measurable.measure(constraints)
+                layout((label.width * expansion).roundToInt(), label.height) { label.placeRelative(0, 0) }
+            }.graphicsLayer { alpha = ((expansion - .35f) / .65f).coerceIn(0f, 1f) },
         )
-        Icon(
-            imageVector = Icons.Filled.ArrowDropDown,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(18.dp),
-        )
+        Crossfade(targetState = expansion >= .5f, animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(), label = "modelControl") { expanded ->
+            Icon(if (expanded) Icons.Filled.ArrowDropDown else Icons.Filled.Tune,
+                if (expanded) null else "模型：$label", Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -268,6 +302,7 @@ private fun CapabilityRow(capabilities: List<ComposerCapability>, modifier: Modi
 @Composable
 private fun CapabilityChip(capability: ComposerCapability) {
     var open by remember { mutableStateOf(false) }
+    BackHandler(open) { open = false }
 
     Box {
         Row(

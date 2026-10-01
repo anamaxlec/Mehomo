@@ -225,7 +225,7 @@ private fun SystemTurnItem(turn: UITurn, modifier: Modifier = Modifier) {
  * instead of silently lost.
  */
 @Composable
-internal fun MessageBlock(message: UIMessage, isStreaming: Boolean) {
+internal fun MessageBlock(message: UIMessage, isStreaming: Boolean, onToggleDetails: () -> Unit = {}) {
     when (message.type) {
         UIMessage.TYPE_TEXT -> Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.Bottom) {
             TextBlock(content = message.content, modifier = Modifier.weight(1f))
@@ -236,9 +236,9 @@ internal fun MessageBlock(message: UIMessage, isStreaming: Boolean) {
             }
         }
 
-        UIMessage.TYPE_REASONING -> ReasoningCard(message = message, isStreaming = isStreaming)
+        UIMessage.TYPE_REASONING -> ReasoningCard(message = message, isStreaming = isStreaming, onToggleDetails = onToggleDetails)
 
-        UIMessage.TYPE_TOOL -> ToolCard(message = message, isStreaming = isStreaming)
+        UIMessage.TYPE_TOOL -> ToolCard(message = message, isStreaming = isStreaming, onToggleDetails = onToggleDetails)
 
         UIMessage.TYPE_ERROR -> ErrorBanner(message)
 

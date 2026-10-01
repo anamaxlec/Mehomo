@@ -20,7 +20,13 @@ import dev.memoh.feature.settings.SettingsViewModel
 import dev.memoh.feature.sessions.BotFeature
 
 @Composable
-fun ProfileScreen(settings: SettingsViewModel, bot: Bot?, bots: List<Bot>, onSelectBot: (Bot) -> Unit, onOpen: (BotFeature) -> Unit) {
+fun ProfileScreen(
+    settings: SettingsViewModel,
+    bot: Bot?,
+    bots: List<Bot>,
+    onSelectBot: (Bot) -> Unit,
+    onOpen: (BotFeature) -> Unit,
+) {
     val session by settings.session.collectAsState()
     val mode by settings.themeMode.collectAsState()
     val accent by settings.accent.collectAsState()

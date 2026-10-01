@@ -14,6 +14,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -70,7 +75,18 @@ fun ModelMenu(
     enabled: Boolean = true,
 ) {
     var query by remember { mutableStateOf("") }
-    LaunchedEffect(expanded) { if (expanded) query = "" }
+    var searching by remember { mutableStateOf(false) }
+    val searchFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val dismiss = { searching = false; onDismiss() }
+    LaunchedEffect(expanded) { if (expanded) query = "" else searching = false }
+    LaunchedEffect(searching) {
+        if (searching) {
+            androidx.compose.runtime.withFrameNanos { }
+            searchFocus.requestFocus()
+            keyboard?.show()
+        }
+    }
     val selectedModel = models.firstOrNull { it.id == selectedModelId } ?: models.firstOrNull()
     val providerNames = remember(providers) { providers.associate { it.id to it.name } }
     fun providerName(model: ChatModel) = providerNames[model.providerId]?.takeIf(String::isNotBlank)
@@ -92,26 +108,30 @@ fun ModelMenu(
 
     MemohPopupMenu(
         expanded = expanded,
-        onDismiss = onDismiss,
+        onDismiss = dismiss,
         alignment = Alignment.BottomEnd,
         width = 240.dp,
         maxHeight = 400.dp,
         scrollable = false,
+        focusable = searching,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (models.size > 6) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
-                        .height(44.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape)
+                        .height(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                        .clickable(enabled = !searching) { searching = true }
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Icon(Icons.Filled.Search, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    BasicTextField(
+                    if (!searching) Text("搜索模型或供应商", Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else BasicTextField(
                         value = query,
                         onValueChange = { query = it },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).focusRequester(searchFocus),
                         textStyle = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurface),
                         singleLine = true,
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
@@ -175,7 +195,7 @@ fun ModelMenu(
                                 selected = row.value.id == selectedModel?.id,
                                 selectable = true,
                                 enabled = enabled,
-                                onClick = { onSelectModel(row.value.id); onDismiss() },
+                                onClick = { onSelectModel(row.value.id); dismiss() },
                             ) }
                         }
                     }
@@ -203,7 +223,7 @@ fun ModelMenu(
                             toggleableItem(
                                 checked = effort == selectedEffort,
                                 label = reasoningEffortLabel(effort),
-                                onCheckedChange = { onSelectEffort(effort); onDismiss() },
+                                onCheckedChange = { onSelectEffort(effort); dismiss() },
                                 weight = 1f,
                                 enabled = enabled,
                             )

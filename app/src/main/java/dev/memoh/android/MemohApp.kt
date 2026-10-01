@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -39,9 +40,11 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dev.memoh.core.designsystem.component.MemohCornerFab
 import dev.memoh.core.designsystem.component.MemohSectionBar
+import dev.memoh.core.designsystem.component.collapseOnScroll
 import dev.memoh.core.designsystem.motion.MemohMotion
 import dev.memoh.feature.chat.ChatControlsSheet
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.AlertDialog
@@ -171,7 +174,7 @@ fun MemohApp() {
             val viewModel: BotFeatureViewModel = hiltViewModel()
             val state by viewModel.state.collectAsState()
             LaunchedEffect(botId, feature) { viewModel.open(botId, feature) }
-            BotFeatureScreen(state.forScreen(botId, feature), viewModel, onBack = { navController.popBackStack() },
+            BotFeatureScreen(state.forScreen(botId, feature, viewModel), viewModel, onBack = { navController.popBackStack() },
                 onOpenSession = { navController.navigate(Routes.chat(botId, it)) })
         }
 
@@ -278,10 +281,8 @@ private fun MainShell(
     // where they are.
     var barExpanded by remember { mutableStateOf(true) }
 
-    // Sections other than Chats have no scroll container, so a collapse driven
-    // by the list's scroll position has nothing left to answer to there — the
-    // collapsed state would be stuck until the user scrolled a list again.
-    // Reset on every section change so the controls re-enter expanded.
+    // Reset on section changes so a page enters with all navigation choices
+    // visible before its own scrolling can collapse the controls.
     androidx.compose.runtime.LaunchedEffect(sectionIndex) { barExpanded = true }
 
     // Hoisted to the shell so the floating bar and the new-session FAB — which
@@ -320,50 +321,67 @@ private fun MainShell(
         if (requestedFeature != null) features.open(sessionsState.bot?.id.orEmpty(), requestedFeature)
     }
 
+    val pageStates = rememberSaveableStateHolder()
     val section = MainSection.entries[sectionIndex]
+    BackHandler(enabled = section.feature != null) {
+        sectionIndex = MainSection.Profile.ordinal
+    }
     val showNewSession = section == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Chats && sessionsState.bot != null
 
     Scaffold(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            // Section switches slide horizontally, pager-style: the incoming
-            // pane enters from the side of the tapped item, the outgoing one
-            // leaves through the far side, both fading — M3's shared axis.
-            // Direction follows the bar's item order, so moving Chats →
-            // Terminal → Desktop always sweeps left-to-right and back.
             AnimatedContent(
+                modifier = Modifier.fillMaxSize().collapseOnScroll(
+                    expanded = barExpanded,
+                    onExpand = { barExpanded = true },
+                    onCollapse = { barExpanded = false },
+                ),
                 targetState = section,
                 transitionSpec = {
-                    MemohMotion.horizontalSwap(forward = targetState.ordinal >= initialState.ordinal)
+                    when {
+                        initialState == MainSection.Profile && targetState.feature != null ->
+                            MemohMotion.detailEnter() togetherWith MemohMotion.detailExit()
+                        targetState == MainSection.Profile && initialState.feature != null ->
+                            MemohMotion.detailPopEnter() togetherWith MemohMotion.detailPopExit()
+                        else -> MemohMotion.horizontalSwap(forward = targetState.ordinal >= initialState.ordinal)
+                    }
                 },
                 label = "sectionContent",
             ) { sectionState ->
-                when (sectionState) {
-                    MainSection.Chats -> SessionsSection(
-                        viewModel = sessions,
-                        state = sessionsState,
-                        onOpenSession = onOpenSession,
-                        barExpanded = barExpanded,
-                        onBarExpandedChange = { barExpanded = it },
-                        onBotSettings = { sectionIndex = MainSection.Profile.ordinal },
-                        scheduleContent = { BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), BotFeature.Schedules), features, showTitle = false,
-                            onOpenSession = { onOpenSession(sessionsState.bot?.id.orEmpty(), it) }) },
-                        fileContent = { BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), BotFeature.Files), features, showTitle = false) },
-                        onOpenFolder = { folder ->
-                            features.openFolder(sessionsState.bot?.id.orEmpty(), folder.path ?: "/data")
-                            sessions.selectTab(dev.memoh.feature.sessions.BotTab.Files)
-                        },
-                    )
+                pageStates.SaveableStateProvider("${sectionState.name}:${sessionsState.bot?.id.orEmpty()}") {
+                    when (sectionState) {
+                        MainSection.Chats -> SessionsSection(
+                            viewModel = sessions,
+                            state = sessionsState,
+                            onOpenSession = onOpenSession,
+                            onBarExpandedChange = { barExpanded = it },
+                            onBotSettings = { sectionIndex = MainSection.Profile.ordinal },
+                            scheduleContent = { BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), BotFeature.Schedules, features), features, showTitle = false,
+                                onOpenSession = { onOpenSession(sessionsState.bot?.id.orEmpty(), it) }) },
+                            fileContent = { BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), BotFeature.Files, features), features, showTitle = false) },
+                            onOpenFolder = { folder ->
+                                features.openFolder(sessionsState.bot?.id.orEmpty(), folder.path ?: "/data")
+                                sessions.selectTab(dev.memoh.feature.sessions.BotTab.Files)
+                            },
+                        )
 
-                    MainSection.Profile -> ProfileScreen(settings, sessionsState.bot, sessionsState.bots, sessions::selectBot) { feature ->
-                        sectionIndex = MainSection.entries.first { it.feature == feature }.ordinal
+                        MainSection.Profile -> ProfileScreen(
+                            settings = settings,
+                            bot = sessionsState.bot,
+                            bots = sessionsState.bots,
+                            onSelectBot = sessions::selectBot,
+                        ) { feature ->
+                            sectionIndex = MainSection.entries.first { it.feature == feature }.ordinal
+                        }
+                        MainSection.Terminal, MainSection.Desktop, MainSection.Browser -> WorkspaceScreen(
+                            sessionsState.bot?.id.orEmpty(), sessionsState.bot?.displayName ?: sessionsState.bot?.name.orEmpty(),
+                            WorkspaceSurface.valueOf(sectionState.name), workspace, bottomControlSpace = true)
+                        else -> if (sectionState.feature != null) BotFeatureScreen(
+                            featureState.forScreen(sessionsState.bot?.id.orEmpty(), sectionState.feature, features), features,
+                            onBack = { sectionIndex = MainSection.Profile.ordinal },
+                            onOpenSession = { onOpenSession(sessionsState.bot?.id.orEmpty(), it) })
+                        else PendingSectionScreen(section = sectionState)
                     }
-                    MainSection.Terminal, MainSection.Desktop, MainSection.Browser -> WorkspaceScreen(
-                        sessionsState.bot?.id.orEmpty(), sessionsState.bot?.displayName ?: sessionsState.bot?.name.orEmpty(),
-                        WorkspaceSurface.valueOf(sectionState.name), workspace, bottomControlSpace = true)
-                    else -> if (sectionState.feature != null) BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), sectionState.feature!!), features,
-                        onBack = { sectionIndex = MainSection.Profile.ordinal },
-                        onOpenSession = { onOpenSession(sessionsState.bot?.id.orEmpty(), it) })
-                    else PendingSectionScreen(section = sectionState)
                 }
             }
 
@@ -411,16 +429,16 @@ private fun MainShell(
     }
 }
 
-private fun BotFeatureState.forScreen(botId: String, feature: BotFeature): BotFeatureState =
+private fun BotFeatureState.forScreen(botId: String, feature: BotFeature, viewModel: BotFeatureViewModel): BotFeatureState =
     if (this.botId == botId && this.feature == feature) this
-    else BotFeatureState(botId = botId, feature = feature, loading = botId.isNotBlank())
+    else viewModel.cachedState(botId, feature)
+        ?: BotFeatureState(botId = botId, feature = feature, loading = botId.isNotBlank())
 
 @Composable
 private fun SessionsSection(
     viewModel: SessionsViewModel,
     state: dev.memoh.feature.sessions.SessionsUiState,
     onOpenSession: (botId: String, sessionId: String) -> Unit,
-    barExpanded: Boolean,
     onBarExpandedChange: (Boolean) -> Unit,
     onBotSettings: () -> Unit,
     scheduleContent: @Composable () -> Unit,
@@ -451,7 +469,6 @@ private fun SessionsSection(
         scheduleContent = scheduleContent,
         fileContent = fileContent,
         onOpenFolder = onOpenFolder,
-        barExpanded = barExpanded,
         onBarExpandedChange = onBarExpandedChange,
     )
 }

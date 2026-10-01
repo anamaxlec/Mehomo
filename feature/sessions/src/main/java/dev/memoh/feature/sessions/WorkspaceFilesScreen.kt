@@ -112,8 +112,10 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
             } else IconButton(onClick = viewModel::refresh, enabled = !state.loading && !state.busy) { Icon(Icons.Outlined.Refresh, "刷新文件") }
         })
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
-            if (state.loading || state.busy || savingDownload) LinearProgressIndicator(Modifier.fillMaxWidth())
+        MemohRefreshBox(refreshing = (state.loading && state.hasLoaded) || state.busy || savingDownload,
+            onRefresh = viewModel::refresh, enabled = selected == null && !state.busy && !savingDownload,
+            modifier = Modifier.fillMaxSize().padding(padding)) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             state.error?.let { message ->
                 Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
                     Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -168,7 +170,7 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
                     placeholder = { Text("筛选当前文件夹") }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(12.dp))
                 val entries = state.files.filter { state.query.isBlank() || it.name.contains(state.query, ignoreCase = true) }
-                MemohLoadingContent(state.loading && state.files.isEmpty(), Modifier.weight(1f),
+                MemohLoadingContent(state.loading && !state.hasLoaded && state.files.isEmpty(), Modifier.weight(1f),
                     placeholder = { MemohListSkeleton(description = "正在加载文件列表", leading = true, rows = 6) }) {
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 108.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     if (!state.loading && entries.isEmpty()) item { MemohEmptyState(title = if (state.query.isBlank()) "文件夹为空" else "没有匹配的文件", description = "") }
@@ -195,6 +197,7 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
                 }
             }
         }
+    }
     }
     }
     nameAction?.let { action ->

@@ -1,6 +1,13 @@
 package dev.memoh.feature.sessions
 
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,11 +32,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.model.*
 import dev.memoh.core.network.apiBody
-import dev.memoh.core.designsystem.component.MemohLoadingContent
 import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohListSkeleton
 import dev.memoh.core.designsystem.component.MemohPageTopBar
+import dev.memoh.core.designsystem.component.MemohRefreshBox
 import kotlinx.serialization.json.*
 import java.text.NumberFormat
 import java.time.Instant
@@ -114,23 +121,14 @@ fun BotFeatureScreen(
             actions = { FilledTonalIconButton(onClick = viewModel::refresh, enabled = !state.busy && !state.loading,
                 shapes = IconButtonDefaults.shapes()) { Icon(Icons.Filled.Refresh, "刷新", Modifier.size(22.dp)) } })
     }) { padding ->
-        val contentUnavailable = when (state.feature) {
-            BotFeature.Memory -> state.memories.isEmpty()
-            BotFeature.Schedules -> state.schedules.isEmpty()
-            BotFeature.Usage -> state.usage == null
-            BotFeature.Apps -> if (state.browsing) state.marketApps.isEmpty() else state.apps.isEmpty()
-            BotFeature.Skills -> if (state.browsing) state.marketSkills.isEmpty() else state.skills.isEmpty()
-            BotFeature.Mcp -> state.connections.isEmpty()
-            BotFeature.Files -> state.files.isEmpty()
-        }
-        MemohLoadingContent(state.loading && contentUnavailable, Modifier.padding(padding).consumeWindowInsets(padding).imePadding(),
-            placeholder = { MemohListSkeleton(Modifier.padding(16.dp), "正在加载${state.feature.title}", detailed = true, rows = 4) }) {
+        val initialLoading = state.loading && !state.hasLoaded
+        MemohRefreshBox(refreshing = (state.loading && state.hasLoaded) || state.busy,
+            onRefresh = viewModel::refresh, enabled = !state.busy && !initialLoading && state.botId.isNotBlank(),
+            modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 100.dp),
             verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-            // Keep the status slot present so loading does not shift lazy item indices.
             item {
                 if (state.botId.isBlank()) EmptyNote("请选择一个 Bot", "选择 Bot 后查看和管理它的工作空间。")
-                if (state.loading || state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 state.error?.let { ErrorNotice(it, viewModel::refresh, viewModel::dismiss) }
                 state.notice?.let {
                     Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.secondaryContainer) {
@@ -165,6 +163,9 @@ fun BotFeatureScreen(
                         }
                         }
                     }
+                    if (initialLoading) item(key = "initial-feature-loading") {
+                        MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
+                    }
                     itemsIndexed(state.memories) { index, memory ->
                         FeatureCard(memory.memory ?: "空记忆", featureTime(memory.updatedAt ?: memory.createdAt), index, state.memories.size, titleIsBody = true) {
                             if (memory.id != null) {
@@ -181,6 +182,9 @@ fun BotFeatureScreen(
                 BotFeature.Schedules -> {
                     item { Box(Modifier.padding(bottom = 14.dp)) { FeatureAction("新建日程", Icons.Filled.Add,
                         { scheduleEditor() }, enabled = !state.busy && state.botId.isNotBlank(), primary = true) } }
+                    if (initialLoading) item(key = "initial-feature-loading") {
+                        MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
+                    }
                     itemsIndexed(state.schedules) { index, schedule ->
                         FeatureCard(schedule.name ?: "未命名日程", "${schedule.pattern.orEmpty()} · 已运行 ${schedule.currentCalls ?: 0} 次${schedule.maxCalls?.let { " / $it" }.orEmpty()}", index, state.schedules.size) {
                             Column {
@@ -223,8 +227,13 @@ fun BotFeatureScreen(
                         }
                         }
                     }
-                    if (state.usage != null) item {
-                        val all = state.usage?.let { it.chat.orEmpty() + it.discuss.orEmpty() + it.schedule.orEmpty() + it.acpAgent.orEmpty() }.orEmpty()
+                    if (initialLoading) item(key = "initial-feature-loading") {
+                        MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
+                    }
+                    item(key = "usage-summary") {
+                        FeatureSwap(state.usage) { usage ->
+                        if (usage != null) {
+                        val all = usage.chat.orEmpty() + usage.discuss.orEmpty() + usage.schedule.orEmpty() + usage.acpAgent.orEmpty()
                         FeatureCard("Token 用量", "所选时间内的服务端记录", 0, if (state.metrics != null) 2 else 1) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 UsageTokenStats(all.sumOf { it.inputTokens ?: 0 }, all.sumOf { it.outputTokens ?: 0 })
@@ -234,6 +243,8 @@ fun BotFeatureScreen(
                                 )
                             }
                         }
+                        }
+                        }
                     }
                     state.metrics?.let { metrics -> item {
                         FeatureCard("云端电脑", "资源监控", if (state.usage != null) 1 else 0, if (state.usage != null) 2 else 1) {
@@ -241,22 +252,26 @@ fun BotFeatureScreen(
                         }
                     } }
                     if (!state.usage?.byModel.isNullOrEmpty()) item { FeatureSectionLabel("模型用量") }
-                    itemsIndexed(state.usage?.byModel.orEmpty()) { index, model ->
-                        FeatureCard(usageModelName(model.modelName, model.modelSlug), null, index, state.usage?.byModel.orEmpty().size) {
+                    itemsIndexed(state.usage?.byModel.orEmpty(), key = { index, model -> "model:${model.modelId ?: model.modelSlug}:$index" }) { index, model ->
+                        FeatureSwap(model, Modifier.animateItem()) { shown ->
+                        FeatureCard(usageModelName(shown.modelName, shown.modelSlug), null, index, state.usage?.byModel.orEmpty().size) {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                model.providerName?.takeIf(String::isNotBlank)?.let { UsageInfo("供应商 · $it", Icons.Filled.Cloud) }
-                                UsageTokenStats(model.inputTokens ?: 0, model.outputTokens ?: 0)
+                                shown.providerName?.takeIf(String::isNotBlank)?.let { UsageInfo("供应商 · $it", Icons.Filled.Cloud) }
+                                UsageTokenStats(shown.inputTokens ?: 0, shown.outputTokens ?: 0)
                             }
                         }
+                        }
                     }
-                    item {
+                    if (!initialLoading) item {
                         FeatureSectionLabel("使用记录${if (state.recordsError == null && state.usage != null) "（${state.recordCount}）" else ""}")
                         state.recordsError?.let { ErrorNotice(it, viewModel::refresh, viewModel::dismiss) }
                         if (!state.loading && state.usage != null && state.recordsError == null && state.records.isEmpty())
                             EmptyNote("暂无使用记录", "所选时间内还没有模型调用记录。")
                     }
-                    itemsIndexed(state.records) { index, record -> UsageRecordCard(record, index, state.records.size, onOpenSession) }
-                    if (state.records.size < state.recordCount) item { FeatureActions { FeatureAction("加载更多记录", Icons.Filled.ExpandMore, viewModel::moreRecords, enabled = !state.busy) } }
+                    itemsIndexed(state.records, key = { index, record -> "record:${record.id ?: index}" }) { index, record ->
+                        FeatureSwap(record, Modifier.animateItem()) { shown -> UsageRecordCard(shown, index, state.records.size, onOpenSession) }
+                    }
+                    if (state.records.size < state.recordCount) item { FeatureActions { FeatureAction("加载更多记录", Icons.Filled.ExpandMore, viewModel::moreRecords, enabled = !state.busy && !state.loading) } }
                 }
                 BotFeature.Apps, BotFeature.Skills -> {
                     val apps = state.feature == BotFeature.Apps
@@ -268,25 +283,30 @@ fun BotFeatureScreen(
                             toggleableItem(checked = state.browsing, onCheckedChange = { if (!state.browsing) viewModel.browse(true) },
                                 label = "商店", icon = { Icon(Icons.Filled.Storefront, null, Modifier.size(18.dp)) }, weight = 1f)
                         }
-                        if (!state.browsing) FeatureAction(if (apps) "检查更新" else "创建技能", if (apps) Icons.Filled.Update else Icons.Filled.Add,
+                        FeatureSwap(state.browsing) { browsing ->
+                        if (!browsing) FeatureAction(if (apps) "检查更新" else "创建技能", if (apps) Icons.Filled.Update else Icons.Filled.Add,
                             { if (apps) viewModel.checkUpdates() else skillEditor() }, enabled = !state.busy, primary = true)
-                        if (state.browsing) SearchField(state.query, viewModel::query, viewModel::refresh, if (apps) "搜索应用" else "搜索技能")
+                        else SearchField(state.query, viewModel::query, viewModel::refresh, if (apps) "搜索应用" else "搜索技能")
+                        }
                         if (state.progress.isNotEmpty()) Card(shape = MaterialTheme.shapes.large,
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
                             Column(Modifier.fillMaxWidth().padding(12.dp)) { Text("操作进度", style = MaterialTheme.typography.labelLarge); state.progress.takeLast(5).forEach { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 2) } }
                         }
                         }
                     }
-                    if (state.browsing && apps) itemsIndexed(state.marketApps) { index, app -> FeatureCard(app.name ?: app.appId ?: "应用", app.description, index, state.marketApps.size) {
+                    if (initialLoading) item(key = "initial-feature-loading") {
+                        MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
+                    }
+                    if (state.browsing && apps) itemsIndexed(state.marketApps, key = { index, app -> "market-app:${app.appId}:$index" }) { index, app -> FeatureCard(app.name ?: app.appId ?: "应用", app.description, index, state.marketApps.size, modifier = Modifier.animateItem()) {
                         FeatureActions { FeatureAction("安装 ${app.version.orEmpty()}".trim(), Icons.Filled.Download,
                             { confirmation = Confirmation("安装 ${app.name.orEmpty()}", "将应用及所需依赖安装到当前 Bot。", { if (app.registryId != null && app.appId != null) viewModel.install(requireNotNull(app.registryId), requireNotNull(app.appId)) }) }, enabled = !state.busy && app.registryId != null && app.appId != null) }
                     } }
-                    else if (state.browsing) itemsIndexed(state.marketSkills) { index, skill -> FeatureCard(skill.name ?: skill.skillId ?: "技能", skill.description, index, state.marketSkills.size) {
+                    else if (state.browsing) itemsIndexed(state.marketSkills, key = { index, skill -> "market-skill:${skill.skillId}:$index" }) { index, skill -> FeatureCard(skill.name ?: skill.skillId ?: "技能", skill.description, index, state.marketSkills.size, modifier = Modifier.animateItem()) {
                         FeatureActions { FeatureAction("安装所属应用", Icons.Filled.Download,
                             { confirmation = Confirmation("安装技能所属应用", "此技能属于 ${skill.appId.orEmpty()}，将同时安装应用中的其他组件。", { if (skill.registryId != null && skill.appId != null) viewModel.install(requireNotNull(skill.registryId), requireNotNull(skill.appId)) }) }, enabled = !state.busy && skill.registryId != null && skill.appId != null) }
                     } }
-                    else if (apps) itemsIndexed(state.apps) { index, app -> FeatureCard(app.name ?: app.appId ?: "应用",
-                        listOf(app.version, featureStatus(app.status)).filterNot { it.isNullOrBlank() }.joinToString(" · "), index, state.apps.size) {
+                    else if (apps) itemsIndexed(state.apps, key = { index, app -> "installed-app:${app.appId}:$index" }) { index, app -> FeatureCard(app.name ?: app.appId ?: "应用",
+                        listOf(app.version, featureStatus(app.status)).filterNot { it.isNullOrBlank() }.joinToString(" · "), index, state.apps.size, modifier = Modifier.animateItem()) {
                         Column {
                             app.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                             Text(app.description.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 3)
@@ -303,7 +323,7 @@ fun BotFeatureScreen(
                             }
                         }
                     } }
-                    else itemsIndexed(state.skills) { index, skill -> FeatureCard(skill.name ?: "技能", skill.description, index, state.skills.size) {
+                    else itemsIndexed(state.skills, key = { index, skill -> "installed-skill:${skill.sourcePath}:$index" }) { index, skill -> FeatureCard(skill.name ?: "技能", skill.description, index, state.skills.size, modifier = Modifier.animateItem()) {
                         Column {
                             Text("${if (skill.managed == true) "应用管理" else "自定义"} · ${featureStatus(skill.state).orEmpty()}", style = MaterialTheme.typography.labelSmall)
                             FeatureActions {
@@ -323,6 +343,9 @@ fun BotFeatureScreen(
                 }
                 BotFeature.Mcp -> {
                     item { Box(Modifier.padding(bottom = 14.dp)) { FeatureAction("添加 MCP", Icons.Filled.Add, { mcpEditor() }, enabled = !state.busy, primary = true) } }
+                    if (initialLoading) item(key = "initial-feature-loading") {
+                        MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
+                    }
                     itemsIndexed(state.connections) { index, connection -> FeatureCard(connection.name ?: "MCP", "${connection.type.orEmpty()} · ${featureStatus(connection.status).orEmpty()}", index, state.connections.size) {
                         Column {
                             connection.statusMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
@@ -435,11 +458,23 @@ fun BotFeatureScreen(
         modifier = Modifier.fillMaxWidth(),
     )
 }
+/** Preserve the outgoing value while the new result arrives and changes size. */
+@Composable private fun <T> FeatureSwap(value: T, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {
+    val motion = MaterialTheme.motionScheme
+    val drift = with(LocalDensity.current) { 20.dp.roundToPx() }
+    AnimatedContent(targetState = value, modifier = modifier.fillMaxWidth(),
+        transitionSpec = {
+            (fadeIn(motion.defaultEffectsSpec()) + slideInHorizontally(motion.defaultSpatialSpec()) { drift })
+                .togetherWith(fadeOut(motion.fastEffectsSpec()) + slideOutHorizontally(motion.defaultSpatialSpec()) { -drift / 2 })
+                .using(SizeTransform(clip = false, sizeAnimationSpec = { _, _ -> motion.defaultSpatialSpec() }))
+        }, label = "featureResult") { shown -> content(shown) }
+}
+
 @Composable private fun FeatureCard(title: String, subtitle: String?, index: Int = 0, count: Int = 1,
-    titleIsBody: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
+    titleIsBody: Boolean = false, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Card(shape = ListItemDefaults.segmentedShapes(index, count).shape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
-        modifier = Modifier.fillMaxWidth()) {
+        modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = if (titleIsBody) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleMedium)
             subtitle?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

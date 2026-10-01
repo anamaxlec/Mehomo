@@ -7,7 +7,7 @@ html,body{margin:0;height:100vh;overflow:hidden;background:#19181b}#terminal{pos
 </style><script src="xterm.js"></script><script src="fit.js"></script></head>
 <body><div id="terminal" aria-label="云端终端"></div><script>
 'use strict';
-const term = new Terminal({fontFamily:'monospace',fontSize:14,lineHeight:1.2,cursorBlink:true,cursorStyle:'bar',scrollback:5000,screenReaderMode:true,theme:{background:'#19181b',foreground:'#f3eff5'}});
+const term = new Terminal({fontFamily:'monospace',fontSize:14,lineHeight:1.2,cursorBlink:true,cursorStyle:'bar',scrollback:5000,screenReaderMode:true,theme:window.initialWorkspaceTheme??{background:'#19181b',foreground:'#f3eff5'}});
 const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(document.getElementById('terminal'));
 term.onData(data => NativeWorkspace.input(data));
 term.onBinary(data => NativeWorkspace.binary(btoa(data)));
@@ -17,7 +17,8 @@ window.terminalWrite = data => {
  term.write(bytes);
 };
 window.terminalFocus = () => term.focus();
-window.workspaceTheme = theme => { term.options.theme=theme;document.body.style.background=theme.background; };
+window.workspaceTheme = theme => { term.options.theme=theme;document.documentElement.style.background=theme.background;document.body.style.background=theme.background;document.documentElement.style.colorScheme=theme.colorScheme??'dark'; };
+if(window.initialWorkspaceTheme)workspaceTheme(window.initialWorkspaceTheme);
 new ResizeObserver(() => fit.fit()).observe(document.getElementById('terminal'));
 requestAnimationFrame(() => {fit.fit();NativeWorkspace.ready();});
 </script></body></html>

@@ -99,7 +99,7 @@ import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohSkeleton
 import dev.memoh.core.designsystem.component.MemohSkeletonBlock
-import dev.memoh.core.designsystem.component.collapseOnScroll
+import dev.memoh.core.designsystem.component.MemohRefreshBox
 import dev.memoh.core.model.Bot
 import dev.memoh.core.model.Session
 import dev.memoh.core.model.Workdir
@@ -133,16 +133,12 @@ fun SessionsScreen(
     fileContent: (@Composable () -> Unit)? = null,
     onOpenFolder: (Workdir) -> Unit = {},
     modifier: Modifier = Modifier,
-    /** False once the user has scrolled past the bar's collapse threshold. */
-    barExpanded: Boolean = true,
     onBarExpandedChange: (Boolean) -> Unit = {},
 ) {
     var searching by remember { mutableStateOf(false) }
 
-    // The collapse state belongs to the session list's scroll position. Switching
-    // tabs replaces that content — the Files/Schedules panes don't scroll and the
-    // list restarts at the top — so the collapsed bar would be stranded with
-    // nothing to expand it again. Reset on every tab change.
+    // The shell observes all panes' scrolls. Begin a tab switch with the full
+    // navigation bar visible before the new pane starts scrolling.
     androidx.compose.runtime.LaunchedEffect(state.tab) {
         onBarExpandedChange(true)
     }
@@ -216,7 +212,9 @@ fun SessionsScreen(
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
             )
 
-        Box(modifier = Modifier.fillMaxSize()) {
+        MemohRefreshBox(refreshing = state.loading && state.sessions.isNotEmpty() && state.tab == BotTab.Chats,
+            onRefresh = onRetry, enabled = state.tab == BotTab.Chats && state.initialized,
+            modifier = Modifier.fillMaxSize()) {
             // Tab switches get a shared-axis style transition: the incoming pane
             // slides in from the direction of the tapped segment while fading up,
             // the outgoing one slides the other way and fades down. Direction is
@@ -295,16 +293,11 @@ fun SessionsScreen(
                             onBeginRename = onBeginRename,
                             onBeginDelete = onBeginDelete,
                             onOpenFolder = onOpenFolder,
-                            barExpanded = barExpanded,
-                            onBarExpandedChange = onBarExpandedChange,
                         )
                     }
                 }
                 }
             }
-
-            if (state.loading && state.sessions.isNotEmpty() && state.tab == BotTab.Chats)
-                androidx.compose.material3.LinearProgressIndicator(Modifier.align(Alignment.TopCenter).fillMaxWidth())
 
             state.error?.let { message ->
                 ErrorBar(
@@ -399,46 +392,46 @@ private fun BotTitle(
         ?: selected?.name
         ?: "会话"
 
-    Box(Modifier.padding(start = 16.dp)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier
-                .clickable { open = true }
-                .padding(vertical = 4.dp),
-        ) {
-            Column {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(
-                        text = name,
-                        style = MaterialTheme.typography.titleLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Icon(
-                        imageVector = Icons.Filled.ArrowDropDown,
-                        contentDescription = "Bot 菜单",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-                Box(Modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
-                    if (countLoading) {
-                        MemohSkeleton(description = "正在加载会话数量") {
-                            MemohSkeletonBlock(Modifier.width(64.dp).height(14.dp))
-                        }
-                    } else Text(
-                        text = "$sessionCount 个会话",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+    Box(Modifier.padding(start = 8.dp)) {
+        Surface(onClick = { open = true }, shape = MaterialTheme.shapes.large, color = Color.Transparent) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Column {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = name,
+                            style = MaterialTheme.typography.titleLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Icon(
+                            imageVector = Icons.Filled.ArrowDropDown,
+                            contentDescription = "Bot 菜单",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    Box(Modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
+                        if (countLoading) {
+                            MemohSkeleton(description = "正在加载会话数量") {
+                                MemohSkeletonBlock(Modifier.width(64.dp).height(14.dp))
+                            }
+                        } else Text(
+                            text = "$sessionCount 个会话",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
-
         MemohPopupMenu(
             expanded = open,
             onDismiss = { open = false },
@@ -526,19 +519,10 @@ private fun SessionList(
     onBeginRename: (Session) -> Unit,
     onBeginDelete: (Session) -> Unit,
     onOpenFolder: (Workdir) -> Unit,
-    barExpanded: Boolean,
-    onBarExpandedChange: (Boolean) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
-            .fillMaxSize()
-            // The section bar collapses as the list scrolls, using M3E's own
-            // nested-scroll behaviour rather than a first-visible-index check.
-            .collapseOnScroll(
-                expanded = barExpanded,
-                onExpand = { onBarExpandedChange(true) },
-                onCollapse = { onBarExpandedChange(false) },
-            ),
+            .fillMaxSize(),
         // The floating controls hover over the last row, so the list reserves
         // room for them rather than hiding it.
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp),

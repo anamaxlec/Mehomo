@@ -36,7 +36,8 @@ function key(event,down){const sym=keys[event.key]??(Array.from(event.key).lengt
 video.addEventListener('keydown',event=>key(event,true));video.addEventListener('keyup',event=>key(event,false));
 window.desktopKey=name=>{const sym=keys[name];if(rfb&&sym){rfb.sendKey(sym);return;}if(sym){send({type:'key',keysym:sym,down:true});send({type:'key',keysym:sym,down:false});}};
 window.desktopText=text=>{for(const char of text){const sym=char==='\n'?keys.Enter:symbol(char);if(rfb){rfb.sendKey(sym);continue;}send({type:'key',keysym:sym,down:true});send({type:'key',keysym:sym,down:false});}};
-window.workspaceTheme=theme=>{document.body.style.background=theme.background;};
+window.workspaceTheme=theme=>{document.documentElement.style.background=theme.background;document.body.style.background=theme.background;document.documentElement.style.colorScheme=theme.colorScheme??'dark';};
+if(window.initialWorkspaceTheme)workspaceTheme(window.initialWorkspaceTheme);
 // The channel contains bytes only. Runtime tokens and Cloud cookies stay in native networking.
 class NativeChannel {
   constructor(){this.readyState=0;this.binaryType='arraybuffer';this.protocol='';this.onopen=null;this.onclose=null;this.onmessage=null;this.onerror=null;}

@@ -1,10 +1,7 @@
 package dev.memoh.feature.chat.components
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -16,6 +13,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,7 +25,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.outlined.Psychology
@@ -57,6 +55,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.semantics.Role
+import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
@@ -81,6 +84,7 @@ fun ReasoningCard(
     message: UIMessage,
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
+    onToggleDetails: () -> Unit = {},
 ) {
     // Fold once the run reports a duration, unless the user opened it manually.
     var userExpanded by remember { mutableStateOf<Boolean?>(null) }
@@ -89,20 +93,11 @@ fun ReasoningCard(
     val settled = !thinking
     val expanded = userExpanded ?: !settled
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { userExpanded = !expanded },
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+    ActivityCard(
+        expanded = expanded,
+        onToggle = { onToggleDetails(); userExpanded = !expanded },
+        modifier = modifier,
+        header = {
             ActivityGlyph(Icons.Outlined.Psychology, reasoning = true)
             Text(
                 text = when {
@@ -114,64 +109,35 @@ fun ReasoningCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
-            if (thinking) {
-                LoadingIndicator(Modifier.size(18.dp))
-            }
-            Icon(
-                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "收起" else "展开",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-        AnimatedVisibility(
-            visible = expanded && message.content.isNotBlank(),
-            enter = expandVertically(MaterialTheme.motionScheme.fastSpatialSpec(), expandFrom = Alignment.Top) +
-                fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
-            exit = shrinkVertically(MaterialTheme.motionScheme.fastSpatialSpec(), shrinkTowards = Alignment.Top) +
-                fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
-        ) {
-            Column {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = message.content,
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontStyle = FontStyle.Italic,
-                        lineHeight = MaterialTheme.typography.bodyMedium.lineHeight,
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+            if (thinking) LoadingIndicator(Modifier.size(18.dp))
+        },
+    ) {
+        if (message.content.isNotBlank()) Text(
+            text = message.content,
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontStyle = FontStyle.Italic,
+                lineHeight = MaterialTheme.typography.bodyMedium.lineHeight,
+            ),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
-/**
- * The tool-activity card: name and a one-line summary while collapsed, full
- * input/output/diff when expanded.
- */
+/** Tool name and summary stay in place while its details reveal below them. */
 @Composable
 fun ToolCard(
     message: UIMessage,
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
+    onToggleDetails: () -> Unit = {},
 ) {
     var expanded by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded },
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+    val summary = toolSummary(message)
+    ActivityCard(
+        expanded = expanded,
+        onToggle = { onToggleDetails(); expanded = !expanded },
+        modifier = modifier,
+        header = {
             ActivityGlyph(toolIcon(message.name))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -181,16 +147,13 @@ fun ToolCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                val summary = toolSummary(message)
-                if (summary.isNotBlank()) {
-                    Text(
-                        text = summary,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = if (expanded) Int.MAX_VALUE else 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                if (summary.isNotBlank()) Text(
+                    text = summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             if (message.running) LoadingIndicator(Modifier.size(18.dp))
             else message.elapsedTimeSeconds?.let { seconds ->
@@ -200,36 +163,62 @@ fun ToolCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Icon(
-                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "收起" else "展开",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
+        },
+    ) {
+        if (summary.isNotBlank()) Text(summary, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        message.input?.let { MonoBlock(label = "输入", text = renderJson(it)) }
+        message.output?.let { MonoBlock(label = "输出", text = renderJson(it)) }
+        message.diff?.takeIf(String::isNotBlank)?.let {
+            MonoBlock(label = "改动", text = it, highlightDiff = true)
         }
+        message.progress?.takeIf { it.isNotEmpty() }?.let { progress ->
+            MonoBlock(label = "进度", text = progress.joinToString("\n") { renderJson(it) })
+        }
+    }
+}
 
-        if (expanded) {
-            Spacer(Modifier.height(10.dp))
-            message.input?.let { input ->
-                MonoBlock(label = "输入", text = renderJson(input))
-            }
-            message.output?.let { output ->
-                Spacer(Modifier.height(8.dp))
-                MonoBlock(label = "输出", text = renderJson(output))
-            }
-            message.diff?.takeIf(String::isNotBlank)?.let { diff ->
-                Spacer(Modifier.height(8.dp))
-                MonoBlock(label = "改动", text = diff, highlightDiff = true)
-            }
-            val progress = message.progress
-            if (!progress.isNullOrEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                MonoBlock(
-                    label = "进度",
-                    text = progress.joinToString("\n") { renderJson(it) },
-                )
-            }
+/** One bounded reveal, with no content crossfade or spring overshoot on reversal. */
+@Composable
+private fun ActivityCard(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier,
+    header: @Composable RowScope.() -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val reveal by animateFloatAsState(
+        targetValue = if (expanded) 1f else 0f,
+        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+        label = "activityDetails",
+    )
+    val shape = MaterialTheme.shapes.medium
+    Column(modifier.fillMaxWidth().clip(shape).background(MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(shape)
+                .clickable(role = Role.Button, onClickLabel = if (expanded) "收起" else "展开", onClick = onToggle)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            header()
+            Icon(Icons.Filled.ExpandMore, if (expanded) "收起" else "展开",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp).graphicsLayer { rotationZ = reveal * 180f })
         }
+        // Keep the same details until the reveal reaches zero. A quick second
+        // tap retargets this value from its current height instead of composing
+        // a second enter/exit transition.
+        if (expanded || reveal > 0f) Column(
+            modifier = Modifier.fillMaxWidth().clipToBounds().layout { measurable, constraints ->
+                val placeable = measurable.measure(constraints.copy(minHeight = 0))
+                layout(placeable.width, (placeable.height * reveal.coerceIn(0f, 1f)).roundToInt()) {
+                    placeable.placeRelative(0, 0)
+                }
+            }.padding(start = 12.dp, end = 12.dp, bottom = 10.dp, top = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            content = content,
+        )
     }
 }
 

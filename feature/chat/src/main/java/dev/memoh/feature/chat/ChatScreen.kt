@@ -11,6 +11,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.size
+import dev.memoh.core.designsystem.motion.MemohMotion
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,7 +52,6 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Close
 import dev.memoh.core.designsystem.component.MemohMenuGroup
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.DropdownMenu
@@ -149,6 +153,7 @@ fun ChatScreen(
     val run = state.runtime.run
     var initiallyPositioned by remember(state.session?.id) { mutableStateOf(false) }
     var followingLatest by remember(state.session?.id) { mutableStateOf(true) }
+    var jumpingToLatest by remember(state.session?.id) { mutableStateOf(false) }
     val latestState by androidx.compose.runtime.rememberUpdatedState(state)
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     val scrollSpec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
@@ -181,6 +186,7 @@ fun ChatScreen(
         androidx.compose.runtime.snapshotFlow { latestState to listState.layoutInfo }.conflate().collect {
             androidx.compose.runtime.withFrameNanos { }
             if (latestState.historyLoading) return@collect
+            if (jumpingToLatest) return@collect
             if (latestState.settledHistory.isEmpty() && latestState.liveMessages.isEmpty() &&
                 latestState.liveUserTurns.isEmpty() && latestState.pending.isEmpty() && !latestState.isRunning) {
                 initiallyPositioned = true
@@ -327,7 +333,7 @@ fun ChatScreen(
                                     val keys = assistantBlockKeys(turn.turnId, turn.safeMessages)
                                     itemsIndexed(turn.safeMessages, key = { index, _ -> keys[index] }) { index, message ->
                                         Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
-                                            MessageBlock(message, isStreaming = false)
+                                            MessageBlock(message, isStreaming = false, onToggleDetails = { followingLatest = false })
                                         }
                                     }
                                 } else item(key = "turn-${turn.listKey}") {
@@ -356,7 +362,8 @@ fun ChatScreen(
                                 val keys = assistantBlockKeys(run.turnId, liveMessages)
                                 itemsIndexed(liveMessages, key = { index, _ -> keys[index] }) { index, message ->
                                     Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
-                                        MessageBlock(message, isStreaming = run?.isTerminal == false && index == liveMessages.lastIndex)
+                                        MessageBlock(message, isStreaming = run?.isTerminal == false && index == liveMessages.lastIndex,
+                                            onToggleDetails = { followingLatest = false })
                                     }
                                 }
                                 item(key = "assistant-${run.turnId}:actions") {
@@ -390,24 +397,32 @@ fun ChatScreen(
                 }
 
                 // Jump-to-bottom, shown only when the reader has scrolled away.
-                if (initiallyPositioned && !atBottom && !followingLatest) {
-                    HorizontalFloatingToolbar(
-                        expanded = true,
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(16.dp),
-                    ) {
-                        IconButton(
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = initiallyPositioned && !atBottom && !followingLatest && !jumpingToLatest,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                    enter = MemohMotion.controlEnter(), exit = MemohMotion.controlExit(),
+                ) {
+                    val interaction = remember { MutableInteractionSource() }
+                    val pressed by interaction.collectIsPressedAsState()
+                    val scale by animateFloatAsState(if (pressed) .92f else 1f,
+                        MaterialTheme.motionScheme.fastEffectsSpec(), label = "jumpToLatestPress")
+                    SmallFloatingActionButton(
+                            modifier = Modifier.size(40.dp).graphicsLayer { scaleX = scale; scaleY = scale },
+                            shape = CircleShape,
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            contentColor = MaterialTheme.colorScheme.primary,
+                            elevation = FloatingActionButtonDefaults.loweredElevation(),
+                            interactionSource = interaction,
                             onClick = {
+                                jumpingToLatest = true
                                 scope.launch {
-                                    followingLatest = true
-                                    listState.scrollToLatest(scrollSpec)
+                                    try { listState.scrollToLatest(scrollSpec) }
+                                    finally { jumpingToLatest = false; followingLatest = atBottom }
                                 }
                             },
                         ) {
-                            Icon(Icons.Filled.ArrowDownward, contentDescription = "回到最新")
+                            Icon(Icons.Filled.ArrowDownward, contentDescription = "回到最新", modifier = Modifier.size(20.dp))
                         }
-                    }
                 }
             }
 
@@ -584,7 +599,9 @@ fun ChatScreen(
 private suspend fun LazyListState.scrollToLatest(animationSpec: AnimationSpec<Float>? = null) {
     val lastIndex = layoutInfo.totalItemsCount - 1
     if (lastIndex < 0) return
-    if (layoutInfo.visibleItemsInfo.none { it.index == lastIndex }) scrollToItem(lastIndex)
+    if (layoutInfo.visibleItemsInfo.none { it.index == lastIndex }) {
+        if (animationSpec == null) scrollToItem(lastIndex) else animateScrollToItem(lastIndex)
+    }
     val last = layoutInfo.visibleItemsInfo.firstOrNull { it.index == lastIndex } ?: return
     val overflow = last.offset + last.size + layoutInfo.afterContentPadding - layoutInfo.viewportEndOffset
     if (overflow > 0) {

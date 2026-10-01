@@ -23,6 +23,7 @@ data class BotFeatureState(
     val botId: String = "",
     val feature: BotFeature = BotFeature.Memory,
     val loading: Boolean = false,
+    val hasLoaded: Boolean = false,
     val busy: Boolean = false,
     val error: String? = null,
     val notice: String? = null,
@@ -67,11 +68,22 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     val state = _state.asStateFlow()
     private var loadJob: Job? = null
     private var subscription: Job? = null
+    private val pages = BotFeaturePages()
+    private var pageGeneration = repository.generation
+
+    fun cachedState(botId: String, feature: BotFeature): BotFeatureState? =
+        pages.get(botId, feature, repository.generation)
 
     fun open(botId: String, feature: BotFeature) {
-        if (_state.value.botId == botId && _state.value.feature == feature) return
+        val generation = repository.generation
+        if (pageGeneration == generation) {
+            if (_state.value.botId == botId && _state.value.feature == feature) return
+            pages.save(_state.value, generation)
+        }
+        pageGeneration = generation
         loadJob?.cancel()
-        _state.value = BotFeatureState(botId = botId, feature = feature)
+        _state.value = cachedState(botId, feature)
+            ?: BotFeatureState(botId = botId, feature = feature, loading = botId.isNotBlank())
         refresh()
     }
 
@@ -80,12 +92,12 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
         if (state.value.busy || days == state.value.usageDays) return
         val today = LocalDate.now(ZoneOffset.UTC)
         _state.update { it.copy(usageDays = days, usageFrom = today.minusDays(days.toLong() - 1).toString(),
-            usageTo = today.plusDays(1).toString(), usage = null, records = emptyList(), recordCount = 0, recordsError = null) }
+            usageTo = today.plusDays(1).toString(), recordsError = null) }
         refresh()
     }
     fun dismiss() { _state.update { it.copy(error = null, notice = null) } }
     fun browse(value: Boolean) {
-        _state.update { it.copy(browsing = value, query = "", marketPage = 1, marketApps = emptyList(), marketSkills = emptyList()) }
+        _state.update { it.copy(browsing = value, query = "", marketPage = 1) }
         refresh()
     }
 
@@ -136,12 +148,12 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                 }
                 if (generation == repository.generation && itMatches(current)) _state.update {
                     // A list refresh can run while the user types into a file editor.
-                    loaded.copy(loading = false, busy = it.busy, progress = it.progress, removal = it.removal,
+                    loaded.copy(loading = false, hasLoaded = true, busy = it.busy, progress = it.progress, removal = it.removal,
                         query = it.query, selectedFile = it.selectedFile, fileDocument = it.fileDocument,
                         fileDraft = it.fileDraft, fileNew = it.fileNew, fileEditing = it.fileEditing)
                 }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(loading = false, error = e.message ?: "加载失败") } }
+            catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(loading = false, error = e.message ?: "加载失败") } }
         }
     }
 
@@ -183,8 +195,11 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     private fun itMatches(current: BotFeatureState) = current.botId == state.value.botId && current.feature == state.value.feature
 
     fun openFolder(botId: String, path: String) {
+        val generation = repository.generation
+        if (pageGeneration == generation) pages.save(_state.value, generation)
+        pageGeneration = generation
         loadJob?.cancel()
-        _state.value = BotFeatureState(botId = botId, feature = BotFeature.Files, filePath = path)
+        _state.value = BotFeatureState(botId = botId, feature = BotFeature.Files, filePath = path, loading = botId.isNotBlank())
         refresh()
     }
     fun openFolder(path: String) = openFolder(state.value.botId, path)

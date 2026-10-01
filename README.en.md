@@ -63,7 +63,7 @@ Android adaptation includes Android 8.0+ support (`minSdk 26`, `targetSdk 36`, `
 
 ## Validation and limits
 
-The latest signed release build and APK signature verification passed, with **162 unit tests** across protocol, reducer, authentication and UI helpers. The final icon/night resources and release-signed APK await physical-device testing.
+The latest signed release build and APK signature verification passed, with **174 unit tests** across protocol, reducer, authentication and UI helpers. The final icon/night resources and release-signed APK await physical-device testing.
 
 - Official Cloud checks covered restored login, history, DeepSeek V4.1 Flash streaming, model/reasoning selection, selected reply/fork actions, file reading, PTY output and VNC desktop.
 - Management APIs/UI have local fixture tests plus selected live Cloud reads; this does not establish that every Cloud mutation works.
