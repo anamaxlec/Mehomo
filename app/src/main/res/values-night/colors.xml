@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors MemohDarkColors.surface (#0C0C0C). -->
+    <color name="memoh_surface">#FF0C0C0C</color>
+</resources>

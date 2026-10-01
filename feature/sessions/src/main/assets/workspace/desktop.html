@@ -1,0 +1,59 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:; img-src blob: data:; connect-src 'none'">
+<style>html,body{margin:0;height:100vh;overflow:hidden;background:#19181b}#runtime{position:absolute;inset:0;height:100vh;display:none}video{display:none;width:100%;height:100%;object-fit:contain;touch-action:none;outline:0}</style></head>
+<body><div id="runtime" aria-label="云端桌面"></div><video id="desktop" autoplay playsinline muted tabindex="0" aria-label="云端桌面"></video><script type="module">
+'use strict';
+import RFB from './novnc/core/rfb.js';
+const video=document.getElementById('desktop');let peer=null,channel=null,rfb=null,runtime=null,mask=0,last={x:0,y:0},connection=0,timer=null;
+const send=event=>{if(channel?.readyState==='open')channel.send(JSON.stringify(event));};
+window.stopWorkspace=()=>{connection++;clearTimeout(timer);channel?.close();peer?.close();channel=null;peer=null;video.srcObject=null;mask=0;const closing=rfb;rfb=null;closing?.disconnect();runtime=null;document.getElementById("runtime").style.display="none";video.style.display="none";};
+window.startDesktop=async()=>{
+  stopWorkspace();const attempt=connection;
+  try {
+    peer=new RTCPeerConnection();const local=peer;
+    channel=local.createDataChannel('display-input',{ordered:true});local.addTransceiver('video',{direction:'recvonly'});
+    local.ontrack=event=>{if(attempt!==connection)return;video.style.display='block';video.srcObject=event.streams[0]||new MediaStream([event.track]);video.play().catch(()=>{});};
+    local.onconnectionstatechange=()=>{if(attempt!==connection)return;const status=local.connectionState;clearTimeout(timer);if(status==='connected')NativeWorkspace.status(status);else if(status==='failed')NativeWorkspace.status(status);else if(status==='disconnected')timer=setTimeout(()=>{if(attempt===connection&&local.connectionState==='disconnected')NativeWorkspace.status('disconnected');},5000);};
+    await local.setLocalDescription(await local.createOffer());
+    await new Promise(resolve=>{if(local.iceGatheringState==='complete')return resolve();const timeout=setTimeout(resolve,8000);local.addEventListener('icegatheringstatechange',()=>{if(local.iceGatheringState==='complete'){clearTimeout(timeout);resolve();}});});
+    if(attempt!==connection)return;NativeWorkspace.offer(local.localDescription.sdp);
+    timer=setTimeout(()=>{if(attempt===connection&&local.connectionState!=='connected')NativeWorkspace.status('failed');},30000);
+  } catch(error) {if(attempt===connection)NativeWorkspace.status('failed');}
+};
+window.acceptAnswer=async answer=>{try {if(peer)await peer.setRemoteDescription({type:answer.type,sdp:answer.sdp});}catch(error){NativeWorkspace.status('failed');}};
+function position(event){const rect=video.getBoundingClientRect(),vw=video.videoWidth,vh=video.videoHeight;if(!vw||!vh)return null;const scale=Math.min(rect.width/vw,rect.height/vh),left=rect.left+(rect.width-vw*scale)/2,top=rect.top+(rect.height-vh*scale)/2;const x=(event.clientX-left)/scale,y=(event.clientY-top)/scale;if(x<0||y<0||x>=vw||y>=vh)return null;return{x:Math.round(x),y:Math.round(y)};}
+const pointer=event=>{const point=position(event);if(point)last=point;send({type:'pointer',...last,button_mask:mask});};
+video.addEventListener('pointerdown',event=>{event.preventDefault();if(!position(event))return;video.focus();video.setPointerCapture(event.pointerId);mask=event.button===2?4:event.button===1?2:1;pointer(event);});
+video.addEventListener('pointermove',event=>pointer(event));
+for(const name of ['pointerup','pointercancel'])video.addEventListener(name,event=>{mask=0;pointer(event);});
+video.addEventListener('contextmenu',event=>event.preventDefault());
+video.addEventListener('wheel',event=>{event.preventDefault();send({type:'pointer',...last,button_mask:event.deltaY<0?8:16});send({type:'pointer',...last,button_mask:0});},{passive:false});
+const keys={Backspace:0xff08,Tab:0xff09,Enter:0xff0d,Escape:0xff1b,Delete:0xffff,Home:0xff50,ArrowLeft:0xff51,ArrowUp:0xff52,ArrowRight:0xff53,ArrowDown:0xff54,PageUp:0xff55,PageDown:0xff56,End:0xff57,Insert:0xff63,Shift:0xffe1,Control:0xffe3,Alt:0xffe9,Meta:0xffeb};
+for(let n=1;n<=12;n++)keys['F'+n]=0xffbd+n;
+function symbol(text){const code=text.codePointAt(0);return code<256?code:0x01000000|code;}
+function key(event,down){const sym=keys[event.key]??(Array.from(event.key).length===1?symbol(event.key):null);if(sym!=null){event.preventDefault();send({type:'key',keysym:sym,down});}}
+video.addEventListener('keydown',event=>key(event,true));video.addEventListener('keyup',event=>key(event,false));
+window.desktopKey=name=>{const sym=keys[name];if(rfb&&sym){rfb.sendKey(sym);return;}if(sym){send({type:'key',keysym:sym,down:true});send({type:'key',keysym:sym,down:false});}};
+window.desktopText=text=>{for(const char of text){const sym=char==='\n'?keys.Enter:symbol(char);if(rfb){rfb.sendKey(sym);continue;}send({type:'key',keysym:sym,down:true});send({type:'key',keysym:sym,down:false});}};
+window.workspaceTheme=theme=>{document.body.style.background=theme.background;};
+// The channel contains bytes only. Runtime tokens and Cloud cookies stay in native networking.
+class NativeChannel {
+  constructor(){this.readyState=0;this.binaryType='arraybuffer';this.protocol='';this.onopen=null;this.onclose=null;this.onmessage=null;this.onerror=null;}
+  send(data){const bytes=new Uint8Array(data.buffer??data,data.byteOffset??0,data.byteLength);let text='';for(const byte of bytes)text+=String.fromCharCode(byte);NativeWorkspace.runtimeBinary(btoa(text));}
+  close(){this.readyState=3;}
+}
+window.startRuntimeDisplay=()=>{
+  stopWorkspace();const target=document.getElementById('runtime');target.style.display='block';video.style.display='none';
+  runtime=new NativeChannel();rfb=new RFB(target,runtime,{shared:true});rfb.scaleViewport=true;rfb.background='transparent';
+  const viewer=rfb;
+  viewer.addEventListener('connect',()=>{if(rfb===viewer)NativeWorkspace.status('connected');});
+  viewer.addEventListener('disconnect',()=>{if(rfb===viewer)NativeWorkspace.status('disconnected');});
+  viewer.addEventListener('securityfailure',()=>{if(rfb===viewer)NativeWorkspace.status('failed');});
+  viewer.addEventListener('credentialsrequired',()=>{if(rfb===viewer)NativeWorkspace.status('failed');});
+  NativeWorkspace.runtimeReady();
+};
+window.runtimeOpened=()=>{if(runtime){runtime.readyState=1;runtime.onopen?.({});}};
+window.runtimeWrite=data=>{if(runtime){const bytes=Uint8Array.from(atob(data),char=>char.charCodeAt(0));runtime.onmessage?.({data:bytes.buffer});}};
+NativeWorkspace.ready();
+</script></body></html>

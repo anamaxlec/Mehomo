@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The window background must be an opaque colour matching the Compose theme's
+      surface. A transparent one lets the (dark) system window show through the
+      first frame, which reads as a dim flash of the wrong theme.
+    -->
+    <style name="Theme.Memoh" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/memoh_surface</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

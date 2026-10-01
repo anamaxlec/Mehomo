@@ -1,0 +1,24 @@
+# Build products and local tool state
+.gradle/
+.kotlin/
+**/build/
+.idea/
+*.iml
+local.properties
+.DS_Store
+.zcode/
+.v2c/
+__pycache__/
+*.pyc
+# Local research, signed-in device captures, and development logs
+research/
+out/
+IMPLEMENTATION.md
+VALIDATION.md
+# Private signing material and local environment
+keystore.properties
+*.jks
+*.keystore
+.env
+.env.*
+# Keep only the selected artwork and reproducible export source

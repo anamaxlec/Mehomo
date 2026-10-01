@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'">
+<link rel="stylesheet" href="xterm.css"><style>
+html,body{margin:0;height:100vh;overflow:hidden;background:#19181b}#terminal{position:absolute;inset:12px 8px;height:calc(100vh - 24px)}
+.xterm-viewport{overscroll-behavior:contain}.xterm-screen{outline:0}
+</style><script src="xterm.js"></script><script src="fit.js"></script></head>
+<body><div id="terminal" aria-label="云端终端"></div><script>
+'use strict';
+const term = new Terminal({fontFamily:'monospace',fontSize:14,lineHeight:1.2,cursorBlink:true,cursorStyle:'bar',scrollback:5000,screenReaderMode:true,theme:{background:'#19181b',foreground:'#f3eff5'}});
+const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(document.getElementById('terminal'));
+term.onData(data => NativeWorkspace.input(data));
+term.onBinary(data => NativeWorkspace.binary(btoa(data)));
+term.onResize(size => NativeWorkspace.resize(size.cols,size.rows));
+window.terminalWrite = data => {
+ const bytes=Uint8Array.from(atob(data),char=>char.charCodeAt(0));
+ term.write(bytes);
+};
+window.terminalFocus = () => term.focus();
+window.workspaceTheme = theme => { term.options.theme=theme;document.body.style.background=theme.background; };
+new ResizeObserver(() => fit.fit()).observe(document.getElementById('terminal'));
+requestAnimationFrame(() => {fit.fit();NativeWorkspace.ready();});
+</script></body></html>

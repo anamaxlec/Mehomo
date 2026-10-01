@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Transparent 108dp canvas, with the mascot inside a centered 62dp circle. -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/ic_launcher_themed"
+    android:tint="@color/launcher_foreground"
+    android:gravity="fill"
+    android:filter="true" />
