@@ -1,73 +1,146 @@
-![Mehomo — Material 3 Expressive for your agents](docs/assets/mehomo-overview.svg)
+![Mehomo — 用 Material 3 Expressive 连接你的 Agent](docs/assets/mehomo-overview.svg)
 
 # Mehomo
 
-**A native Android client for Memoh, designed around Material 3 Expressive.**
+**以 Material 3 Expressive 为设计核心的 Memoh 原生 Android 客户端。**
 
-[简体中文](README.zh-CN.md) · [Memoh](https://github.com/felinics/Memoh) · [Icon assets](design/icon/README.md)
+[下载正式版 APK](https://github.com/anamaxlec/Mehomo/releases/latest) · [English](README.en.md) · [Memoh 上游项目](https://github.com/felinics/Memoh) · [图标素材](design/icon/README.md)
 
-Mehomo brings conversations and an agent's cloud workspace into one Android app. It connects to **official Memoh Cloud** and **self-hosted Memoh**. This is an independent, unofficial client.
+Mehomo 将会话和 Agent 的云端工作空间放进同一个 Android 应用，支持 **Memoh 官方云服务**和**自托管 Memoh**。这是独立开发的非官方客户端。
 
-## Material 3 Expressive, throughout
+## M3E 贯穿整个界面
 
-The interface uses native **Jetpack Compose Material 3 Expressive** components, shared shapes, motion and color roles, rather than a web interface wrapped in an Android shell.
+界面使用 **Jetpack Compose Material 3 Expressive 原生控件**，统一形状、动效和颜色角色。聊天主体为原生 Compose；终端和桌面使用本地打包的专用 Web 渲染器。
 
-- **Expressive controls:** grouped cards and list items, button groups, tonal actions and bounded floating menus.
-- **Clear hierarchy:** large accent-colored titles collapse into the top bar as you scroll; coordinated loading placeholders soften initial loading.
-- **A comfortable composer:** compact reply actions, shared input surfaces, keyboard inset handling and model/provider/reasoning selection.
-- **Your layout:** choose and reorder floating navigation destinations; light/dark appearance and selectable color accents.
-- **Adaptive artwork:** a purple twin-tail avatar, round adaptive launcher resources and a separate monochrome layer for themed icons.
+- **有层次的控件：**分组卡片和列表、按钮组、带图标的 tonal 操作、覆盖底部按钮的浮动菜单。
+- **清晰的页面结构：**带强调色的大标题随滚动收起到顶栏，初次加载使用统一的骨架屏过渡。
+- **舒适的输入与阅读：**紧凑的消息操作、复用的输入框、输入法避让、按供应商分组的模型和思考强度选择。
+- **用户自定义：**浮动导航可调整显示项目和顺序，支持浅色、深色和可选择的强调色。
+- **自适应图标：**紫色双马尾头像、圆形自适应图标，以及跟随壁纸配色的独立单色图层。
 
-The app pins `androidx.compose.material3:material3:1.5.0-alpha29`. These expressive APIs are still evolving; the dependency version is intentional.
+当前固定使用 `androidx.compose.material3:material3:1.5.0-alpha29`。M3E 的部分 API 仍处于 alpha 阶段，依赖版本经过明确选择。
 
-## What you can do
+## 它具体能做什么
 
-| Area | Features |
+Mehomo 面向已经在 Memoh 上使用 Bot 的用户：你可以在手机上发起任务、阅读执行过程、处理需要你决定的步骤，再进入同一个 Bot 的云端工作空间查看文件、终端或桌面。它连接现有 Memoh 服务，模型和 Agent 的实际执行由服务端负责。
+
+### 对话与任务执行
+
+| 功能 | 在应用中可以做什么 |
 |---|---|
-| Conversations | Session history, streaming replies, reasoning/tool blocks, provider-grouped models and reasoning levels |
-| Markdown | Tables, code blocks, links, task lists, quotes and strikethrough |
-| Reply actions | Copy, regenerate, fork and message timestamps |
-| Agent controls | Approval/question UI, attachments, follow-up/steer queues and runtime controls |
-| Workspace | File management, port previews, terminal and remote desktop |
-| Bot management | Memory, schedules and execution logs, token usage, apps, skills and MCP management |
+| Bot 与会话 | 切换 Bot；新建、搜索、重命名、删除会话；按时间分组查看历史，保留外接渠道来源标记 |
+| 流式回复 | 边生成边阅读；展开思考和工具调用；停止生成；查看会话正在运行的状态图标 |
+| 模型选择 | 搜索服务端模型目录、按供应商分组，切换模型和模型支持的思考强度；支持普通与 ACP Agent 的模型切换路径 |
+| 执行位置 | 选择服务端提供的工作空间、Agent 和会话文件夹；底部展示实际选中项，无文件夹的已有会话不显示占位按钮 |
+| 上下文 | 查看服务端报告的上下文占用，刷新状态；在运行时支持的情况下压缩会话上下文 |
+| 消息操作 | 复制回复、重新生成、从某轮新建分支、查看消息时间 |
+| 附件 | 从 Android 文件选择器选择文件或图片；发送附件，读取消息图片并打开预览 |
+| 审批与提问 | 批准或拒绝工具请求；回答单选、多选、自定义文本等结构化问题 |
+| 排队与插话 | 向 follow-up 队列追加任务，编辑、删除和重排；在运行时支持的情况下用 steer 插入当前任务 |
+| 运行控制 | 查看并切换服务端提供的运行模式、权限模式，设置任务目标，执行快捷操作和查看可用技能 |
 
-**Validation:** 162 unit tests cover protocol, reducer and UI helpers. Selected end-to-end checks have been run against official Cloud on an API 36 emulator, including history, streaming replies, workspace terminal/desktop, files and selected management pages. Self-hosted checks currently use local HTTPS fixtures. Approval/question edge cases are fixture-tested; not every server configuration or API has been exercised live.
+模型、思考强度、工作空间和运行控制选项来自服务端能力，不能保证每个 Bot 或模型都提供相同选项。界面会按实际能力展示。
 
-**Current limits:** push notifications and Android Live Updates are deferred. Raw HTML, math and Mermaid are not rendered; SVG images are unsupported and animated images display their first frame. Provider-specific third-party OAuth/API-key setup forms are not complete. Server capabilities and permissions determine feature availability.
+### 阅读与 Markdown
 
-## Build
+支持标题、段落、粗体、斜体、列表、引用、分隔线、删除线、可点击链接、任务列表、表格，以及带语法着色和复制操作的代码块。宽代码块可以横向滚动，表格支持单元格换行；较长会话使用分页历史和稳定消息身份，处理历史与实时回复的交接。消息、模型目录和部分功能页的初次加载使用骨架屏。
 
-Android **8.0+** (`minSdk 26`). Development requires **JDK 17+** and Android SDK **platform 37**; `targetSdk` is 36. Use the included Gradle wrapper.
+### Bot 管理与云端工作空间
+
+| 功能 | 已接入的操作 |
+|---|---|
+| 长期记忆 | 浏览、新增、编辑、删除、搜索记忆，查看状态与关系图，执行记忆压缩 |
+| 定时任务 | 新建和编辑任务、启用或停用、删除、查看执行记录；可配置服务端支持的 cron/pattern 与提示词等参数 |
+| 用量与状态 | 切换近 7/30/90 天，查看输入、输出、推理、缓存读取用量；按模型和供应商查看统计，分页查看调用记录并进入对应会话 |
+| 容器指标 | 服务端提供指标时显示 CPU、内存和存储信息；不提供时明确显示不可用状态 |
+| 应用 | 浏览应用商店、搜索、查看详情、安装并显示 SSE 进度；查看已安装应用、检查更新和卸载；查看连接状态 |
+| 技能 | 浏览技能商店、查看已安装技能，导入或编辑技能内容、删除及执行服务端支持的技能操作 |
+| MCP | 查看、新增、编辑、删除 MCP 连接，探测连接并查看工具信息 |
+| 文件 | 浏览目录、筛选当前文件夹、预览和编辑文本文件、新建、重命名、删除、上传及下载 |
+| 终端 | 连接 Bot 的 PTY，查看终端输出、输入命令、调整终端尺寸，使用常用终端按键 |
+| 桌面 | 连接官方云 VNC 桌面或自托管 WebRTC 桌面，显示并操作远程工作空间 |
+| 浏览器 | 通过服务端的端口预览功能打开云端应用或网站 |
+
+这些功能管理的是当前账号有权访问的 Bot。Mehomo 不在手机上创建或运行 Memoh 服务端，也不是独立的本地模型运行器。
+
+## 接入与适配了什么
+
+### Memoh 服务与协议
+
+| 对象 | 适配内容 |
+|---|---|
+| 官方 Memoh Cloud | 邮箱验证码登录、团队选择、登录状态恢复、Cookie 认证、团队范围请求；聊天和工作空间连接使用服务端签发的 ticket |
+| 自托管 Memoh | HTTPS 服务地址、根路径或 `/api` 反代路径、用户名/密码登录、Bearer 认证和有效期内主动续期 |
+| 聊天 WebSocket | 会话运行状态订阅、快照/增量事件归并、受理与确认、断线重连；序列缺口重新请求快照，避免丢弃已有历史 |
+| 会话活动 SSE | 应用前台订阅 Bot 会话变化，刷新列表、日程等相关状态；这不是后台推送通道 |
+| Agent / ACP | 读取服务端模型目录和能力，接入 ACP 模型/思考强度与运行控制；不是在客户端重新实现 Agent 引擎 |
+| 云端终端和桌面 | 终端采用 PTY + 本地打包的 xterm.js；官方云桌面采用 VNC/noVNC，自托管桌面保留 WebRTC 路径 |
+| 外接渠道 | 会话列表保留服务端提供的渠道来源标记，例如 Telegram；不代表已完成独立的渠道配置向导 |
+
+### Android 与界面
+
+- **Android 8.0+：**`minSdk 26`，`targetSdk 36`，构建使用 `compileSdk 37`。
+- **原生 M3E：**Compose 会话与管理页面、`MaterialExpressiveTheme`、expressive motion、分组卡片、按钮组、tonal 操作、大标题滚动收起和原生弹窗。
+- **输入法与系统栏：**会话、终端输入及管理表单处理 IME insets；长表单可以滚动，会话控制面板直接完整展开，减少键盘遮挡。
+- **字体和布局：**文本换行、响应式统计容器、受限宽度的消息阅读列；此前检查覆盖部分页面的字体放大场景，并非所有屏幕尺寸都已验证。
+- **外观：**跟随系统/浅色/深色，用户可选择强调色；浮动导航可选择 1–4 个入口并调整顺序。
+- **图标：**默认浅紫底深紫头像，夜间资源保留紫色反差；圆形自适应图标及 Android 13+ 支持的单色主题图层。开启系统主题图标后，颜色由启动器按壁纸与主题决定，取决于启动器支持。
+- **附件与凭据：**使用 Android 文件选择器；凭据加密保存，服务地址要求 HTTPS。
+
+## 已验证范围与当前限制
+
+**最近构建验证：**签名 release APK 构建通过，APK 签名校验通过；162 项单元测试通过，覆盖协议、运行事件归并、认证续期和部分 UI 辅助逻辑。最终图标和正式签名 APK 留待真机实测。
+
+| 范围 | 当前证据 |
+|---|---|
+| 官方云对话 | 真实账号检查过登录恢复、历史消息、DeepSeek V4.1 Flash 流式回复、模型/思考强度和部分消息分支操作 |
+| 官方云工作空间 | 检查过文件读取、终端提示符/输出和 VNC 桌面；文件写操作与运行中网站的端口预览未完整实测 |
+| 管理页面 | 已实现 API 与 UI，通过本地 fixture 测试，并进行了部分官方云读取检查；不等于每种云端写操作都已验证 |
+| 附件、审批、提问、队列 | 接口和交互已实现；审批/问答控制帧通过 WebSocket fixture 测试，真实云端的全部分支仍待验证 |
+| 自托管 | HTTPS fixture 和认证/网络测试通过，尚未在真实自托管部署上完成全面验证 |
+| Android 设备 | 此前检查以 API 36 模拟器为主；最低版本、不同厂商设备、最终图标夜间切换及正式签名 APK 尚待实机覆盖 |
+
+**未完成或暂缓：**
+
+- 后台推送通知、Android Live Updates 尚未接入；前台 SSE 不提供应用关闭后的离线通知保证。
+- Markdown 不渲染原始 HTML、数学公式和 Mermaid；SVG 图片暂不支持，动态图显示首帧。
+- 第三方连接器的独立 OAuth/API-key 配置表单尚未完整实现。官方云登录目前以邮箱验证码为入口，不能据此声称支持所有 OAuth 登录方式。
+- 不提供完整的服务端部署、容器生命周期管理、语音/视频模型配置或企业用户管理。
+- 凭据存储目前使用已弃用但仍可工作的 `EncryptedSharedPreferences`；后续需要迁移。
+
+## 构建
+
+支持 **Android 8.0+**（`minSdk 26`）。开发需要 **JDK 17+**、Android SDK **platform 37**；`targetSdk` 为 36。使用仓库自带的 Gradle wrapper。
 
 ```bash
 ./gradlew :app:assembleDebug
 ./gradlew testDebugUnitTest
 ```
 
-Set `JAVA_HOME` and the SDK location through your Android Studio environment, `ANDROID_HOME`, or an untracked `local.properties`. Debug APK: `app/build/outputs/apk/debug/app-debug.apk`.
+通过 Android Studio 环境、`ANDROID_HOME` 或不提交到 Git 的 `local.properties` 设置 SDK 路径，并配置 `JAVA_HOME`。调试 APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 
-### Signed release
+### 签名正式版
 
-Create your own signing key, copy `keystore.properties.example` to `keystore.properties`, then enter the absolute key path, alias and passwords. Neither private keys nor local signing properties are committed.
+准备自己的签名密钥，将 `keystore.properties.example` 复制为 `keystore.properties`，填写密钥绝对路径、alias 和密码。签名密钥及本地密码配置不进入仓库。
 
 ```bash
 ./gradlew :app:assembleRelease
 ```
 
-With signing configured, the APK is at `app/build/outputs/apk/release/app-release.apk`. Without signing properties, Gradle produces an unsigned release APK. Back up your signing key securely: future updates must use the same key. A release-signed APK cannot update a debug-signed installation of the same package.
+配置签名后，正式版位于 `app/build/outputs/apk/release/app-release.apk`；未配置签名时生成未签名的 release APK。请安全备份密钥，后续升级必须使用同一密钥。正式签名 APK 无法直接覆盖同包名的调试签名安装。
 
-## Architecture
+## 架构
 
-| Module | Responsibility |
+| 模块 | 职责 |
 |---|---|
-| `app` | Navigation, dependency injection and application entry |
-| `core:model`, `core:network`, `core:data` | Models, REST/WebSocket protocol, runtime reducer, encrypted credentials and preferences |
-| `core:designsystem`, `core:markdown` | Native M3E theme/components and Markdown rendering |
-| `feature:login`, `feature:chat`, `feature:sessions` | Authentication, conversations, bot management and cloud workspace |
-| `feature:settings`, `feature:bots` | Appearance and reserved bot feature module |
+| `app` | 导航、依赖注入、应用入口 |
+| `core:model` / `core:network` / `core:data` | 数据模型、REST 与 WebSocket 协议、运行事件归并、加密凭据、偏好设置 |
+| `core:designsystem` / `core:markdown` | M3E 主题与通用控件、Markdown 渲染 |
+| `feature:login` / `feature:chat` / `feature:sessions` | 登录、会话、Bot 管理、云端工作空间 |
+| `feature:settings` / `feature:bots` | 外观设置、预留的 Bot 功能模块 |
 
-Cloud sessions use encrypted cookie storage, team selection and short-lived WebSocket tickets. Self-hosted connections use bearer authentication. Server addresses require HTTPS. Do not put real credentials in issues, logs or test fixtures.
+官方云连接使用加密 Cookie 存储、团队选择和短期 WebSocket ticket；自托管连接使用 bearer 认证。服务地址要求 HTTPS。请勿将真实凭据写进 issue、日志或测试 fixture。
 
-## License and credits
+## 许可证与致谢
 
-Source code follows **AGPL-3.0**; see [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Memoh is the upstream service. Mehomo is not affiliated with Memoh, Google, xAI or Crypton Future Media. The generated avatar is fan artwork inspired by Hatsune Miku and the supplied flat bot-avatar references; character and brand rights remain with their respective owners.
+源码遵循 **AGPL-3.0**，详见 [LICENSE](LICENSE) 与 [第三方声明](THIRD_PARTY_NOTICES.md)。Memoh 是上游服务；Mehomo 与 Memoh、Google、xAI、Crypton Future Media 没有官方关联。生成的头像是参考初音未来及用户提供的扁平 bot 头像风格创作的同人图，角色与品牌权利归各自权利方所有。
