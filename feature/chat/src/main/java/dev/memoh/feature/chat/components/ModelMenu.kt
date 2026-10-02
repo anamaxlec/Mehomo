@@ -195,7 +195,7 @@ fun ModelMenu(
                                 selected = row.value.id == selectedModel?.id,
                                 selectable = true,
                                 enabled = enabled,
-                                onClick = { onSelectModel(row.value.id); dismiss() },
+                                onClick = { onSelectModel(row.value.id) },
                             ) }
                         }
                     }
@@ -223,7 +223,7 @@ fun ModelMenu(
                             toggleableItem(
                                 checked = effort == selectedEffort,
                                 label = reasoningEffortLabel(effort),
-                                onCheckedChange = { onSelectEffort(effort); dismiss() },
+                                onCheckedChange = { onSelectEffort(effort) },
                                 weight = 1f,
                                 enabled = enabled,
                             )
