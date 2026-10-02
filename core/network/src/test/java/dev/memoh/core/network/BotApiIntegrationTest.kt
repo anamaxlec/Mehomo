@@ -26,6 +26,17 @@ class BotApiIntegrationTest {
     private fun response(body: String = "{}", status: Int = 200) { server.enqueue(MockResponse().setResponseCode(status).setBody(body)) }
     private fun body() = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
 
+    @Test fun `session pagination round trips opaque cursors without changing plus or separators`() = runTest {
+        val cursor = "older+page/with=padding&marker"
+        response("""{"items":[{"id":"recent","title":"Recent"}],"next_cursor":"$cursor"}""")
+        val first = api().sessions("bot")
+        assertEquals(cursor, first.nextCursor)
+        server.takeRequest()
+        response("""{"items":[{"id":"older","title":"Older"}]}""")
+        assertEquals("older", api().sessions("bot", cursor = first.nextCursor).items.single().id)
+        assertEquals(cursor, server.takeRequest().requestUrl!!.queryParameter("cursor"))
+    }
+
     @Test fun `usage summary and paginated records include the same exclusive date range`() = runTest {
         response("""{"chat":[{"day":"2026-09-30","input_tokens":120}],"by_model":[]}""")
         assertEquals(120L, api().tokenUsage("bot", "2026-09-01", "2026-10-01").chat!!.single().inputTokens)

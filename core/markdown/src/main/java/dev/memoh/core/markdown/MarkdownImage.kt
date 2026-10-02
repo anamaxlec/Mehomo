@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -32,6 +33,9 @@ import dev.memoh.core.designsystem.component.MemohSkeletonBlock
 /** The containing screen supplies its account-aware loader. */
 val LocalMarkdownImageLoader = staticCompositionLocalOf<(suspend (String) -> ByteArray)?> { null }
 
+/** Lets a transcript finish its initial positioning after visible media has settled. */
+val LocalMarkdownImageLoading = staticCompositionLocalOf<((Boolean) -> Unit)?> { null }
+
 private sealed interface ImageState {
     data object Loading : ImageState
     data class Ready(val bitmap: ImageBitmap) : ImageState
@@ -39,7 +43,13 @@ private sealed interface ImageState {
 }
 
 @Composable
-fun MarkdownImage(destination: String, alt: String, modifier: Modifier = Modifier) {
+fun MarkdownImage(
+    destination: String,
+    alt: String,
+    modifier: Modifier = Modifier,
+    height: Dp? = null,
+    showCaption: Boolean = true,
+) {
     val loader = LocalMarkdownImageLoader.current
     var retry by remember(destination) { mutableIntStateOf(0) }
     var preview by remember(destination) { mutableStateOf(false) }
@@ -61,18 +71,28 @@ fun MarkdownImage(destination: String, alt: String, modifier: Modifier = Modifie
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { value = ImageState.Failed(e.message ?: "图片加载失败") }
     }
+    val onLoading = LocalMarkdownImageLoading.current
+    if (state is ImageState.Loading && onLoading != null) {
+        DisposableEffect(onLoading) {
+            onLoading(true)
+            onDispose { onLoading(false) }
+        }
+    }
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when (val current = state) {
             is ImageState.Ready -> Image(
                 bitmap = current.bitmap,
                 contentDescription = alt.ifBlank { "图片" },
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)
-                    .aspectRatio(current.bitmap.width.toFloat() / current.bitmap.height)
+                modifier = Modifier.fillMaxWidth().then(
+                    if (height != null) Modifier.height(height)
+                    else Modifier.heightIn(max = 360.dp)
+                        .aspectRatio(current.bitmap.width.toFloat() / current.bitmap.height)
+                )
                     .clip(MaterialTheme.shapes.medium).clickable { preview = true },
             )
             ImageState.Loading -> MemohSkeleton(description = "正在加载图片") {
-                MemohSkeletonBlock(Modifier.fillMaxWidth().height(160.dp), MaterialTheme.shapes.medium)
+                MemohSkeletonBlock(Modifier.fillMaxWidth().height(height ?: 160.dp), MaterialTheme.shapes.medium)
             }
             is ImageState.Failed -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(current.message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
@@ -80,7 +100,7 @@ fun MarkdownImage(destination: String, alt: String, modifier: Modifier = Modifie
                 TextButton(onClick = { retry++ }) { Text("重试") }
             }
         }
-        if (alt.isNotBlank()) Text(alt, style = MaterialTheme.typography.bodySmall,
+        if (showCaption && alt.isNotBlank()) Text(alt, style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     val bitmap = (state as? ImageState.Ready)?.bitmap

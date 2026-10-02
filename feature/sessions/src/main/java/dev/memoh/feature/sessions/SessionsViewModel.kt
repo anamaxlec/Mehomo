@@ -3,6 +3,7 @@ package dev.memoh.feature.sessions
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.memoh.core.data.SessionRepository
+import dev.memoh.core.data.SettingsStore
 import dev.memoh.core.model.Bot
 import dev.memoh.core.model.Session
 import dev.memoh.core.model.Workdir
@@ -14,6 +15,8 @@ import dev.memoh.core.network.SocketStatus
 import dev.memoh.core.network.SessionRunStatusReducer
 import dev.memoh.core.network.sessionStatusSocket
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,6 +37,9 @@ data class SessionsUiState(
     val loading: Boolean = false,
     val initialized: Boolean = false,
     val sessions: List<Session> = emptyList(),
+    val nextCursor: String? = null,
+    val loadingMore: Boolean = false,
+    val loadMoreError: String? = null,
     val error: String? = null,
     val bot: Bot? = null,
     /** Bots the user can switch between; empty until loaded. */
@@ -97,6 +103,7 @@ enum class BotTab(val label: String) {
 @HiltViewModel
 class SessionsViewModel @Inject constructor(
     private val repository: SessionRepository,
+    private val settings: SettingsStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SessionsUiState())
@@ -104,6 +111,7 @@ class SessionsViewModel @Inject constructor(
 
     private var botId: String? = null
     private var loadJob: Job? = null
+    private var pageJob: Job? = null
     private var started = false
     private var statusSocket: ChatSocket? = null
     private var observation = 0L
@@ -180,9 +188,11 @@ class SessionsViewModel @Inject constructor(
                         }
                         return@launch
                     }
-                    val selected = bots.firstOrNull { it.id == botId } ?: bots.first()
+                    val lastBot = settings.lastBotId.first()
+                    val selected = bots.firstOrNull { it.id == (botId ?: lastBot) } ?: bots.first()
                     _state.update { it.copy(initialized = true, bots = bots, bot = selected) }
                     botId = selected.id
+                    settings.setLastBotId(selected.id)
                     loadSessions(selected.id)
                 },
                 onFailure = { error ->
@@ -199,7 +209,8 @@ class SessionsViewModel @Inject constructor(
         if (botId == bot.id) return
         stopObservingRuns()
         botId = bot.id
-        _state.update { it.copy(bot = bot, sessions = emptyList(), folders = emptyList()) }
+        _state.update { it.copy(bot = bot, sessions = emptyList(), folders = emptyList(), nextCursor = null, loadingMore = false, loadMoreError = null) }
+        viewModelScope.launch { settings.setLastBotId(bot.id) }
         loadSessions(bot.id)
     }
 
@@ -214,8 +225,11 @@ class SessionsViewModel @Inject constructor(
 
     private fun loadSessions(id: String) {
         loadJob?.cancel()
+        pageJob?.cancel()
+        val generation = repository.generation
+        val count = maxOf(50, state.value.sessions.size)
         loadJob = viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null) }
+            _state.update { it.copy(loading = true, error = null, loadingMore = false, loadMoreError = null) }
             val api = repository.api()
             if (api == null) {
                 _state.update { it.copy(loading = false, error = "未登录") }
@@ -226,7 +240,19 @@ class SessionsViewModel @Inject constructor(
             // must not blank the sessions, and vice versa. The folder failure is
             // therefore swallowed — the pinned section simply does not appear.
             val folders = runCatching { api.workdirs(id) }.getOrDefault(emptyList())
-            val sessions = runCatching { api.sessions(id, types = Session.CHAT_TYPES, limit = 50) }
+            val sessions = runCatching {
+                var page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50)
+                var items = page.items
+                // Refresh every loaded page so returning from a chat retains older rows.
+                while (items.size < count && !page.nextCursor.isNullOrBlank()) {
+                    val cursor = page.nextCursor
+                    page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor)
+                    items = appendSessions(items, page.items)
+                    if (page.nextCursor == cursor) break
+                }
+                page.copy(items = items)
+            }
+            if (generation != repository.generation || botId != id) return@launch
 
             sessions.fold(
                 onSuccess = { page ->
@@ -234,6 +260,7 @@ class SessionsViewModel @Inject constructor(
                         it.copy(
                             loading = false,
                             sessions = page.items,
+                            nextCursor = page.nextCursor,
                             folders = folders.filter(Workdir::isActive),
                             error = null,
                         )
@@ -241,6 +268,7 @@ class SessionsViewModel @Inject constructor(
                     statusSocket?.observeSessions(page.items.map { it.id }.toSet())
                 },
                 onFailure = { error ->
+                    if (error is CancellationException) throw error
                     _state.update {
                         it.copy(
                             loading = false,
@@ -250,6 +278,29 @@ class SessionsViewModel @Inject constructor(
                     }
                 },
             )
+        }
+    }
+
+    fun loadMore() {
+        val current = state.value
+        val id = botId ?: return
+        val cursor = current.nextCursor?.takeIf(String::isNotBlank) ?: return
+        if (current.loading || current.loadingMore) return
+        val generation = repository.generation
+        _state.update { it.copy(loadingMore = true, loadMoreError = null) }
+        pageJob = viewModelScope.launch {
+            try {
+                val api = repository.api() ?: error("未登录")
+                val page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor)
+                if (botId != id || generation != repository.generation) return@launch
+                _state.update { it.copy(sessions = appendSessions(it.sessions, page.items),
+                    nextCursor = page.nextCursor?.takeUnless { next -> next == cursor }, loadingMore = false) }
+                statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (botId == id && generation == repository.generation)
+                    _state.update { it.copy(loadingMore = false, loadMoreError = describeFailure("加载更多失败", e)) }
+            }
         }
     }
 
@@ -312,17 +363,25 @@ class SessionsViewModel @Inject constructor(
 
     fun delete(session: Session) {
         val id = botId ?: return
+        val generation = repository.generation
         _state.update { it.copy(deleting = null) }
         viewModelScope.launch {
             val api = repository.api() ?: return@launch
             runCatching { api.deleteSession(id, session.id) }.fold(
                 onSuccess = {
+                    if (botId != id || generation != repository.generation) return@fold
+                    // An older list response must not put the deleted row back.
+                    loadJob?.cancel()
+                    pageJob?.cancel()
                     _state.update { current ->
-                        current.copy(sessions = current.sessions.filterNot { it.id == session.id })
+                        current.copy(sessions = current.sessions.filterNot { it.id == session.id },
+                            loading = false, loadingMore = false)
                     }
                     statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
                 },
                 onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    if (botId != id || generation != repository.generation) return@fold
                     _state.update { it.copy(error = describeFailure("删除失败", error)) }
                 },
             )
@@ -378,6 +437,10 @@ class SessionsViewModel @Inject constructor(
     }
     override fun onCleared() { stopObservingRuns(); super.onCleared() }
 }
+
+/** Preserve live title/order changes when a subsequent page overlaps existing rows. */
+internal fun appendSessions(current: List<Session>, page: List<Session>): List<Session> =
+    (current + page).distinctBy { it.id }
 
 /**
  * Whether a session was updated today, by local date.

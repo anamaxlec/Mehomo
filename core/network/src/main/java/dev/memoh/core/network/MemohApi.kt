@@ -161,7 +161,7 @@ class MemohApi(
         val query = buildString {
             append("?limit=").append(limit)
             if (types != null) append("&types=").append(types)
-            if (cursor != null) append("&cursor=").append(cursor)
+            if (cursor != null) append("&cursor=").append(java.net.URLEncoder.encode(cursor, "UTF-8"))
         }
         return request("/bots/$botId/sessions$query")
     }

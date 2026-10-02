@@ -25,6 +25,13 @@ import java.time.LocalDate
  * test without adding Robolectric.
  */
 class SessionsUiStateTest {
+    @Test
+    fun `overlapping pages preserve a live rename and do not duplicate rows`() {
+        val result = appendSessions(listOf(Session(id = "a", title = "新标题")),
+            listOf(Session(id = "a", title = "旧标题"), Session(id = "b", title = "更早的会话")))
+        assertEquals(listOf("a", "b"), result.map { it.id })
+        assertEquals("新标题", result.first().title)
+    }
 
     @Test
     fun `a fresh state is not loading`() {

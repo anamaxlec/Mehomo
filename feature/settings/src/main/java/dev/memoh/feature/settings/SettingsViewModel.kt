@@ -26,6 +26,14 @@ class SettingsViewModel @Inject constructor(
 ) : ViewModel() {
 
     val session = repository.state
+    val backgroundMonitor = settings.backgroundMonitor.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val liveUpdates = settings.liveUpdates.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val notifyReplyDone = settings.notifyOnReplyDone.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val notifyDecisions = settings.notifyOnDecisions.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    fun setBackgroundMonitor(enabled: Boolean) { viewModelScope.launch { settings.setBackgroundMonitor(enabled) } }
+    fun setLiveUpdates(enabled: Boolean) { viewModelScope.launch { settings.setLiveUpdates(enabled) } }
+    fun setNotifyReplyDone(enabled: Boolean) { viewModelScope.launch { settings.setNotifyOnReplyDone(enabled) } }
+    fun setNotifyDecisions(enabled: Boolean) { viewModelScope.launch { settings.setNotifyOnDecisions(enabled) } }
     val floatingSections = settings.floatingSections.stateIn(viewModelScope, SharingStarted.Eagerly, SettingsStore.DEFAULT_FLOATING_SECTIONS)
     fun setFloatingSections(sections: List<String>) { viewModelScope.launch { settings.setFloatingSections(sections) } }
     fun setThemeMode(mode: ThemeMode) { viewModelScope.launch { settings.setThemeMode(mode) } }

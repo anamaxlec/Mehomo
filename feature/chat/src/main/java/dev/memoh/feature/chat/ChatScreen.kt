@@ -63,9 +63,11 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -83,9 +85,11 @@ import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.designsystem.component.MemohStatus
 import dev.memoh.core.designsystem.component.MemohStatusDot
 import dev.memoh.core.network.SocketStatus
+import dev.memoh.core.markdown.LocalMarkdownImageLoading
 import dev.memoh.feature.chat.components.ApprovalPanel
 import androidx.compose.material.icons.filled.Image
 import dev.memoh.feature.chat.components.Composer
+import dev.memoh.feature.chat.components.ComposerAttachments
 import dev.memoh.feature.chat.components.ChatHistoryPlaceholder
 import dev.memoh.feature.chat.components.MessageActions
 import dev.memoh.feature.chat.components.MessageActionsHeight
@@ -140,6 +144,7 @@ fun ChatScreen(
     onOpenFeature: (String) -> Unit = {},
     onPickAttachment: (Boolean) -> Unit = {},
     onRemoveAttachment: (Int) -> Unit = {},
+    onCancelAttachments: () -> Unit = {},
     onConfirmFolder: () -> Unit = {},
     onCancelFolder: () -> Unit = {},
     modifier: Modifier = Modifier,
@@ -154,6 +159,10 @@ fun ChatScreen(
     var initiallyPositioned by remember(state.session?.id) { mutableStateOf(false) }
     var followingLatest by remember(state.session?.id) { mutableStateOf(true) }
     var jumpingToLatest by remember(state.session?.id) { mutableStateOf(false) }
+    var loadingHistoryImages by remember(state.session?.id) { mutableIntStateOf(0) }
+    val onHistoryImageLoading = remember(state.session?.id) {
+        { loading: Boolean -> loadingHistoryImages += if (loading) 1 else -1 }
+    }
     val latestState by androidx.compose.runtime.rememberUpdatedState(state)
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     val scrollSpec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
@@ -183,7 +192,7 @@ fun ChatScreen(
     LaunchedEffect(state.session?.id) {
         // Layout also changes while a reasoning/phase panel is folding, after
         // the last socket frame. Follow those frames as well as text appends.
-        androidx.compose.runtime.snapshotFlow { latestState to listState.layoutInfo }.conflate().collect {
+        androidx.compose.runtime.snapshotFlow { Triple(latestState, listState.layoutInfo, loadingHistoryImages) }.conflate().collect {
             androidx.compose.runtime.withFrameNanos { }
             if (latestState.historyLoading) return@collect
             if (jumpingToLatest) return@collect
@@ -200,9 +209,18 @@ fun ChatScreen(
                 // The first scroll may need another measurement, especially
                 // when the last Markdown block is taller than the viewport.
                 androidx.compose.runtime.withFrameNanos { }
-                if (atBottom) initiallyPositioned = true
+                // A decoded image can grow beyond its loading placeholder.
+                // Keep the first reveal covered until that height is measured.
+                if (atBottom && loadingHistoryImages == 0) initiallyPositioned = true
             }
         }
+    }
+    LaunchedEffect(initiallyPositioned, state.hasMoreHistory, state.historyLoading,
+        state.loadingMore, state.historyError) {
+        if (!initiallyPositioned || !state.hasMoreHistory || state.historyLoading ||
+            state.loadingMore || state.historyError != null) return@LaunchedEffect
+        androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex }.first { it == 0 }
+        onLoadOlder()
     }
 
     Scaffold(
@@ -301,7 +319,7 @@ fun ChatScreen(
                         )
                     }
 
-                    else -> {
+                    else -> CompositionLocalProvider(LocalMarkdownImageLoading provides onHistoryImageLoading) {
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize()
@@ -313,21 +331,6 @@ fun ChatScreen(
                             ),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            if (state.hasMoreHistory) {
-                                item(key = "load-older") {
-                                    LaunchedEffect(initiallyPositioned) {
-                                        if (initiallyPositioned) onLoadOlder()
-                                    }
-                                    Box(
-                                        Modifier.fillMaxWidth().padding(8.dp),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        if (state.loadingMore) LoadingIndicator()
-                                        else if (state.historyError != null) MemohActionButton("重试加载更早消息", Icons.Filled.Refresh, onLoadOlder)
-                                    }
-                                }
-                            }
-
                             settled.forEach { turn ->
                                 if (turn.isAssistant && turn.safeMessages.isNotEmpty()) {
                                     val keys = assistantBlockKeys(turn.turnId, turn.safeMessages)
@@ -363,6 +366,7 @@ fun ChatScreen(
                                 itemsIndexed(liveMessages, key = { index, _ -> keys[index] }) { index, message ->
                                     Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
                                         MessageBlock(message, isStreaming = run?.isTerminal == false && index == liveMessages.lastIndex,
+                                            isRunActive = !run.isTerminal,
                                             onToggleDetails = { followingLatest = false })
                                     }
                                 }
@@ -394,6 +398,16 @@ fun ChatScreen(
                     exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
                 ) {
                     ChatHistoryPlaceholder()
+                }
+
+                // Pagination status is an overlay: confirming there are no older
+                // turns must not remove a row and shift a short conversation.
+                if (initiallyPositioned && listState.firstVisibleItemIndex == 0) {
+                    Box(Modifier.align(Alignment.TopCenter).padding(top = 4.dp)) {
+                        if (state.loadingMore) LoadingIndicator(Modifier.size(24.dp))
+                        else if (state.hasMoreHistory && state.historyError != null)
+                            MemohActionButton("重试加载更早消息", Icons.Filled.Refresh, onLoadOlder)
+                    }
                 }
 
                 // Jump-to-bottom, shown only when the reader has scrolled away.
@@ -450,6 +464,11 @@ fun ChatScreen(
                             enabled = state.canCompose,
                             sendEnabled = state.canSend,
                             hasAttachments = state.attachments.isNotEmpty(),
+                            attachmentLoading = state.attachmentLoading,
+                            attachments = {
+                                ComposerAttachments(state.attachments, state.attachmentLoading,
+                                    onRemoveAttachment, onCancelAttachments)
+                            },
                             modelLabel = state.modelLabel,
                             modelLoading = state.modelCatalogLoading,
                             // The buttons own their open state and drive the
@@ -508,10 +527,6 @@ fun ChatScreen(
                             },
                             above = {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    state.attachments.forEachIndexed { index, attachment ->
-                                        InputChip(selected = false, onClick = { onRemoveAttachment(index) }, label = { Text(attachment.name ?: "附件", maxLines = 1) },
-                                            trailingIcon = { Icon(Icons.Filled.Close, "移除附件") })
-                                    }
                                     run?.let { current ->
                                         AnimatedVisibility(
                                             visible = !current.isTerminal,

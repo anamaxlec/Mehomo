@@ -141,7 +141,8 @@ fun AssistantTurnItem(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         messages.forEachIndexed { index, message ->
-            MessageBlock(message = message, isStreaming = isStreaming && index == messages.lastIndex)
+            MessageBlock(message = message, isStreaming = isStreaming && index == messages.lastIndex,
+                isRunActive = isStreaming)
         }
     }
 }
@@ -225,7 +226,8 @@ private fun SystemTurnItem(turn: UITurn, modifier: Modifier = Modifier) {
  * instead of silently lost.
  */
 @Composable
-internal fun MessageBlock(message: UIMessage, isStreaming: Boolean, onToggleDetails: () -> Unit = {}) {
+internal fun MessageBlock(message: UIMessage, isStreaming: Boolean, isRunActive: Boolean = false,
+    onToggleDetails: () -> Unit = {}) {
     when (message.type) {
         UIMessage.TYPE_TEXT -> Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.Bottom) {
             TextBlock(content = message.content, modifier = Modifier.weight(1f))
@@ -238,7 +240,7 @@ internal fun MessageBlock(message: UIMessage, isStreaming: Boolean, onToggleDeta
 
         UIMessage.TYPE_REASONING -> ReasoningCard(message = message, isStreaming = isStreaming, onToggleDetails = onToggleDetails)
 
-        UIMessage.TYPE_TOOL -> ToolCard(message = message, isStreaming = isStreaming, onToggleDetails = onToggleDetails)
+        UIMessage.TYPE_TOOL -> ToolCard(message = message, isRunActive = isRunActive, onToggleDetails = onToggleDetails)
 
         UIMessage.TYPE_ERROR -> ErrorBanner(message)
 

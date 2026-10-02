@@ -1,6 +1,11 @@
 package dev.memoh.feature.chat.components
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -103,7 +108,10 @@ fun Composer(
      */
     sendEnabled: Boolean = enabled,
     hasAttachments: Boolean = false,
-    /** Rendered above the field: attachments, queue chips, decisions. */
+    attachmentLoading: Boolean = false,
+    /** Files are managed inside the same surface as the editor. */
+    attachments: @Composable () -> Unit = {},
+    /** Queue chips, decisions and run status above the composer. */
     above: @Composable () -> Unit = {},
     onAttachClick: (() -> Unit)? = null,
     /** The model and reasoning effort in use, shown inside the field. */
@@ -135,7 +143,8 @@ fun Composer(
         if (!editorFocused) imeWasVisible = false
         else if (imeVisible) imeWasVisible = true
     }
-    val editorExpanded = editorFocused && (imeVisible || !imeWasVisible)
+    val hasAttachmentArea = hasAttachments || attachmentLoading
+    val editorExpanded = hasAttachmentArea || editorFocused && (imeVisible || !imeWasVisible)
     val expansion by animateFloatAsState(if (editorExpanded) 1f else 0f,
         tween(240, easing = FastOutSlowInEasing), label = "composerExpansion")
     BackHandler(plusOpen) { plusOpen = false }
@@ -157,6 +166,15 @@ fun Composer(
             above()
 
             MemohComposerSurface(Modifier.fillMaxWidth(), contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) {
+                AnimatedVisibility(
+                    visible = hasAttachmentArea,
+                    enter = expandVertically(MaterialTheme.motionScheme.fastSpatialSpec()) +
+                        fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
+                    exit = shrinkVertically(MaterialTheme.motionScheme.fastSpatialSpec()) +
+                        fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(8.dp)) { attachments() }
+                }
                 // One editor stays composed in both layouts, preserving text,
                 // selection and IME focus while controls move to the bottom row.
                 Box(Modifier.fillMaxWidth()) {
@@ -168,7 +186,8 @@ fun Composer(
                         modifier = Modifier.fillMaxWidth()
                             .padding(start = compactStart * (1f - expansion), end = compactEnd * (1f - expansion),
                                 bottom = 44.dp * expansion)
-                            .heightIn(max = 44.dp + 176.dp * expansion)
+                            .heightIn(min = if (hasAttachmentArea) 80.dp else 44.dp,
+                                max = if (hasAttachmentArea) 220.dp else 44.dp + 176.dp * expansion)
                             .onFocusChanged { editorFocused = it.isFocused },
                     )
                     Row(Modifier.fillMaxWidth().height(44.dp).align(Alignment.BottomCenter),

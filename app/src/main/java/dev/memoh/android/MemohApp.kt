@@ -91,11 +91,28 @@ import androidx.lifecycle.LifecycleEventObserver
  * switch.
  */
 @Composable
-fun MemohApp() {
+fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit = {},
+    chatTarget: ChatTarget? = null, onTargetConsumed: () -> Unit = {}) {
     val navController = rememberNavController()
     val settings: SettingsViewModel = hiltViewModel()
     val session by settings.session.collectAsState()
     val start = remember { if (session.loggedIn) Routes.MAIN else Routes.LOGIN }
+    var selectedShare by rememberSaveable(stateSaver = ShareSelectionSaver) { mutableStateOf<Pair<ChatTarget, SharedContent>?>(null) }
+    if (session.loggedIn && sharedContent != null) ShareTargetDialog(onShareConsumed) { bot, id ->
+        selectedShare = ChatTarget(session.account!!.accountId, bot, id) to sharedContent
+        onShareConsumed()
+        navController.navigate(Routes.chat(bot, id))
+    }
+    LaunchedEffect(chatTarget, session.loggedIn) {
+        if (session.loggedIn && chatTarget != null) {
+            if (session.account?.accountId == chatTarget.accountId)
+                navController.navigate(Routes.chat(chatTarget.botId, chatTarget.sessionId)) { launchSingleTop = true }
+            onTargetConsumed()
+        }
+    }
+    LaunchedEffect(session.account?.accountId) {
+        if (selectedShare?.first?.accountId != session.account?.accountId) selectedShare = null
+    }
     LaunchedEffect(session.loggedIn) {
         if (!session.loggedIn && navController.currentDestination?.route != Routes.LOGIN) {
             navController.navigate(Routes.LOGIN) { popUpTo(navController.graph.id) { inclusive = true } }
@@ -198,13 +215,20 @@ fun MemohApp() {
             val state by viewModel.state.collectAsState()
             val context = LocalContext.current
             var controlsOpen by remember { mutableStateOf(false) }
-            val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-                uri?.let { viewModel.attach(context, it) }
+            val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+                viewModel.attach(context, uris)
             }
             LaunchedEffect(state.navigateSessionId) {
                 state.navigateSessionId?.let { id ->
                     viewModel.clearNavigation()
                     navController.navigate(Routes.chat(botId, id))
+                }
+            }
+            LaunchedEffect(selectedShare?.second?.id, state.session?.id, state.draftRestoring) {
+                selectedShare?.takeIf { it.first.botId == botId && it.first.sessionId == sessionId &&
+                    state.session?.id == sessionId && !state.draftRestoring }?.let {
+                    viewModel.importShared(context, it.second.text, it.second.uris)
+                    selectedShare = null
                 }
             }
             if (controlsOpen) ChatControlsSheet(state, viewModel, { controlsOpen = false })
@@ -254,6 +278,7 @@ fun MemohApp() {
                 onOpenFeature = { navController.navigate(Routes.feature(botId, it)) },
                 onPickAttachment = { images -> attachmentPicker.launch(if (images) arrayOf("image/*") else arrayOf("*/*")) },
                 onRemoveAttachment = viewModel::removeAttachment,
+                onCancelAttachments = viewModel::cancelAttachments,
                 onConfirmFolder = viewModel::confirmFolderChange,
                 onCancelFolder = viewModel::cancelFolderChange,
                 onOpenSurface = { navController.navigate(Routes.workspace(botId, it.name)) },
@@ -463,6 +488,7 @@ private fun SessionsSection(
         onConfirmDelete = viewModel::delete,
         onDismissError = viewModel::dismissError,
         onRetry = viewModel::refresh,
+        onLoadMore = viewModel::loadMore,
         onSelectTab = viewModel::selectTab,
         onQueryChange = viewModel::setQuery,
         onBotSettings = onBotSettings,

@@ -126,6 +126,7 @@ fun SessionsScreen(
     onConfirmDelete: (Session) -> Unit,
     onDismissError: () -> Unit,
     onRetry: () -> Unit,
+    onLoadMore: () -> Unit = {},
     onSelectTab: (BotTab) -> Unit = {},
     onQueryChange: (String) -> Unit = {},
     onBotSettings: () -> Unit = {},
@@ -262,7 +263,8 @@ fun SessionsScreen(
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "没有匹配的内容",
-                                description = "换个关键词试试。",
+                                description = if (state.nextCursor != null) "已加载的 ${state.sessions.size} 个会话中没有匹配，可继续加载更早的会话。" else "已搜索全部会话标题，可换个关键词试试。",
+                                action = { if (state.nextCursor != null) PageFooter(state, onLoadMore) },
                             )
                         }
                     }
@@ -293,6 +295,7 @@ fun SessionsScreen(
                             onBeginRename = onBeginRename,
                             onBeginDelete = onBeginDelete,
                             onOpenFolder = onOpenFolder,
+                            onLoadMore = onLoadMore,
                         )
                     }
                 }
@@ -519,6 +522,7 @@ private fun SessionList(
     onBeginRename: (Session) -> Unit,
     onBeginDelete: (Session) -> Unit,
     onOpenFolder: (Workdir) -> Unit,
+    onLoadMore: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -528,6 +532,10 @@ private fun SessionList(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp),
         verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
     ) {
+        if (state.query.isNotBlank()) item(key = "search-scope") {
+            Text(if (state.nextCursor != null) "搜索已加载的 ${state.sessions.size} 个会话标题" else "搜索全部会话标题",
+                style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp))
+        }
         if (state.visibleFolders.isNotEmpty()) {
             item(key = "header-folders") { SectionHeader("文件夹") }
             itemsIndexed(state.visibleFolders, key = { _, folder -> "folder-${folder.id}" }) { index, folder ->
@@ -565,6 +573,23 @@ private fun SessionList(
                     onDelete = { onBeginDelete(session) },
                 )
             }
+        }
+        if (state.nextCursor != null) item(key = "load-more") {
+            androidx.compose.runtime.LaunchedEffect(state.nextCursor) {
+                if (state.query.isBlank() && state.loadMoreError == null) onLoadMore()
+            }
+            PageFooter(state, onLoadMore)
+        }
+    }
+}
+
+@Composable
+private fun PageFooter(state: SessionsUiState, onLoadMore: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        state.loadMoreError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        if (state.loadingMore) CircularProgressIndicator(Modifier.size(24.dp))
+        else TextButton(onClick = onLoadMore, enabled = !state.loading) {
+            Text(if (state.loadMoreError != null) "重试加载更多" else "加载更早的会话")
         }
     }
 }

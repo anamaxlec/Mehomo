@@ -10,6 +10,12 @@ import kotlinx.coroutines.withContext
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.memoh.core.data.SessionRepository
+import dev.memoh.core.data.SettingsStore
+import dev.memoh.core.data.RuntimeMonitorEvents
+import dev.memoh.core.data.LocalRunAccepted
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import dev.memoh.core.model.RunStatus
 import dev.memoh.core.model.RuntimeCursor
 import dev.memoh.core.model.RuntimeState
@@ -91,6 +97,8 @@ data class ChatUiState(
     val selectedAgentId: String? = null,
     val attachments: List<ChatAttachment> = emptyList(),
     val commandOutput: String? = null,
+    val attachmentLoading: Boolean = false,
+    val draftRestoring: Boolean = false,
     val busy: Boolean = false,
     val queue: SessionQueueResponse = SessionQueueResponse(),
     val controls: RuntimeControls? = null,
@@ -196,7 +204,7 @@ data class ChatUiState(
      * stranded.
      */
     val canSend: Boolean
-        get() = !busy && regeneration == null && !awaitingSnapshot && socketStatus == SocketStatus.Connected &&
+        get() = !busy && !attachmentLoading && !draftRestoring && regeneration == null && !awaitingSnapshot && socketStatus == SocketStatus.Connected &&
             !(session?.isLocal == false)
 
     /**
@@ -303,6 +311,7 @@ class ChatViewModel @Inject constructor(
     private val repository: SessionRepository,
     private val json: Json,
     private val socketFactory: ChatSocketFactory,
+    private val settings: SettingsStore,
 ) : ViewModel() {
 
     suspend fun loadMedia(location: String): ByteArray {
@@ -318,6 +327,12 @@ class ChatViewModel @Inject constructor(
     private var socket: ChatSocket? = null
     private var historyJob: kotlinx.coroutines.Job? = null
     private var sessionInfoJob: kotlinx.coroutines.Job? = null
+    private var openJob: Job? = null
+    private var attachmentJob: Job? = null
+    private var draftAddress: Triple<String, String, String>? = null
+    private var draftRevision = 0L
+    private var attachmentReadId = 0L
+    private var draftInvocationId: String? = null
 
     /** Debounce for coalescing streaming appends into fewer recompositions. */
     private var flushJob: kotlinx.coroutines.Job? = null
@@ -331,11 +346,26 @@ class ChatViewModel @Inject constructor(
      */
     fun open(botId: String, sessionId: String) {
         if (_state.value.session?.id == sessionId && socket != null) return
-        _state.value = ChatUiState(botId = botId, historyLoading = true)
-        viewModelScope.launch {
+        openJob?.cancel()
+        attachmentJob?.cancel()
+        attachmentReadId++
+        socket?.close(); socket = null
+        val generation = repository.generation
+        draftAddress = repository.state.value.account?.accountId?.let { Triple(it, botId, sessionId) }
+        draftRevision = 0
+        draftInvocationId = null
+        _state.value = ChatUiState(botId = botId, historyLoading = true, draftRestoring = true)
+        openJob = viewModelScope.launch {
+            val address = draftAddress
+            val restored = try { address?.let { settings.draft(it.first, it.second, it.third) } }
+                catch (e: java.io.IOException) { _state.update { it.copy(error = "读取草稿失败") }; null }
+            if (generation != repository.generation) return@launch
+            _state.update { it.copy(draft = if (draftRevision == 0L) restored.orEmpty() else it.draft, draftRestoring = false) }
             val api = repository.api()
             val session = runCatching { api?.session(botId, sessionId) }
                 .getOrNull()
+            currentCoroutineContext().ensureActive()
+            if (generation != repository.generation) return@launch
             val resolved = session ?: Session(id = sessionId, botId = botId)
             _state.update {
                 it.copy(
@@ -435,6 +465,15 @@ class ChatViewModel @Inject constructor(
 
             UIStreamEvent.RUN_ACCEPTED -> {
                 val invocationId = event.invocationId
+                val address = draftAddress
+                val acceptedSession = state.value.session
+                val acceptedRun = event.runId
+                if (acceptedRun != null && address != null && acceptedSession != null &&
+                    repository.state.value.account?.accountId == address.first &&
+                    (event.sessionId == null || event.sessionId == acceptedSession.id)) {
+                    RuntimeMonitorEvents.accepted(LocalRunAccepted(address.first, address.second, acceptedSession, acceptedRun))
+                }
+                val acceptedDraft = draftInvocationId != null && draftInvocationId == invocationId
                 _state.update { current ->
                     // An acceptance can precede the snapshot carrying the user
                     // turn. Keep the bubble until that replacement is visible.
@@ -447,6 +486,7 @@ class ChatViewModel @Inject constructor(
                         },
                     )
                 }
+                if (acceptedDraft) { draftInvocationId = null; persistDraft() }
             }
 
             UIStreamEvent.RUN_REJECTED -> {
@@ -459,10 +499,12 @@ class ChatViewModel @Inject constructor(
                         error = event.message ?: "消息被服务器拒绝",
                         // Restore the text so it is not lost; the composer picks
                         // this up as a draft.
-                        draft = rejected?.text ?: current.draft,
-                        attachments = rejected?.attachments ?: current.attachments,
+                        draft = listOfNotNull(rejected?.text, current.draft.takeIf(String::isNotBlank)).joinToString("\n"),
+                        attachments = rejected?.attachments.orEmpty() + current.attachments,
                     )
                 }
+                persistDraft()
+                if (draftInvocationId == invocationId) draftInvocationId = null
             }
 
             UIStreamEvent.CONTROL_ACK -> {
@@ -483,6 +525,10 @@ class ChatViewModel @Inject constructor(
             }
 
             else -> Unit
+        }
+        if (!state.value.runtime.needsSnapshot && draftInvocationId != null && state.value.runtime.run?.invocationId == draftInvocationId) {
+            draftInvocationId = null
+            persistDraft()
         }
         if (event.type in setOf(UIStreamEvent.RUNTIME_SNAPSHOT, UIStreamEvent.RUNTIME_DELTA) &&
             previousRun != null && !previousRun.isTerminal && previousRun.configurationOnly != true) {
@@ -820,8 +866,12 @@ class ChatViewModel @Inject constructor(
         val session = current.session ?: return
         val trimmed = text.trim()
         if (trimmed.isEmpty() && current.attachments.isEmpty()) return
+        if (current.attachmentLoading || current.draftRestoring) {
+            _state.update { it.copy(error = "请等待草稿和附件读取完成") }; return
+        }
         if (!current.canSend || current.busy) {
-            _state.update { it.copy(draft = trimmed, error = "会话正在连接，请稍后发送") }; return
+            setDraft(text)
+            _state.update { it.copy(error = "会话正在连接，请稍后发送") }; return
         }
         if (!session.isLocal) {
             _state.update { it.copy(error = "此会话来自外部渠道，只能查看") }
@@ -829,6 +879,8 @@ class ChatViewModel @Inject constructor(
         }
 
         val invocationId = UUID.randomUUID().toString()
+        draftInvocationId = invocationId
+        draftAddress?.let { settings.saveDraft(it.first, it.second, it.third, text) }
         _state.update {
             it.copy(
                 pending = it.pending + PendingTurn(invocationId, trimmed, current.attachments),
@@ -897,10 +949,22 @@ class ChatViewModel @Inject constructor(
 
     fun clearError() = _state.update { it.copy(error = null, notice = null) }
     fun removeAttachment(index: Int) { _state.update { it.copy(attachments = it.attachments.filterIndexed { i, _ -> i != index }) } }
-    fun attach(context: Context, uri: Uri) {
+    fun attach(context: Context, uri: Uri) = attach(context, listOf(uri))
+
+    fun cancelAttachments() { attachmentReadId++; attachmentJob?.cancel(); _state.update { it.copy(attachmentLoading = false) } }
+
+    fun attach(context: Context, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        if (state.value.attachmentLoading) { _state.update { it.copy(error = "附件正在读取，请稍后再添加") }; return }
         val app = context.applicationContext
-        viewModelScope.launch {
-            try {
+        val generation = repository.generation
+        val address = draftAddress
+        val readId = ++attachmentReadId
+        _state.update { it.copy(attachmentLoading = true) }
+        attachmentJob = viewModelScope.launch {
+            try { for (uri in uris) {
+                try {
+                check(_state.value.attachments.size < 8) { "一次最多添加 8 个附件" }
                 val attachment = withContext(Dispatchers.IO) {
                     val resolver = app.contentResolver
                     val mime = resolver.getType(uri) ?: "application/octet-stream"
@@ -911,6 +975,7 @@ class ChatViewModel @Inject constructor(
                         val output = ByteArrayOutputStream()
                         val buffer = ByteArray(8192)
                         while (true) {
+                            currentCoroutineContext().ensureActive()
                             val count = input.read(buffer)
                             if (count < 0) break
                             check(output.size() + count <= 10 * 1024 * 1024) { "请使用 10 MB 以内的附件" }
@@ -918,17 +983,32 @@ class ChatViewModel @Inject constructor(
                         }
                         output.toByteArray()
                     } ?: error("无法读取附件")
+                    check(bytes.isNotEmpty()) { "$name 是空文件" }
                     ChatAttachment(type = if (mime.startsWith("image/")) "image" else "file", mime = mime, name = name,
                         base64 = "data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP))
                 }
+                if (generation != repository.generation || address != draftAddress || readId != attachmentReadId) return@launch
+                val total = _state.value.attachments.sumOf { attachmentSize(it) } + attachmentSize(attachment)
+                check(total <= 20 * 1024 * 1024) { "附件总大小不能超过 20 MB" }
                 _state.update { it.copy(attachments = it.attachments + attachment) }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { _state.update { it.copy(error = e.message ?: "读取附件失败") } }
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { _state.update { it.copy(error = e.message ?: "读取附件失败") } }
+            } } finally {
+                if (address == draftAddress && readId == attachmentReadId) _state.update { it.copy(attachmentLoading = false) }
+            }
         }
     }
 
-    /** Composer text. Kept in the ViewModel so it survives configuration changes. */
-    fun setDraft(text: String) = _state.update { it.copy(draft = text) }
+    fun importShared(context: Context, text: String, uris: List<Uri>) {
+        setDraft(listOf(state.value.draft, text).filter(String::isNotBlank).joinToString("\n"))
+        attach(context, uris)
+    }
+
+    fun setDraft(text: String) { draftRevision++; _state.update { it.copy(draft = text) }; persistDraft() }
+
+    private fun persistDraft() {
+        draftAddress?.let { settings.saveDraft(it.first, it.second, it.third, state.value.draft) }
+    }
 
     override fun onCleared() {
         super.onCleared()
@@ -940,4 +1020,9 @@ class ChatViewModel @Inject constructor(
     private companion object {
         const val PAGE_SIZE = 50
     }
+}
+
+internal fun attachmentSize(attachment: ChatAttachment): Long {
+    val payload = attachment.base64.substringAfter(',', "")
+    return payload.length.toLong() * 3 / 4 - payload.takeLast(2).count { it == '=' }
 }

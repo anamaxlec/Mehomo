@@ -127,7 +127,7 @@ fun ReasoningCard(
 @Composable
 fun ToolCard(
     message: UIMessage,
-    isStreaming: Boolean,
+    isRunActive: Boolean,
     modifier: Modifier = Modifier,
     onToggleDetails: () -> Unit = {},
 ) {
@@ -155,7 +155,7 @@ fun ToolCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (message.running) LoadingIndicator(Modifier.size(18.dp))
+            if (isRunActive && message.running && message.output == null) LoadingIndicator(Modifier.size(18.dp))
             else message.elapsedTimeSeconds?.let { seconds ->
                 Text(
                     text = String.format(java.util.Locale.ROOT, "%.1fs", seconds),

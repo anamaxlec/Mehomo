@@ -94,6 +94,7 @@ fun ProfileScreen(
                         }
                     }
             }
+            item { NotificationSettings(settings) }
             item {
                 SettingsRow("退出登录", "再次使用时需要重新登录", Icons.AutoMirrored.Filled.Logout, tone = ListIconTone.Error,
                     onClick = { logoutOpen = true }, trailing = null)
