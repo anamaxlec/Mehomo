@@ -190,6 +190,13 @@ class DtoDecodingTest {
     }
 
     @Test
+    fun `catalog models without a display alias use their provider model identity`() {
+        val catalog = json.decodeFromString(AgentModelCatalog.serializer(), """{"models":[{"id":"db-uuid","resolved_model_id":"mimo-v2.6-flash","name":""}]}""")
+        assertEquals("mimo-v2.6-flash", catalog.pickerModels.single().label)
+        assertEquals("MiMo", catalog.pickerModels.single().copy(displayName = "MiMo").label)
+    }
+
+    @Test
     fun `only enabled chat models are selectable`() {
         val chat = json.decodeFromString(
             ChatModel.serializer(),

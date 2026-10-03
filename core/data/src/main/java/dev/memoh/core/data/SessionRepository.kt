@@ -89,6 +89,31 @@ class SessionRepository(
         )
     }
 
+    suspend fun cloudTeams(): List<dev.memoh.core.model.TeamMembership> {
+        check(state.value.account?.kind == "cloud" && state.value.loggedIn) { "请先登录 Memoh Cloud" }
+        return cloudAuth.teams()
+    }
+
+    fun selectCloudTeam(team: dev.memoh.core.model.Team) {
+        val current = state.value.account ?: return
+        check(current.kind == "cloud" && state.value.loggedIn) { "请先登录 Memoh Cloud" }
+        if (current.teamId == team.teamId) return
+        val account = current.copy(accountId = "cloud:${current.username.orEmpty()}:${team.teamId}", teamId = team.teamId)
+        credentials.saveAccount(account)
+        activate(account)
+    }
+
+    suspend fun cloudRead(path: String, unscoped: Boolean = false) = cloudAuth.platformRead(path, unscoped)
+    suspend fun cloudWrite(path: String, method: String, body: kotlinx.serialization.json.JsonObject? = null, unscoped: Boolean = false) = cloudAuth.platformWrite(path, method, body, unscoped)
+
+    suspend fun reloadAfterCloudTeamRemoved() {
+        val current = state.value.account ?: return
+        val unscoped = current.copy(accountId = "cloud:${current.username.orEmpty()}:", teamId = null)
+        credentials.saveAccount(unscoped)
+        activate(unscoped)
+        cloudTeams().firstNotNullOfOrNull { it.team }?.let(::selectCloudTeam)
+    }
+
     fun signOut() {
         if (credentials.activeAccount()?.kind == "cloud") cloudAuth.clearSession()
         credentials.activeAccountId()?.let { credentials.clearToken(it) }

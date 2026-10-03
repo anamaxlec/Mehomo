@@ -3,8 +3,12 @@ package dev.memoh.core.designsystem.motion
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.PathEasing
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -14,26 +18,26 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.unveilIn
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 
 /**
  * The app's motion vocabulary.
  *
- * Material 3 Expressive describes motion as two channels that always run
- * together: a *spatial* channel carrying position and size, and an *effects*
- * channel carrying opacity. Keeping them separate is what lets a transition read
- * as one object moving rather than a cross-fade between two.
+ * Controls and panels combine spatial movement with opacity effects. Detail
+ * navigation follows Flare's Android timing: a short fade within a longer
+ * spatial transition, with a separate scale-and-unveil predictive back preview.
  *
  * These are hand-written specs rather than `MaterialTheme.motionScheme` because
  * the scheme's specs are not available outside a composable, and navigation
- * transitions are configured at graph-construction time. The durations and
- * curves here match the scheme's `default` tier (medium duration, emphasised
- * decelerate) so a hand-written transition and a scheme-driven one feel like the
- * same app.
+ * transitions are configured at graph-construction time.
  *
- * Two rules the whole file follows:
+ * Controls and panels follow two timing rules:
  *  - enter is slower than exit, because arriving content should be watched and
  *    leaving content should get out of the way;
  *  - the outgoing element fades faster than it moves, so the two never look
@@ -59,30 +63,57 @@ object MemohMotion {
 
     // -- navigation ---------------------------------------------------------
 
-    /**
-     * Pushing to a detail screen: the new screen slides in from the end edge
-     * while the list slides a little the same way, so the list appears to be
-     * pushed back rather than replaced.
-     *
-     * The outgoing screen moves only a third of the distance: full-width motion
-     * for both makes the transition feel like a carousel instead of a push.
-     */
-    fun detailEnter(): EnterTransition =
-        slideInHorizontally(animationSpec = enterSpec()) { full -> full / 4 } +
-            fadeIn(enterSpec())
+    // Adapted from DimensionDev/Flare's Router.kt (AGPL-3.0); see THIRD_PARTY_NOTICES.md.
+    const val NAVIGATION_MS = 450
+    val NavigationDistance = 96.dp
+    val PredictiveDisplayMargin = 8.dp
+    private const val PREDICTIVE_TARGET_SCALE = 0.85f
+    private val NavigationSpatialEasing = PathEasing(Path().apply {
+        moveTo(0f, 0f)
+        cubicTo(0.05f, 0f, 0.133333f, 0.06f, 0.166666f, 0.4f)
+        cubicTo(0.208333f, 0.82f, 0.25f, 1f, 1f, 1f)
+    })
+    private val PredictiveEasing = CubicBezierEasing(0.1f, 0.1f, 0f, 1f)
 
-    fun detailExit(): ExitTransition =
-        slideOutHorizontally(animationSpec = exitSpec()) { full -> -full / 8 } +
-            fadeOut(exitSpec())
+    private fun navigationSpec() = tween<IntOffset>(NAVIGATION_MS, easing = NavigationSpatialEasing)
+    private fun detailFadeOut() = fadeOut(keyframes {
+        durationMillis = NAVIGATION_MS
+        1f at 0
+        1f at 35 using LinearEasing
+        0f at 118
+    })
 
-    /** Popping back: the reverse, with the returning screen arriving from behind. */
-    fun detailPopEnter(): EnterTransition =
-        slideInHorizontally(animationSpec = enterSpec()) { full -> -full / 8 } +
-            fadeIn(enterSpec())
+    /** [slideDistance] is 96dp in pixels, signed for the layout direction. */
+    fun detailEnter(slideDistance: Int): EnterTransition =
+        slideInHorizontally(animationSpec = navigationSpec()) { slideDistance } + fadeIn(keyframes {
+            durationMillis = NAVIGATION_MS
+            0f at 0
+            0f at 50 using LinearEasing
+            1f at 133
+        })
 
-    fun detailPopExit(): ExitTransition =
-        slideOutHorizontally(animationSpec = exitSpec()) { full -> full / 4 } +
-            fadeOut(exitSpec())
+    fun detailExit(slideDistance: Int): ExitTransition =
+        slideOutHorizontally(animationSpec = navigationSpec()) { -slideDistance }
+
+    fun detailPopEnter(slideDistance: Int): EnterTransition =
+        slideInHorizontally(animationSpec = navigationSpec()) { -slideDistance }
+
+    fun detailPopExit(slideDistance: Int): ExitTransition =
+        slideOutHorizontally(animationSpec = navigationSpec()) { slideDistance } + detailFadeOut()
+
+    fun predictivePopEnter(enteringOffset: Int, scrimColor: Color): EnterTransition =
+        unveilIn(initialColor = scrimColor, matchParentSize = true, animationSpec = keyframes {
+            durationMillis = NAVIGATION_MS
+            scrimColor at 0 using LinearEasing
+            scrimColor.copy(alpha = 0f) at NAVIGATION_MS
+        }) + scaleIn(tween(NAVIGATION_MS, easing = PredictiveEasing), initialScale = 0.95f) +
+            slideInHorizontally(tween(NAVIGATION_MS, easing = PredictiveEasing)) { -enteringOffset }
+
+    fun predictivePopExit(fromLeft: Boolean, displayMargin: Int): ExitTransition =
+        scaleOut(tween(NAVIGATION_MS, easing = PredictiveEasing), targetScale = PREDICTIVE_TARGET_SCALE) +
+            slideOutHorizontally(tween(NAVIGATION_MS, easing = PredictiveEasing)) { fullWidth ->
+                if (fromLeft) (fullWidth * (1f - PREDICTIVE_TARGET_SCALE) / 2f).toInt() - displayMargin else 0
+            } + detailFadeOut()
 
     // -- in-place -----------------------------------------------------------
 

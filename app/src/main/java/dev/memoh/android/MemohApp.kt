@@ -14,6 +14,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Scaffold
@@ -23,6 +24,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -34,22 +36,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavType
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dev.memoh.core.designsystem.component.MemohCornerFab
-import dev.memoh.core.designsystem.component.MemohSectionBar
-import dev.memoh.core.designsystem.component.collapseOnScroll
+import dev.memoh.core.designsystem.component.LocalFloatingNavigationPadding
 import dev.memoh.core.designsystem.motion.MemohMotion
 import dev.memoh.feature.chat.ChatControlsSheet
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import dev.memoh.core.designsystem.component.MemohActionButton
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Compress
+import androidx.core.content.FileProvider
+import android.net.Uri
+import android.widget.Toast
 import dev.memoh.feature.chat.ChatScreen
 import dev.memoh.feature.chat.ChatViewModel
 import dev.memoh.feature.login.CloudLoginScreen
@@ -68,9 +72,15 @@ import dev.memoh.feature.sessions.WorkspaceViewModel
 import dev.memoh.feature.sessions.WorkspaceScreen
 import dev.memoh.core.model.WorkspaceSurface
 import dev.memoh.feature.settings.SettingsViewModel
+import dev.memoh.feature.bots.ManagementPage
+import dev.memoh.feature.bots.ManagementScreen
+import dev.memoh.feature.bots.ManagementViewModel
+import dev.memoh.feature.bots.OfflineHistoryScreen
+import dev.memoh.feature.bots.OfflineHistoryViewModel
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
@@ -96,6 +106,10 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
     val navController = rememberNavController()
     val settings: SettingsViewModel = hiltViewModel()
     val session by settings.session.collectAsState()
+    val configured by settings.floatingSections.collectAsState()
+    val sections = configured.mapNotNull { name -> MainSection.entries.firstOrNull { it.name == name } }
+        .ifEmpty { listOf(MainSection.Chats, MainSection.Profile) }
+    val navigation = rememberSectionNavigationState()
     val start = remember { if (session.loggedIn) Routes.MAIN else Routes.LOGIN }
     var selectedShare by rememberSaveable(stateSaver = ShareSelectionSaver) { mutableStateOf<Pair<ChatTarget, SharedContent>?>(null) }
     if (session.loggedIn && sharedContent != null) ShareTargetDialog(onShareConsumed) { bot, id ->
@@ -110,8 +124,13 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             onTargetConsumed()
         }
     }
+    var previousAccount by remember { mutableStateOf(session.account?.accountId) }
     LaunchedEffect(session.account?.accountId) {
         if (selectedShare?.first?.accountId != session.account?.accountId) selectedShare = null
+        if (previousAccount != null && session.loggedIn && previousAccount != session.account?.accountId) {
+            navController.navigate(Routes.MAIN) { popUpTo(navController.graph.id) { inclusive = true } }
+        }
+        previousAccount = session.account?.accountId
     }
     LaunchedEffect(session.loggedIn) {
         if (!session.loggedIn && navController.currentDestination?.route != Routes.LOGIN) {
@@ -119,19 +138,9 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
         }
     }
 
-    NavHost(
-        navController = navController,
-        startDestination = start,
-        // Pushing into a conversation moves the list back and slides the chat
-        // in; popping reverses it. A plain cross-fade gave no sense of depth —
-        // the two screens appeared to swap places rather than one being opened
-        // on top of the other.
-        enterTransition = { MemohMotion.detailEnter() },
-        exitTransition = { MemohMotion.detailExit() },
-        popEnterTransition = { MemohMotion.detailPopEnter() },
-        popExitTransition = { MemohMotion.detailPopExit() },
-    ) {
-        composable(Routes.LOGIN) {
+    FloatingNavigationHost(navController = navController, startDestination = start,
+        sections = sections, navigation = navigation, enabled = session.loggedIn) {
+        memohComposable(Routes.LOGIN) {
             val viewModel: LoginViewModel = hiltViewModel()
             val state by viewModel.state.collectAsState()
             val signedIn by viewModel.signedIn.collectAsState()
@@ -177,32 +186,57 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             }
         }
 
-        composable(Routes.MAIN) {
+        memohComposable(Routes.MAIN) {
             MainShell(
+                navigation = navigation,
                 onOpenSession = { botId, sessionId ->
                     navController.navigate(Routes.chat(botId, sessionId))
                 },
+                onOpenManagement = { botId, page -> navController.navigate(Routes.management(botId, page.name)) },
+                onOpenHistory = { navController.navigate(Routes.HISTORY) },
             )
         }
 
-        composable(Routes.FEATURE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("feature") { type = NavType.StringType })) { entry ->
+        memohComposable(Routes.HISTORY) {
+            val vm: OfflineHistoryViewModel = hiltViewModel()
+            val state by vm.state.collectAsState()
+            LaunchedEffect(Unit) { vm.refresh() }
+            OfflineHistoryScreen(state, vm, onBack = { navController.popBackStack() },
+                onOpen = { bot, id -> navController.navigate(Routes.chat(bot, id)) })
+        }
+
+        memohComposable(Routes.MANAGEMENT, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("page") { type = NavType.StringType })) { entry ->
+            val botId = entry.arguments?.getString("botId").orEmpty().takeUnless { it == "account" }.orEmpty()
+            val page = ManagementPage.entries.firstOrNull { it.name == entry.arguments?.getString("page") } ?: ManagementPage.Bot
+            val vm: ManagementViewModel = hiltViewModel()
+            val state by vm.state.collectAsState()
+            LaunchedEffect(botId, page) { vm.open(botId, page) }
+            DisposableEffect(Unit) { onDispose { vm.cancelAuthorization() } }
+            ManagementScreen(state, vm, onBack = { navController.popBackStack() },
+                onOpenBot = { navController.navigate(Routes.management(it, ManagementPage.Bot.name)) },
+                onOpenPage = { navController.navigate(Routes.management(botId, it.name)) },
+                onOpenApps = { navController.navigate(Routes.feature(botId, BotFeature.Apps.name)) })
+        }
+
+        memohComposable(Routes.FEATURE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("feature") { type = NavType.StringType })) { entry ->
             val botId = entry.arguments?.getString("botId").orEmpty()
             val feature = BotFeature.entries.firstOrNull { it.name == entry.arguments?.getString("feature") } ?: BotFeature.Memory
             val viewModel: BotFeatureViewModel = hiltViewModel()
             val state by viewModel.state.collectAsState()
             LaunchedEffect(botId, feature) { viewModel.open(botId, feature) }
             BotFeatureScreen(state.forScreen(botId, feature, viewModel), viewModel, onBack = { navController.popBackStack() },
+                onOpenConnectors = { navController.navigate(Routes.management(botId, ManagementPage.Connectors.name)) },
                 onOpenSession = { navController.navigate(Routes.chat(botId, it)) })
         }
 
-        composable(Routes.WORKSPACE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("surface") { type = NavType.StringType })) { entry ->
+        memohComposable(Routes.WORKSPACE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("surface") { type = NavType.StringType })) { entry ->
             val botId = entry.arguments?.getString("botId").orEmpty()
             val surface = WorkspaceSurface.entries.firstOrNull { it.name == entry.arguments?.getString("surface") } ?: WorkspaceSurface.Terminal
             val viewModel: WorkspaceViewModel = hiltViewModel()
-            WorkspaceScreen(botId, "", surface, viewModel, onBack = { navController.popBackStack() })
+            WorkspaceScreen(botId, "", surface, viewModel, onBack = { navController.popBackStack() }, bottomControlSpace = true)
         }
 
-        composable(
+        memohComposable(
             route = Routes.CHAT,
             arguments = listOf(
                 navArgument(Routes.ARG_BOT_ID) { type = NavType.StringType },
@@ -215,9 +249,26 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             val state by viewModel.state.collectAsState()
             val context = LocalContext.current
             var controlsOpen by remember { mutableStateOf(false) }
+            var pendingImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
+            var capturePath by rememberSaveable { mutableStateOf<String?>(null) }
             val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-                viewModel.attach(context, uris)
+                if (uris.any { context.contentResolver.getType(it)?.startsWith("image/") == true }) pendingImages = uris
+                else viewModel.attach(context, uris)
             }
+            val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+                val file = capturePath?.let { java.io.File(it) }
+                capturePath = null
+                if (success && file != null) viewModel.attach(context, listOf(FileProvider.getUriForFile(context, "${context.packageName}.files", file)), onConsumed = { file.delete() })
+                else file?.delete()
+            }
+            if (pendingImages.isNotEmpty()) AlertDialog(onDismissRequest = { pendingImages = emptyList() }, title = { Text("添加图片") },
+                text = { Text("原图保留文件内容；压缩会将静态图片缩至最长边 2048 px，文件较小时保留原图。") },
+                confirmButton = { MemohActionButton("保留原图", Icons.Filled.Image, {
+                    val selected = pendingImages; pendingImages = emptyList(); viewModel.attach(context, selected)
+                }, primary = true) },
+                dismissButton = { MemohActionButton("压缩", Icons.Filled.Compress, {
+                    val selected = pendingImages; pendingImages = emptyList(); viewModel.attach(context, selected, compressImages = true)
+                }) })
             LaunchedEffect(state.navigateSessionId) {
                 state.navigateSessionId?.let { id ->
                     viewModel.clearNavigation()
@@ -277,6 +328,12 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onCompactContext = viewModel::compact,
                 onOpenFeature = { navController.navigate(Routes.feature(botId, it)) },
                 onPickAttachment = { images -> attachmentPicker.launch(if (images) arrayOf("image/*") else arrayOf("*/*")) },
+                onTakePhoto = {
+                    val file = java.io.File.createTempFile("photo-", ".jpg", java.io.File(context.cacheDir, "capture").apply { mkdirs() })
+                    capturePath = file.absolutePath
+                    try { camera.launch(FileProvider.getUriForFile(context, "${context.packageName}.files", file)) }
+                    catch (e: android.content.ActivityNotFoundException) { capturePath = null; file.delete(); Toast.makeText(context, "没有可用的相机应用", Toast.LENGTH_SHORT).show() }
+                },
                 onRemoveAttachment = viewModel::removeAttachment,
                 onCancelAttachments = viewModel::cancelAttachments,
                 onConfirmFolder = viewModel::confirmFolderChange,
@@ -291,39 +348,31 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
 /**
  * The signed-in shell: one section at a time, with the floating switcher.
  *
- * Kept as a single destination so section changes are not navigation events —
- * the chat screen is the only thing that pushes, which keeps "back" meaning
- * "leave this conversation" rather than "go to the previous tab".
+ * Section changes replace content; conversations and management pages use the
+ * root back stack. Both share the floating controls owned by MemohApp.
  */
 @Composable
 private fun MainShell(
+    navigation: SectionNavigationState,
     onOpenSession: (botId: String, sessionId: String) -> Unit,
+    onOpenManagement: (botId: String, page: ManagementPage) -> Unit,
+    onOpenHistory: () -> Unit,
 ) {
-    var sectionIndex by rememberSaveable { mutableIntStateOf(MainSection.Chats.ordinal) }
+    val rtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
+    fun openSection(section: MainSection, motion: SectionMotion) {
+        navigation.openSection(section, motion)
+    }
 
-    // Driven by the content's scroll position via `collapseOnScroll`; the bar
-    // shrinks rather than disappearing so the user never loses the sense of
-    // where they are.
-    var barExpanded by remember { mutableStateOf(true) }
-
-    // Reset on section changes so a page enters with all navigation choices
-    // visible before its own scrolling can collapse the controls.
-    androidx.compose.runtime.LaunchedEffect(sectionIndex) { barExpanded = true }
-
-    // Hoisted to the shell so the floating bar and the new-session FAB — which
-    // sit on one line and must move together — can both act on the same session
-    // list. The screen renders the list; the shell owns the chrome around it.
+    // The session FAB uses the same scroll-collapse state as the root switcher.
     val sessions: SessionsViewModel = hiltViewModel()
     val sessionsState by sessions.state.collectAsState()
     val settings: SettingsViewModel = hiltViewModel()
-    val configured by settings.floatingSections.collectAsState()
-    val sections = configured.mapNotNull { name -> MainSection.entries.firstOrNull { it.name == name } }
-        .ifEmpty { listOf(MainSection.Chats, MainSection.Profile) }
     val features: BotFeatureViewModel = hiltViewModel()
     val workspace: WorkspaceViewModel = hiltViewModel()
     val featureState by features.state.collectAsState()
     LaunchedEffect(Unit) { sessions.start() }
     val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleState by lifecycleOwner.lifecycle.currentStateAsState()
     DisposableEffect(lifecycleOwner, sessionsState.bot?.id) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -339,48 +388,36 @@ private fun MainShell(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer); features.stopObserving(); sessions.stopObservingRuns() }
     }
-    val requestedFeature = MainSection.entries[sectionIndex].feature
-        ?: BotFeature.Schedules.takeIf { MainSection.entries[sectionIndex] == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Schedules }
-        ?: BotFeature.Files.takeIf { MainSection.entries[sectionIndex] == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Files }
+    val section = navigation.destination.section
+    val requestedFeature = section.feature
+        ?: BotFeature.Schedules.takeIf { section == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Schedules }
+        ?: BotFeature.Files.takeIf { section == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Files }
     LaunchedEffect(requestedFeature, sessionsState.bot?.id) {
         if (requestedFeature != null) features.open(sessionsState.bot?.id.orEmpty(), requestedFeature)
     }
 
     val pageStates = rememberSaveableStateHolder()
-    val section = MainSection.entries[sectionIndex]
-    BackHandler(enabled = section.feature != null) {
-        sectionIndex = MainSection.Profile.ordinal
-    }
-    val showNewSession = section == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Chats && sessionsState.bot != null
+    val showNewSession = section == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Chats && sessionsState.bot != null && LocalFloatingNavigationPadding.current > 0.dp
 
     Scaffold(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            AnimatedContent(
-                modifier = Modifier.fillMaxSize().collapseOnScroll(
-                    expanded = barExpanded,
-                    onExpand = { barExpanded = true },
-                    onCollapse = { barExpanded = false },
-                ),
-                targetState = section,
-                transitionSpec = {
-                    when {
-                        initialState == MainSection.Profile && targetState.feature != null ->
-                            MemohMotion.detailEnter() togetherWith MemohMotion.detailExit()
-                        targetState == MainSection.Profile && initialState.feature != null ->
-                            MemohMotion.detailPopEnter() togetherWith MemohMotion.detailPopExit()
-                        else -> MemohMotion.horizontalSwap(forward = targetState.ordinal >= initialState.ordinal)
-                    }
-                },
-                label = "sectionContent",
-            ) { sectionState ->
+            key(navigation.contentKey) { SectionContent(
+                modifier = Modifier.fillMaxSize(),
+                destination = navigation.destination,
+                backDestination = SectionDestination(MainSection.Profile, SectionMotion.Pop)
+                    .takeIf { section.feature != null && lifecycleState == Lifecycle.State.RESUMED },
+                onBack = { openSection(MainSection.Profile, SectionMotion.Pop) },
+                rtl = rtl,
+            ) { destination ->
+                val sectionState = destination.section
                 pageStates.SaveableStateProvider("${sectionState.name}:${sessionsState.bot?.id.orEmpty()}") {
                     when (sectionState) {
                         MainSection.Chats -> SessionsSection(
                             viewModel = sessions,
                             state = sessionsState,
                             onOpenSession = onOpenSession,
-                            onBarExpandedChange = { barExpanded = it },
-                            onBotSettings = { sectionIndex = MainSection.Profile.ordinal },
+                            onBarExpandedChange = { navigation.barExpanded = it },
+                            onBotSettings = { openSection(MainSection.Profile, SectionMotion.Push) },
                             scheduleContent = { BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), BotFeature.Schedules, features), features, showTitle = false,
                                 onOpenSession = { onOpenSession(sessionsState.bot?.id.orEmpty(), it) }) },
                             fileContent = { BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), BotFeature.Files, features), features, showTitle = false) },
@@ -395,41 +432,32 @@ private fun MainShell(
                             bot = sessionsState.bot,
                             bots = sessionsState.bots,
                             onSelectBot = sessions::selectBot,
+                            onOpenManagement = { page -> onOpenManagement(sessionsState.bot?.id.orEmpty(), page) },
+                            onOpenHistory = onOpenHistory,
                         ) { feature ->
-                            sectionIndex = MainSection.entries.first { it.feature == feature }.ordinal
+                            openSection(MainSection.entries.first { it.feature == feature }, SectionMotion.Push)
                         }
                         MainSection.Terminal, MainSection.Desktop, MainSection.Browser -> WorkspaceScreen(
                             sessionsState.bot?.id.orEmpty(), sessionsState.bot?.displayName ?: sessionsState.bot?.name.orEmpty(),
                             WorkspaceSurface.valueOf(sectionState.name), workspace, bottomControlSpace = true)
                         else -> if (sectionState.feature != null) BotFeatureScreen(
                             featureState.forScreen(sessionsState.bot?.id.orEmpty(), sectionState.feature, features), features,
-                            onBack = { sectionIndex = MainSection.Profile.ordinal },
+                            onBack = { openSection(MainSection.Profile, SectionMotion.Pop) },
+                            onOpenConnectors = { onOpenManagement(sessionsState.bot?.id.orEmpty(), ManagementPage.Connectors) },
                             onOpenSession = { onOpenSession(sessionsState.bot?.id.orEmpty(), it) })
                         else PendingSectionScreen(section = sectionState)
                     }
                 }
-            }
+            } }
 
-            // The bar and the FAB are one row of floating controls, so they share
-            // one container with symmetric edge padding, Flare-style: the bar
-            // anchors to the bottom-start, the FAB centers vertically against
-            // the container the bar defines. Bottom-aligning two controls of
-            // different heights put their baselines on different lines — center
-            // alignment is what reads as "one horizontal line".
+            // Center the FAB against the measured root bar, including larger labels.
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .heightIn(min = (LocalFloatingNavigationPadding.current - 32.dp).coerceAtLeast(0.dp)),
             ) {
-                MemohSectionBar(
-                    items = sections.map { it.navItem },
-                    selectedIndex = sections.indexOf(section),
-                    onSelect = { sectionIndex = sections[it].ordinal },
-                    collapsed = !barExpanded,
-                    modifier = Modifier.align(Alignment.BottomStart),
-                )
-
                 androidx.compose.animation.AnimatedVisibility(
                     visible = showNewSession,
                     modifier = Modifier.align(Alignment.CenterEnd),
@@ -446,7 +474,7 @@ private fun MainShell(
                                 onOpenSession(sessionsState.bot?.id.orEmpty(), session.id)
                             }
                         },
-                        collapsed = !barExpanded,
+                        collapsed = !navigation.barExpanded,
                     )
                 }
             }
@@ -470,10 +498,6 @@ private fun SessionsSection(
     fileContent: @Composable () -> Unit,
     onOpenFolder: (dev.memoh.core.model.Workdir) -> Unit,
 ) {
-    // The bot list is this screen's own dependency: nothing else knows which bot
-    // to show, so the screen asks for it on first composition.
-    androidx.compose.runtime.LaunchedEffect(Unit) { viewModel.start() }
-
     SessionsScreen(
         state = state,
         onSelectBot = viewModel::selectBot,
@@ -489,6 +513,8 @@ private fun SessionsSection(
         onDismissError = viewModel::dismissError,
         onRetry = viewModel::refresh,
         onLoadMore = viewModel::loadMore,
+        onSearchAllTitles = viewModel::searchAllTitles,
+        onStopTitleSearch = viewModel::stopTitleSearch,
         onSelectTab = viewModel::selectTab,
         onQueryChange = viewModel::setQuery,
         onBotSettings = onBotSettings,

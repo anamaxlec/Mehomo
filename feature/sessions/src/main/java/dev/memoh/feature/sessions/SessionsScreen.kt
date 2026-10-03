@@ -100,6 +100,7 @@ import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohSkeleton
 import dev.memoh.core.designsystem.component.MemohSkeletonBlock
 import dev.memoh.core.designsystem.component.MemohRefreshBox
+import dev.memoh.core.designsystem.component.LocalFloatingNavigationPadding
 import dev.memoh.core.model.Bot
 import dev.memoh.core.model.Session
 import dev.memoh.core.model.Workdir
@@ -127,6 +128,8 @@ fun SessionsScreen(
     onDismissError: () -> Unit,
     onRetry: () -> Unit,
     onLoadMore: () -> Unit = {},
+    onSearchAllTitles: () -> Unit = {},
+    onStopTitleSearch: () -> Unit = {},
     onSelectTab: (BotTab) -> Unit = {},
     onQueryChange: (String) -> Unit = {},
     onBotSettings: () -> Unit = {},
@@ -264,7 +267,10 @@ fun SessionsScreen(
                             MemohEmptyState(
                                 title = "没有匹配的内容",
                                 description = if (state.nextCursor != null) "已加载的 ${state.sessions.size} 个会话中没有匹配，可继续加载更早的会话。" else "已搜索全部会话标题，可换个关键词试试。",
-                                action = { if (state.nextCursor != null) PageFooter(state, onLoadMore) },
+                                action = { if (state.nextCursor != null) Column {
+                                    PageFooter(state, onLoadMore)
+                                    TextButton(if (state.searchingAllTitles) onStopTitleSearch else onSearchAllTitles, enabled = !state.loading) { Text(if (state.searchingAllTitles) "停止搜索" else "查找全部标题") }
+                                } },
                             )
                         }
                     }
@@ -296,6 +302,8 @@ fun SessionsScreen(
                             onBeginDelete = onBeginDelete,
                             onOpenFolder = onOpenFolder,
                             onLoadMore = onLoadMore,
+                            onSearchAllTitles = onSearchAllTitles,
+                            onStopTitleSearch = onStopTitleSearch,
                         )
                     }
                 }
@@ -523,18 +531,22 @@ private fun SessionList(
     onBeginDelete: (Session) -> Unit,
     onOpenFolder: (Workdir) -> Unit,
     onLoadMore: () -> Unit,
+    onSearchAllTitles: () -> Unit,
+    onStopTitleSearch: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize(),
         // The floating controls hover over the last row, so the list reserves
         // room for them rather than hiding it.
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = maxOf(96.dp, LocalFloatingNavigationPadding.current)),
         verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
     ) {
         if (state.query.isNotBlank()) item(key = "search-scope") {
-            Text(if (state.nextCursor != null) "搜索已加载的 ${state.sessions.size} 个会话标题" else "搜索全部会话标题",
-                style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (state.nextCursor != null) "搜索已加载的 ${state.sessions.size} 个会话标题" else "搜索全部会话标题", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                if (state.nextCursor != null) TextButton(if (state.searchingAllTitles) onStopTitleSearch else onSearchAllTitles, enabled = !state.loading && (!state.loadingMore || state.searchingAllTitles)) { Text(if (state.searchingAllTitles) "停止" else "全部标题") }
+            }
         }
         if (state.visibleFolders.isNotEmpty()) {
             item(key = "header-folders") { SectionHeader("文件夹") }

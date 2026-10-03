@@ -1,6 +1,9 @@
 # Keep kotlinx.serialization generated serializers for our DTOs.
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.**
+-keepclassmembers class dev.memoh.core.markdown.** {
+    @android.webkit.JavascriptInterface <methods>;
+}
 -keepclassmembers class dev.memoh.** {
     *** Companion;
 }

@@ -22,6 +22,9 @@ object Routes {
      * through the tabs the user visited.
      */
     const val MAIN = "main"
+    const val HISTORY = "offline-history"
+    const val MANAGEMENT = "manage/{botId}/{page}"
+    fun management(botId: String, page: String) = "manage/${android.net.Uri.encode(botId.ifBlank { "account" })}/${android.net.Uri.encode(page)}"
 
     const val FEATURE = "feature/{botId}/{feature}"
     fun feature(botId: String, feature: String) = "feature/${android.net.Uri.encode(botId)}/${android.net.Uri.encode(feature)}"

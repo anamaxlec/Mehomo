@@ -18,10 +18,13 @@ kotlin {
   compilerOptions {
     jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3Api")
+    freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi")
   }
 }
 
 dependencies {
+  implementation(libs.androidx.activity.compose)
+  implementation(libs.androidx.core.ktx)
   implementation(project(":core:designsystem"))
   implementation(libs.androidx.compose.runtime)
   implementation(libs.androidx.compose.ui)

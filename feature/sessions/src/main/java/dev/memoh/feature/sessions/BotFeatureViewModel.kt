@@ -10,6 +10,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlinx.serialization.json.*
 import javax.inject.Inject
 import java.time.LocalDate
@@ -18,6 +20,9 @@ import java.time.ZoneOffset
 enum class BotFeature(val title: String) {
     Memory("记忆"), Schedules("日程"), Usage("用量与状态"), Apps("应用"), Skills("技能"), Mcp("MCP"), Files("文件")
 }
+
+data class McpAuthorization(val id: String, val name: String, val status: JsonObject = JsonObject(emptyMap()), val discovered: Boolean = false,
+    val needsClientId: Boolean = false, val url: String? = null, val oauthState: String? = null)
 
 data class BotFeatureState(
     val botId: String = "",
@@ -31,7 +36,11 @@ data class BotFeatureState(
     val memories: List<MemoryEntry> = emptyList(),
     val memoryStatus: MemoryStatus? = null,
     val graph: MemoryGraph? = null,
+    val graphMemories: List<MemoryEntry> = emptyList(),
     val schedules: List<BotSchedule> = emptyList(),
+    val scheduleWire: Map<String, JsonObject> = emptyMap(),
+    val scheduleOptions: ScheduleOptions = ScheduleOptions(),
+    val scheduleAgentModels: Map<String, List<ChatModel>> = emptyMap(),
     val logSchedule: BotSchedule? = null,
     val logs: ScheduleLogs? = null,
     val usage: TokenUsageSummary? = null,
@@ -50,6 +59,8 @@ data class BotFeatureState(
     val browsing: Boolean = false,
     val skills: List<InstalledSkill> = emptyList(),
     val connections: List<McpConnection> = emptyList(),
+    val mcpExport: String? = null,
+    val mcpAuthorization: McpAuthorization? = null,
     val progress: List<String> = emptyList(),
     val removal: Pair<InstalledApp, JsonObject>? = null,
     val filePath: String = "/data",
@@ -68,6 +79,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     val state = _state.asStateFlow()
     private var loadJob: Job? = null
     private var subscription: Job? = null
+    private var mcpAuthJob: Job? = null
     private val pages = BotFeaturePages()
     private var pageGeneration = repository.generation
 
@@ -80,6 +92,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
             if (_state.value.botId == botId && _state.value.feature == feature) return
             pages.save(_state.value, generation)
         }
+        closeMcpAuthorization()
         pageGeneration = generation
         loadJob?.cancel()
         _state.value = cachedState(botId, feature)
@@ -118,7 +131,14 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                         try { loaded = loaded.copy(memoryStatus = api.memoryStatus(current.botId)) }
                         catch (e: ApiException) { loaded = loaded.copy(notice = "记忆状态：${e.message}") }
                     }
-                    BotFeature.Schedules -> loaded = loaded.copy(schedules = api.schedules(current.botId))
+                    BotFeature.Schedules -> {
+                        val wire = api.managementRead("bots", current.botId, "schedule")
+                        loaded = loaded.copy(schedules = Json { ignoreUnknownKeys = true }.decodeFromJsonElement<ScheduleList>(wire).items.orEmpty(),
+                            scheduleWire = (wire.jsonObject["items"] as? JsonArray).orEmpty().mapNotNull { entry ->
+                                val id = entry.jsonObject["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                                id to entry.jsonObject
+                            }.toMap())
+                    }
                     BotFeature.Usage -> {
                         loaded = loaded.copy(usage = api.tokenUsage(current.botId, current.usageFrom, current.usageTo))
                         try {
@@ -289,10 +309,20 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     fun compactMemory() = action("已提交记忆整理") { api, bot -> api.compactMemory(bot) }
     fun showGraph() = action(refresh = false) { api, bot ->
         val graph = api.memoryGraph(bot)
-        _state.update { it.copy(graph = graph) }
+        val entries = api.memories(bot).results.orEmpty()
+        _state.update { it.copy(graph = graph, graphMemories = entries) }
     }
     fun closeGraph() { _state.update { it.copy(graph = null) } }
-    fun saveSchedule(id: String?, body: JsonObject) = action("日程已保存") { api, bot -> api.saveSchedule(bot, id, body) }
+    fun saveSchedule(id: String?, body: JsonObject, onSaved: () -> Unit = {}) = action("日程已保存") { api, bot -> api.saveSchedule(bot, id, body); onSaved() }
+    fun scheduleOptions() = action(refresh = false) { api, bot ->
+        val zone = api.bot(bot).timezone ?: runCatching { api.managementRead("users", "me").jsonObject["timezone"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+        _state.update { it.copy(scheduleOptions = ScheduleOptions(api.models(), api.agents(bot), api.workdirs(bot), api.sessions(bot).items, zone)) }
+    }
+    fun scheduleAgentOptions(id: String) = action(refresh = false) { api, bot ->
+        try { val models = api.agentModels(bot, id).pickerModels; _state.update { it.copy(scheduleAgentModels = it.scheduleAgentModels + (id to models)) } }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { _state.update { it.copy(scheduleAgentModels = it.scheduleAgentModels + (id to emptyList()), error = "Agent 模型列表读取失败") } }
+    }
     fun deleteSchedule(id: String) = action("日程已删除") { api, bot -> api.deleteSchedule(bot, id) }
     fun toggleSchedule(schedule: BotSchedule) = action { api, bot -> api.saveSchedule(bot, requireNotNull(schedule.id), apiBody("enabled" to (schedule.enabled != true))) }
     fun logs(schedule: BotSchedule) = action(refresh = false) { api, bot ->
@@ -352,8 +382,99 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     fun toggleSkill(skill: InstalledSkill) = action { api, bot -> api.skillAction(bot, if (skill.state == "disabled") "enable" else "disable", requireNotNull(skill.sourcePath)) }
     fun saveMcp(id: String?, body: JsonObject) = action("MCP 已保存") { api, bot -> api.saveMcp(bot, id, body) }
     fun deleteMcp(id: String) = action("MCP 已删除") { api, bot -> api.deleteMcp(bot, id) }
+    fun importMcp(config: JsonObject) = action("MCP 已导入") { api, bot -> api.importMcp(bot, config) }
+    fun exportMcp() = action(refresh = false) { api, bot ->
+        val config = api.exportMcp(bot)
+        _state.update { it.copy(mcpExport = Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), config)) }
+    }
+    fun closeMcpExport() { _state.update { it.copy(mcpExport = null) } }
+    fun mcpAuthorization(connection: McpConnection) {
+        val id = connection.id ?: return
+        val generation = repository.generation
+        action(refresh = false) { api, bot ->
+            val status = api.managementRead("bots", bot, "mcp", id, "oauth", "status") as? JsonObject ?: error("授权状态不可用")
+            if (generation == repository.generation && state.value.botId == bot) _state.update { it.copy(mcpAuthorization = McpAuthorization(id, connection.name ?: "MCP", status)) }
+        }
+    }
+    fun authorizeMcp(clientId: String, clientSecret: String) {
+        val auth = state.value.mcpAuthorization ?: return
+        val generation = repository.generation
+        action(refresh = false) { api, bot ->
+            val base = listOf("bots", bot, "mcp", auth.id, "oauth")
+            val needsId = if (auth.discovered) auth.needsClientId else {
+                val discovery = api.managementResult(base + "discover", "POST", apiBody()).jsonObject
+                (discovery["registration_endpoint"] as? JsonPrimitive)?.contentOrNull.isNullOrBlank()
+            }
+            if (generation != repository.generation || state.value.botId != bot) return@action
+            _state.update { it.copy(mcpAuthorization = auth.copy(discovered = true, needsClientId = needsId)) }
+            require(!needsId || clientId.isNotBlank()) { "此服务需要填写 OAuth client ID" }
+            val result = api.managementResult(base + "authorize", "POST", apiBody("client_id" to clientId.takeIf(String::isNotBlank), "client_secret" to clientSecret.takeIf(String::isNotBlank)))
+            val url = (result.jsonObject["authorization_url"] as? JsonPrimitive)?.contentOrNull?.toHttpUrlOrNull() ?: error("服务未返回授权地址")
+            if (generation != repository.generation || state.value.botId != bot) return@action
+            _state.update { it.copy(mcpAuthorization = auth.copy(discovered = true, needsClientId = needsId, url = url.toString(), oauthState = url.queryParameter("state"))) }
+            pollMcpAuthorization(bot, auth.id, generation)
+        }
+    }
+    private fun pollMcpAuthorization(bot: String, id: String, generation: Long) {
+        mcpAuthJob?.cancel()
+        mcpAuthJob = viewModelScope.launch {
+            try {
+                repeat(120) {
+                    delay(2500)
+                    if (generation != repository.generation || state.value.botId != bot || state.value.mcpAuthorization?.id != id) return@launch
+                    val status = repository.api()?.managementRead("bots", bot, "mcp", id, "oauth", "status") as? JsonObject ?: return@launch
+                    _state.update { current -> current.copy(mcpAuthorization = current.mcpAuthorization?.copy(status = status)) }
+                    if ((status["has_token"] as? JsonPrimitive)?.booleanOrNull == true && (status["expired"] as? JsonPrimitive)?.booleanOrNull != true) {
+                        _state.update { it.copy(notice = "MCP 已授权") }; refresh(); return@launch
+                    }
+                }
+                _state.update { it.copy(notice = "授权等待已结束，可重新检查授权状态") }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (generation == repository.generation && state.value.botId == bot) _state.update { it.copy(error = "检查授权状态失败，请重试") } }
+        }
+    }
+    fun exchangeMcpCallback(callback: String) {
+        val auth = state.value.mcpAuthorization ?: return
+        val generation = repository.generation
+        action("MCP 已授权") { api, bot ->
+            api.managementWrite(listOf("bots", bot, "mcp", auth.id, "oauth", "exchange"), "POST", mcpCallbackBody(callback, auth.oauthState))
+            val status = api.managementRead("bots", bot, "mcp", auth.id, "oauth", "status").jsonObject
+            if (generation == repository.generation && state.value.botId == bot) _state.update { it.copy(mcpAuthorization = auth.copy(status = status, url = null, oauthState = null)) }
+            mcpAuthJob?.cancel()
+        }
+    }
+    fun revokeMcpAuthorization() {
+        val auth = state.value.mcpAuthorization ?: return
+        val generation = repository.generation
+        action("MCP 授权已断开") { api, bot ->
+            api.managementWrite(listOf("bots", bot, "mcp", auth.id, "oauth", "token"), "DELETE")
+            if (generation == repository.generation && state.value.botId == bot) closeMcpAuthorization()
+        }
+    }
+    fun checkMcpAuthorization() {
+        val auth = state.value.mcpAuthorization ?: return
+        val generation = repository.generation
+        action(refresh = true) { api, bot ->
+            val status = api.managementRead("bots", bot, "mcp", auth.id, "oauth", "status").jsonObject
+            if (generation == repository.generation && state.value.botId == bot) _state.update { it.copy(mcpAuthorization = auth.copy(status = status)) }
+        }
+    }
+    fun closeMcpAuthorization() { mcpAuthJob?.cancel(); _state.update { it.copy(mcpAuthorization = null) } }
+    fun toggleMcp(connection: McpConnection) = action("MCP 状态已更新") { api, bot ->
+        api.saveMcp(bot, requireNotNull(connection.id), JsonObject(connection.config.orEmpty() + apiBody(
+            "name" to connection.name, "transport" to connection.type, "is_active" to (connection.isActive != true))))
+    }
     fun probeMcp(id: String) = action(refresh = true) { api, bot ->
         val result = api.probeMcp(bot, id)
         _state.update { it.copy(notice = result["status"]?.jsonPrimitive?.contentOrNull ?: "连通性检查已完成") }
     }
+}
+
+internal fun mcpCallbackBody(callback: String, expectedState: String?): JsonObject {
+    val url = callback.toHttpUrlOrNull() ?: error("请粘贴完整的回调地址")
+    require(url.queryParameter("error").isNullOrBlank()) { "服务未完成授权，请重新授权" }
+    val code = url.queryParameterValues("code").singleOrNull()?.takeIf(String::isNotBlank) ?: error("回调地址缺少有效 code")
+    val returnedState = url.queryParameterValues("state").singleOrNull()?.takeIf(String::isNotBlank) ?: error("回调地址缺少有效 state")
+    require(!expectedState.isNullOrBlank() && returnedState == expectedState) { "此回调不属于当前授权，请重新授权" }
+    return apiBody("code" to code, "state" to returnedState)
 }

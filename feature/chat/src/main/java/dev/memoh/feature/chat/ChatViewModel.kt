@@ -11,6 +11,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.memoh.core.data.SessionRepository
 import dev.memoh.core.data.SettingsStore
+import dev.memoh.core.data.ChatHistoryStore
+import dev.memoh.core.data.AttachmentDraftStore
 import dev.memoh.core.data.RuntimeMonitorEvents
 import dev.memoh.core.data.LocalRunAccepted
 import kotlinx.coroutines.Job
@@ -38,6 +40,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -68,6 +71,7 @@ data class ChatUiState(
     val history: List<UITurn> = emptyList(),
     val historyLoading: Boolean = true,
     val historyError: String? = null,
+    val olderHistoryError: String? = null,
     val loadingMore: Boolean = false,
     val hasMoreHistory: Boolean = true,
     /** The live run, if any. */
@@ -115,6 +119,7 @@ data class ChatUiState(
     val error: String? = null,
     /** True until the first snapshot of the current session arrives. */
     val awaitingSnapshot: Boolean = true,
+    val offlineSyncedAt: Long? = null,
 ) {
     val isRunning: Boolean get() = runtime.isRunning || regeneration != null
     val retryableTurnId: String?
@@ -312,6 +317,8 @@ class ChatViewModel @Inject constructor(
     private val json: Json,
     private val socketFactory: ChatSocketFactory,
     private val settings: SettingsStore,
+    private val historyStore: ChatHistoryStore,
+    private val attachmentDrafts: AttachmentDraftStore,
 ) : ViewModel() {
 
     suspend fun loadMedia(location: String): ByteArray {
@@ -360,17 +367,28 @@ class ChatViewModel @Inject constructor(
             val restored = try { address?.let { settings.draft(it.first, it.second, it.third) } }
                 catch (e: java.io.IOException) { _state.update { it.copy(error = "读取草稿失败") }; null }
             if (generation != repository.generation) return@launch
-            _state.update { it.copy(draft = if (draftRevision == 0L) restored.orEmpty() else it.draft, draftRestoring = false) }
+            val accountForDraft = repository.state.value.account
+            val restoredAttachments = try { if (address != null) attachmentDrafts.read(address.first, accountForDraft?.teamId.orEmpty(), address.second, address.third) else emptyList() }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) { _state.update { it.copy(error = "读取附件草稿失败") }; emptyList() }
+            if (generation != repository.generation) return@launch
+            _state.update { it.copy(draft = if (draftRevision == 0L) restored.orEmpty() else it.draft, attachments = restoredAttachments + it.attachments, draftRestoring = false) }
             val api = repository.api()
+            val account = repository.state.value.account
+            val cached = account?.let { historyStore.read(it.accountId, it.teamId.orEmpty(), botId, sessionId) }
+            if (generation != repository.generation) return@launch
+            cached?.let { _state.update { current -> current.copy(session = it.session, history = it.turns, historyLoading = false, offlineSyncedAt = it.syncedAt) } }
             val session = runCatching { api?.session(botId, sessionId) }
                 .getOrNull()
             currentCoroutineContext().ensureActive()
             if (generation != repository.generation) return@launch
-            val resolved = session ?: Session(id = sessionId, botId = botId)
+            val resolved = session ?: cached?.session ?: Session(id = sessionId, botId = botId)
             _state.update {
                 it.copy(
                     session = resolved,
-                    historyLoading = true,
+                    history = cached?.turns.orEmpty(),
+                    offlineSyncedAt = cached?.syncedAt,
+                    historyLoading = cached == null,
                     // Seeded from the session's own server-side preference, so
                     // the composer opens showing what will actually be used
                     // rather than an empty default.
@@ -391,6 +409,7 @@ class ChatViewModel @Inject constructor(
 
     private fun connectSocket(botId: String, session: Session) {
         socket?.close()
+        val generation = repository.generation
         val endpoint = repository.state.value.endpoint
         val api = repository.api()
         val socket = socketFactory.create(
@@ -399,7 +418,19 @@ class ChatViewModel @Inject constructor(
             api = api,
             scope = viewModelScope,
             onEvent = ::onStreamEvent,
-            onStatus = { status -> _state.update { it.copy(socketStatus = status) } },
+            onStatus = { status ->
+                val current = _state.value
+                if (generation == repository.generation && current.botId == botId && current.session?.id == session.id) {
+                    _state.update { it.copy(socketStatus = status) }
+                    if (status == SocketStatus.Connected && current.socketStatus != SocketStatus.Connected) {
+                        if (current.historyError != null) loadHistory(botId, session)
+                        if (!current.modelCatalogLoading && current.models.isEmpty()) {
+                            _state.update { it.copy(modelCatalogLoading = true) }
+                            loadCapabilities(botId, session)
+                        }
+                    }
+                }
+            },
             onResubscribeNeeded = { resubscribe() },
         )
         this.socket = socket
@@ -577,13 +608,14 @@ class ChatViewModel @Inject constructor(
                                     ?: catalog?.models?.firstOrNull { it.default }?.id ?: models.firstOrNull()?.id
                                 val selected = models.firstOrNull { it.id == preferred || it.modelId == preferred }
                                 current.copy(models = models, selectedModelId = selected?.id ?: preferred,
+                                    error = current.error?.takeUnless { it.startsWith("模型列表加载失败") },
                                     reasoningEffort = current.reasoningEffort?.takeIf(String::isNotBlank)
                                         ?: catalog?.configuredReasoningEffort?.takeIf(String::isNotBlank))
                             }
                         }
                     }
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { _state.update { if (it.session?.id == session.id) it.copy(error = "模型列表加载失败：${e.message}") else it } }
+                catch (e: Exception) { _state.update { if (it.session?.id == session.id) it.copy(error = "模型列表加载失败，连接恢复后会重试。") else it } }
                 finally { _state.update { if (it.session?.id == session.id) it.copy(modelCatalogLoading = false) else it } }
                 refreshSessionInfo()
             }
@@ -629,7 +661,8 @@ class ChatViewModel @Inject constructor(
         _state.update { current ->
             if (runtime.sessionId != null && runtime.sessionId != current.session?.id) current
             else current.copy(models = models, selectedModelId = runtime.models?.currentModelId,
-                reasoningEffort = runtime.reasoning?.currentEffort)
+                reasoningEffort = runtime.reasoning?.currentEffort,
+                error = current.error?.takeUnless { it.startsWith("模型列表加载失败") })
         }
     }
 
@@ -779,47 +812,73 @@ class ChatViewModel @Inject constructor(
 
     private fun loadHistory(botId: String, session: Session, before: String? = null, replace: Boolean = false) {
         historyJob?.cancel()
+        val account = repository.state.value.account
+        val generation = repository.generation
         historyJob = viewModelScope.launch {
             val api = repository.api()
             if (api == null) {
                 _state.update { it.copy(historyLoading = false, historyError = "未登录") }
                 return@launch
             }
-            if (before == null) _state.update { it.copy(historyLoading = true, historyError = null) }
-            else _state.update { it.copy(loadingMore = true, historyError = null) }
+            if (before == null) _state.update { it.copy(historyLoading = it.history.isEmpty(), historyError = null, olderHistoryError = null) }
+            else _state.update { it.copy(loadingMore = true, olderHistoryError = null) }
 
             runCatching { api.messages(botId, session.id, limit = PAGE_SIZE, beforeMessageId = before) }
                 .fold(
                     onSuccess = { page ->
+                        if (generation != repository.generation) return@fold
                         _state.update { current ->
                             if (current.botId != botId || current.session?.id != session.id) return@update current
                             val merged = if (before == null) {
-                                if (replace) page.items else mergeLatestHistory(current.history, page.items)
+                                if (replace || current.offlineSyncedAt != null) page.items else mergeLatestHistory(current.history, page.items)
                             } else {
                                 // Older page goes in front; keep chronological order.
                                 page.items + current.history
                             }
                             current.copy(
+                                offlineSyncedAt = null,
                                 history = merged.distinctBy { it.listKey },
                                 historyLoading = false,
-                                historyError = null,
+                                historyError = if (before == null) null else current.historyError,
+                                olderHistoryError = null,
                                 loadingMore = false,
                                 hasMoreHistory = page.items.any { pageTurn ->
                                     before == null || current.history.none { it.listKey == pageTurn.listKey }
                                 } && page.items.any { !it.id.isNullOrBlank() },
                             )
                         }
+                        if (before == null && _state.value.session?.title.isNullOrBlank()) {
+                            val refreshed = try { api.session(botId, session.id) }
+                                catch (e: CancellationException) { throw e }
+                                catch (_: Exception) { null }
+                            if (generation != repository.generation) return@fold
+                            if (!refreshed?.title.isNullOrBlank()) _state.update { current ->
+                                if (current.botId != botId || current.session?.id != session.id) current
+                                else current.copy(session = current.session.copy(title = refreshed?.title))
+                            }
+                        }
+                        account?.let { stored ->
+                            val current = _state.value
+                            if (current.botId != botId || current.session?.id != session.id) return@let
+                            try { historyStore.save(stored.accountId, stored.teamId.orEmpty(), botId, current.session, current.history) }
+                            catch (e: CancellationException) { throw e }
+                            catch (_: java.io.IOException) { _state.update { it.copy(notice = "历史已加载，离线缓存保存失败") } }
+                        }
                     },
                     onFailure = { error ->
                         if (error is CancellationException) throw error
+                        if (generation != repository.generation) return@fold
                         _state.update {
                             if (it.botId != botId || it.session?.id != session.id) return@update it
+                            val message = if (error is kotlinx.serialization.SerializationException)
+                                "历史消息格式不兼容，请重试或更新应用。"
+                            else if (it.offlineSyncedAt != null) "历史暂时无法刷新，正在显示缓存内容。"
+                            else "历史消息加载失败，请检查网络后重试。"
                             it.copy(
                                 historyLoading = false,
                                 loadingMore = false,
-                                historyError = if (error is kotlinx.serialization.SerializationException)
-                                    "历史消息格式不兼容，请重试或更新应用。"
-                                else "历史消息加载失败：${error.message ?: "请重试"}",
+                                historyError = if (before == null) message else it.historyError,
+                                olderHistoryError = if (before != null) message else null,
                             )
                         }
                     },
@@ -948,42 +1007,47 @@ class ChatViewModel @Inject constructor(
     }
 
     fun clearError() = _state.update { it.copy(error = null, notice = null) }
-    fun removeAttachment(index: Int) { _state.update { it.copy(attachments = it.attachments.filterIndexed { i, _ -> i != index }) } }
+    fun removeAttachment(index: Int) { _state.update { it.copy(attachments = it.attachments.filterIndexed { i, _ -> i != index }) }; persistAttachments() }
     fun attach(context: Context, uri: Uri) = attach(context, listOf(uri))
 
     fun cancelAttachments() { attachmentReadId++; attachmentJob?.cancel(); _state.update { it.copy(attachmentLoading = false) } }
 
-    fun attach(context: Context, uris: List<Uri>) {
-        if (uris.isEmpty()) return
-        if (state.value.attachmentLoading) { _state.update { it.copy(error = "附件正在读取，请稍后再添加") }; return }
+    fun attach(context: Context, uris: List<Uri>, compressImages: Boolean = false, onConsumed: () -> Unit = {}) {
+        if (uris.isEmpty()) { onConsumed(); return }
+        if (state.value.attachmentLoading) { _state.update { it.copy(error = "附件正在读取，请稍后再添加") }; onConsumed(); return }
         val app = context.applicationContext
         val generation = repository.generation
         val address = draftAddress
         val readId = ++attachmentReadId
         _state.update { it.copy(attachmentLoading = true) }
         attachmentJob = viewModelScope.launch {
-            try { for (uri in uris) {
+            try { state.first { !it.draftRestoring }; for (uri in uris) {
                 try {
                 check(_state.value.attachments.size < 8) { "一次最多添加 8 个附件" }
                 val attachment = withContext(Dispatchers.IO) {
                     val resolver = app.contentResolver
-                    val mime = resolver.getType(uri) ?: "application/octet-stream"
-                    val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    var mime = resolver.getType(uri) ?: "application/octet-stream"
+                    var name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                         if (cursor.moveToFirst()) cursor.getString(0) else null
                     } ?: "附件"
-                    val bytes = resolver.openInputStream(uri)?.use { input ->
+                    var bytes = resolver.openInputStream(uri)?.use { input ->
                         val output = ByteArrayOutputStream()
                         val buffer = ByteArray(8192)
                         while (true) {
                             currentCoroutineContext().ensureActive()
                             val count = input.read(buffer)
                             if (count < 0) break
-                            check(output.size() + count <= 10 * 1024 * 1024) { "请使用 10 MB 以内的附件" }
+                            check(output.size() + count <= (if (compressImages && mime in listOf("image/jpeg", "image/png", "image/webp")) 30 else 10) * 1024 * 1024) { "请使用${if (compressImages) " 30 MB 以内的图片或 10 MB 以内的文件" else " 10 MB 以内的附件"}" }
                             output.write(buffer, 0, count)
                         }
                         output.toByteArray()
                     } ?: error("无法读取附件")
                     check(bytes.isNotEmpty()) { "$name 是空文件" }
+                    if (compressImages && mime in listOf("image/jpeg", "image/png", "image/webp")) {
+                        val compressed = compressImage(bytes)
+                        if (compressed.size < bytes.size) { bytes = compressed; mime = "image/webp"; name = name.substringBeforeLast('.') + ".webp" }
+                    }
+                    check(bytes.size <= 10 * 1024 * 1024) { "压缩后的附件仍超过 10 MB" }
                     ChatAttachment(type = if (mime.startsWith("image/")) "image" else "file", mime = mime, name = name,
                         base64 = "data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP))
                 }
@@ -991,10 +1055,12 @@ class ChatViewModel @Inject constructor(
                 val total = _state.value.attachments.sumOf { attachmentSize(it) } + attachmentSize(attachment)
                 check(total <= 20 * 1024 * 1024) { "附件总大小不能超过 20 MB" }
                 _state.update { it.copy(attachments = it.attachments + attachment) }
+                persistAttachments()
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { _state.update { it.copy(error = e.message ?: "读取附件失败") } }
             } } finally {
                 if (address == draftAddress && readId == attachmentReadId) _state.update { it.copy(attachmentLoading = false) }
+                onConsumed()
             }
         }
     }
@@ -1008,6 +1074,17 @@ class ChatViewModel @Inject constructor(
 
     private fun persistDraft() {
         draftAddress?.let { settings.saveDraft(it.first, it.second, it.third, state.value.draft) }
+        persistAttachments()
+    }
+
+    private fun persistAttachments() {
+        val address = draftAddress ?: return
+        val account = repository.state.value.account ?: return
+        val attachments = state.value.pending.filter { it.invocationId == draftInvocationId }.flatMap { it.attachments } + state.value.attachments
+        val generation = repository.generation
+        attachmentDrafts.save(address.first, account.teamId.orEmpty(), address.second, address.third, attachments) { message ->
+            if (generation == repository.generation && draftAddress == address) _state.update { it.copy(notice = message) }
+        }
     }
 
     override fun onCleared() {

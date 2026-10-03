@@ -35,6 +35,12 @@ them; the notes live in `research/`:
 
 ## Libraries
 
+Android detail-page and predictive-back motion is adapted from
+[DimensionDev/Flare's Router.kt](https://github.com/DimensionDev/Flare/blob/master/app/src/main/java/dev/dimension/flare/ui/route/Router.kt),
+licensed under AGPL-3.0. The timing, easing, scale, veil and device-corner behavior
+are used in `MemohMotion.kt`, `DetailNavigation.kt` and `SectionNavigation.kt`.
+Copyright belongs to the Flare contributors; this client is also AGPLv3.
+
 | Library | License |
 |---|---|
 | AndroidX / Jetpack Compose / Material 3 | Apache-2.0 |
@@ -46,6 +52,8 @@ them; the notes live in `research/`:
 | JUnit 4 | EPL-1.0 |
 | xterm.js 6.0.0 and FitAddon 0.11.0 | MIT |
 | noVNC 1.7.0 | MPL-2.0 (bundled dependencies carry their original licenses) |
+| KaTeX 0.19.0 (including fonts) | MIT |
+| Mermaid 11.16.0 | MIT |
 
 The PTY surface bundles the official `@xterm/xterm` and `@xterm/addon-fit`
 browser distributions. They are loaded only from App assets; authentication and
@@ -59,6 +67,11 @@ included in `feature/sessions/src/main/assets/workspace/novnc/`, including
 `LICENSE.txt` and `docs/LICENSE*`. The App's native gateway connection supplies
 only binary RFB data to the local renderer. Runtime credentials are not passed
 to JavaScript. Self-hosted displays retain the upstream WebRTC transport.
+
+Math and diagram previews bundle the official KaTeX and Mermaid browser
+distributions in `core/markdown/src/main/assets/rich/`, including their complete
+license texts (`LICENSE-katex` and `LICENSE-mermaid`). Renderers load locally;
+the application blocks external resources and executable SVG content.
 
 ## Mehomo avatar
 

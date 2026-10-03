@@ -23,6 +23,7 @@ internal class BotFeaturePages {
         pages[state.botId to state.feature] = state.copy(
             loading = false, busy = false, error = null, notice = null,
             graph = null, logs = null, logSchedule = null, removal = null,
+            mcpAuthorization = null, mcpExport = null,
         )
     }
 }

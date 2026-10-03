@@ -13,6 +13,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.serializer
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -113,6 +115,12 @@ class CloudAuth(
     suspend fun teams(): List<TeamMembership> =
         getPlatform<TeamsResponse>("/teams").teams
 
+    suspend fun platformRead(path: String, unscoped: Boolean = false): JsonElement =
+        platformCall(path, "GET", null, serializer<JsonElement>(), unscoped)
+    suspend fun platformWrite(path: String, method: String, body: JsonObject? = null, unscoped: Boolean = false) {
+        platformCall(path, method, body?.toString(), serializer<Unit>(), unscoped)
+    }
+
     /**
      * Exchanges the cookie session for a one-shot WebSocket ticket.
      *
@@ -176,19 +184,22 @@ class CloudAuth(
         method: String,
         body: String?,
         deserializer: KSerializer<T>,
+        unscoped: Boolean = false,
     ): T = withContext(Dispatchers.IO) {
         val builder = Request.Builder()
             .url(endpoint.platform(path))
             .header("Accept", "application/json")
             // The platform rejects cross-origin calls without this.
             .header("Origin", endpoint.origin)
-        teamId?.let { builder.header("X-Team-Id", it) }
+        if (!unscoped) teamId?.let { builder.header("X-Team-Id", it) }
 
         when (method) {
             "GET" -> builder.get()
             "POST" -> builder.post(
                 (body ?: "{}").toRequestBody(JSON_MEDIA_TYPE),
             )
+            "PUT", "PATCH" -> builder.method(method, (body ?: "{}").toRequestBody(JSON_MEDIA_TYPE))
+            "DELETE" -> builder.delete(body?.toRequestBody(JSON_MEDIA_TYPE))
             else -> throw IllegalArgumentException("unsupported method $method")
         }
 

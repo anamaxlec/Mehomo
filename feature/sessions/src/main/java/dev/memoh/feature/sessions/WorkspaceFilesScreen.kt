@@ -90,6 +90,9 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
     }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     CompositionLocalProvider(LocalMarkdownImageLoader provides imageLoader) {
+    if (selected != null && selected.name.substringAfterLast('.').lowercase() in setOf("pdf", "docx", "pptx", "odt", "svg")) {
+        dev.memoh.core.markdown.DocumentPreview(workspaceDownloadPath(state.botId, selected.path), selected.name, onDismiss = { viewModel.closeFile() })
+    }
     Scaffold(modifier = if (showTitle && selected == null) Modifier.nestedScroll(scrollBehavior.nestedScrollConnection) else Modifier,
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         contentWindowInsets = if (showTitle) ScaffoldDefaults.contentWindowInsets else WindowInsets(0, 0, 0, 0), topBar = {

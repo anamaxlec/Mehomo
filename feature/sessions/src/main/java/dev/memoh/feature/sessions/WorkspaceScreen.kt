@@ -29,6 +29,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.memoh.core.designsystem.component.MemohEmptyState
+import dev.memoh.core.designsystem.component.LocalFloatingNavigationPadding
 import dev.memoh.core.designsystem.component.MemohCompactComposer
 import dev.memoh.core.designsystem.component.MemohStatus
 import dev.memoh.core.designsystem.component.MemohStatusDot
@@ -99,7 +100,7 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
             })
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().padding(horizontal = 16.dp)
-            .padding(bottom = if (bottomControlSpace && !keyboardVisible) 100.dp else 12.dp),
+            .padding(bottom = if (bottomControlSpace && !keyboardVisible) maxOf(100.dp, LocalFloatingNavigationPadding.current) else 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.botId.isBlank()) { MemohEmptyState("请先选择一个 Bot"); return@Column }
             if (state.loading || state.connecting) LinearProgressIndicator(Modifier.fillMaxWidth())

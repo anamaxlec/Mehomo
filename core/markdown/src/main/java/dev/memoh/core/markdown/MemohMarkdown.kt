@@ -118,6 +118,8 @@ import org.commonmark.parser.Parser
  * caller's authenticated media loader.
  */
 object MemohMarkdown {
+    private val inlineMath = androidx.compose.runtime.staticCompositionLocalOf<Map<String, MathExpression>> { emptyMap() }
+    private val htmlRenderer = org.commonmark.renderer.html.HtmlRenderer.builder().extensions(listOf(TablesExtension.create(), StrikethroughExtension.create())).escapeHtml(true).sanitizeUrls(true).build()
 
     private val parser: Parser = Parser.builder()
         .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create(),
@@ -140,9 +142,11 @@ object MemohMarkdown {
         modifier: Modifier = Modifier,
         onLinkClick: ((String) -> Unit)? = null,
     ) {
-        val document = remember(markdown) { parse(markdown) }
+        val math = remember(markdown) { protectMath(markdown) }
+        val document = remember(math.markdown) { parse(math.markdown) }
         val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
         val linkHandler = onLinkClick ?: { url: String -> runCatching { uriHandler.openUri(url) }; Unit }
+        androidx.compose.runtime.CompositionLocalProvider(inlineMath provides math.expressions) {
         SelectionContainer {
             Column(
                 modifier = modifier.fillMaxWidth(),
@@ -150,6 +154,7 @@ object MemohMarkdown {
             ) {
                 NodeChildren(document, linkHandler)
             }
+        }
         }
     }
 
@@ -182,7 +187,9 @@ object MemohMarkdown {
                 // would need a browser engine, and silently dropping it would
                 // hide content the model intended the user to see.
                 val raw = node.literal.orEmpty().trim()
-                if (raw.isNotEmpty()) {
+                if (raw.startsWith("<svg", true)) {
+                    RichContent(RichFormat.Svg, raw)
+                } else if (raw.isNotEmpty()) {
                     Text(
                         text = raw,
                         style = MaterialTheme.typography.bodySmall,
@@ -197,6 +204,12 @@ object MemohMarkdown {
 
     @Composable
     private fun ParagraphBlock(node: Paragraph, onLinkClick: ((String) -> Unit)?) {
+        val expressions = inlineMath.current
+        val html = remember(node) { htmlRenderer.render(node) }
+        if (expressions.keys.any { it in html } && generateSequence(node.firstChild) { it.next }.none { it is Image }) {
+            RichContent(RichFormat.Paragraph, html, expressions = expressions, onLinkClick = onLinkClick)
+            return
+        }
         // Images are block surfaces; split only their containing paragraph so
         // prose before/after an inline image is still visible and selectable.
         var child = node.firstChild
@@ -220,6 +233,12 @@ object MemohMarkdown {
 
     @Composable
     private fun InlineRange(node: Node, onLinkClick: ((String) -> Unit)?, start: Node?, end: Node?) {
+        val expressions = inlineMath.current
+        val html = remember(node, start, end) { generateSequence(start) { it.next }.takeWhile { it != end }.joinToString("") { htmlRenderer.render(it) } }
+        if (expressions.keys.any { it in html }) {
+            RichContent(RichFormat.Paragraph, "<p>$html</p>", expressions = expressions, onLinkClick = onLinkClick)
+            return
+        }
         Text(
             text = inline(node, onLinkClick, linkColor = MaterialTheme.colorScheme.primary, start = start, end = end, decorateLinks = true),
             inlineContent = linkIcons(),
@@ -230,6 +249,12 @@ object MemohMarkdown {
 
     @Composable
     private fun HeadingBlock(node: Heading, onLinkClick: ((String) -> Unit)?) {
+        val expressions = inlineMath.current
+        val html = remember(node) { htmlRenderer.render(node) }
+        if (expressions.keys.any { it in html }) {
+            RichContent(RichFormat.Paragraph, html, expressions = expressions, onLinkClick = onLinkClick)
+            return
+        }
         val linkColor = MaterialTheme.colorScheme.primary
         val style = when (node.level) {
             1 -> MaterialTheme.typography.headlineSmall
@@ -325,6 +350,11 @@ object MemohMarkdown {
 
     @Composable
     private fun CodeBlock(code: String, language: String) {
+        when (language.trim().lowercase()) {
+            "mermaid" -> { RichContent(RichFormat.Mermaid, code); return }
+            "svg" -> { RichContent(RichFormat.Svg, code); return }
+            "math", "latex", "tex" -> { RichContent(RichFormat.Math, code); return }
+        }
         val clipboard = LocalClipboard.current
         val scope = rememberCoroutineScope()
         var copied by remember(code) { mutableStateOf(false) }
@@ -395,6 +425,12 @@ object MemohMarkdown {
      */
     @Composable
     private fun TableBlock(table: TableBlock, onLinkClick: ((String) -> Unit)?) {
+        val expressions = inlineMath.current
+        val html = remember(table) { htmlRenderer.render(table) }
+        if (expressions.keys.any { it in html }) {
+            RichContent(RichFormat.Paragraph, html, expressions = expressions, onLinkClick = onLinkClick)
+            return
+        }
         val linkColor = MaterialTheme.colorScheme.primary
         val rows = remember(table) { collectRows(table) }
         if (rows.isEmpty()) return

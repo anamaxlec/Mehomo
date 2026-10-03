@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -35,6 +36,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.AttachFile
@@ -57,7 +59,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -143,6 +145,7 @@ fun ChatScreen(
     onCompactContext: () -> Unit = {},
     onOpenFeature: (String) -> Unit = {},
     onPickAttachment: (Boolean) -> Unit = {},
+    onTakePhoto: () -> Unit = {},
     onRemoveAttachment: (Int) -> Unit = {},
     onCancelAttachments: () -> Unit = {},
     onConfirmFolder: () -> Unit = {},
@@ -157,6 +160,10 @@ fun ChatScreen(
     val liveUsers = state.liveUserTurns
     val run = state.runtime.run
     var initiallyPositioned by remember(state.session?.id) { mutableStateOf(false) }
+    val historyPlaceholder = remember(state.session?.id) {
+        MutableTransitionState(!initiallyPositioned && state.historyError == null)
+    }
+    historyPlaceholder.targetState = !initiallyPositioned && state.historyError == null
     var followingLatest by remember(state.session?.id) { mutableStateOf(true) }
     var jumpingToLatest by remember(state.session?.id) { mutableStateOf(false) }
     var loadingHistoryImages by remember(state.session?.id) { mutableIntStateOf(0) }
@@ -216,9 +223,9 @@ fun ChatScreen(
         }
     }
     LaunchedEffect(initiallyPositioned, state.hasMoreHistory, state.historyLoading,
-        state.loadingMore, state.historyError) {
+        state.loadingMore, state.historyError, state.olderHistoryError) {
         if (!initiallyPositioned || !state.hasMoreHistory || state.historyLoading ||
-            state.loadingMore || state.historyError != null) return@LaunchedEffect
+            state.loadingMore || state.historyError != null || state.olderHistoryError != null) return@LaunchedEffect
         androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex }.first { it == 0 }
         onLoadOlder()
     }
@@ -393,7 +400,7 @@ fun ChatScreen(
                 }
 
                 androidx.compose.animation.AnimatedVisibility(
-                    visible = !initiallyPositioned && state.historyError == null,
+                    visibleState = historyPlaceholder,
                     enter = fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
                     exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
                 ) {
@@ -402,11 +409,10 @@ fun ChatScreen(
 
                 // Pagination status is an overlay: confirming there are no older
                 // turns must not remove a row and shift a short conversation.
-                if (initiallyPositioned && listState.firstVisibleItemIndex == 0) {
-                    Box(Modifier.align(Alignment.TopCenter).padding(top = 4.dp)) {
-                        if (state.loadingMore) LoadingIndicator(Modifier.size(24.dp))
-                        else if (state.hasMoreHistory && state.historyError != null)
-                            MemohActionButton("重试加载更早消息", Icons.Filled.Refresh, onLoadOlder)
+                if (initiallyPositioned && !historyPlaceholder.currentState && !historyPlaceholder.targetState &&
+                    state.loadingMore && listState.firstVisibleItemIndex == 0) {
+                    Box(Modifier.align(Alignment.TopCenter).padding(top = 8.dp)) {
+                        ContainedLoadingIndicator()
                     }
                 }
 
@@ -440,6 +446,25 @@ fun ChatScreen(
                 }
             }
 
+            state.offlineSyncedAt?.takeIf { state.historyError != null }?.let { synced ->
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.large,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("缓存历史 · 最后同步 " + java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault()).format(java.time.Instant.ofEpochMilli(synced)),
+                            Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                        TextButton(onClick = onRetryHistory) { Text("刷新") }
+                    }
+                }
+            }
+            state.olderHistoryError?.let { error ->
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.large,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(error, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                        TextButton(onClick = onLoadOlder, enabled = !state.loadingMore) { Text("加载更早消息") }
+                    }
+                }
+            }
             if (state.session?.isLocal == false) {
                 ExternalSessionNotice(
                     channel = state.session?.channelType ?: "外部渠道",
@@ -490,14 +515,21 @@ fun ChatScreen(
                                 ) {
                                     MemohMenuRow(
                                         title = "照片",
-                                        index = 0, count = 2,
+                                        index = 0, count = 3,
                                         icon = Icons.Filled.Image,
                                         accent = MaterialTheme.colorScheme.primaryContainer,
                                         onClick = { dismiss(); onPickAttachment(true) },
                                     )
                                     MemohMenuRow(
+                                        title = "拍照",
+                                        index = 1, count = 3,
+                                        icon = Icons.Filled.PhotoCamera,
+                                        accent = MaterialTheme.colorScheme.tertiaryContainer,
+                                        onClick = { dismiss(); onTakePhoto() },
+                                    )
+                                    MemohMenuRow(
                                         title = "文件",
-                                        index = 1, count = 2,
+                                        index = 2, count = 3,
                                         icon = Icons.Filled.AttachFile,
                                         accent = MaterialTheme.colorScheme.secondaryContainer,
                                         onClick = { dismiss(); onPickAttachment(false) },

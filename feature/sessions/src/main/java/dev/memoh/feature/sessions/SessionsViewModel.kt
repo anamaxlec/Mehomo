@@ -11,11 +11,14 @@ import dev.memoh.core.model.RuntimeState
 import dev.memoh.core.model.UIStreamEvent
 import dev.memoh.core.model.SessionActivityEvent
 import dev.memoh.core.network.ChatSocket
+import dev.memoh.core.network.MemohApi
 import dev.memoh.core.network.SocketStatus
 import dev.memoh.core.network.SessionRunStatusReducer
 import dev.memoh.core.network.sessionStatusSocket
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +42,7 @@ data class SessionsUiState(
     val sessions: List<Session> = emptyList(),
     val nextCursor: String? = null,
     val loadingMore: Boolean = false,
+    val searchingAllTitles: Boolean = false,
     val loadMoreError: String? = null,
     val error: String? = null,
     val bot: Bot? = null,
@@ -112,7 +116,6 @@ class SessionsViewModel @Inject constructor(
     private var botId: String? = null
     private var loadJob: Job? = null
     private var pageJob: Job? = null
-    private var started = false
     private var statusSocket: ChatSocket? = null
     private var observation = 0L
     private val runCursors = mutableMapOf<String, RuntimeState>()
@@ -157,19 +160,22 @@ class SessionsViewModel @Inject constructor(
         _state.update { it.copy(runStates = emptyMap(), compactingSessions = emptySet()) }
     }
 
-    /** Loads the bot list once, then the content for the selected bot. */
+    /** Reloads the bot list on return so management changes appear in the main screen. */
     fun start() {
-        if (started) return
-        started = true
-        loadBots()
+        if (!state.value.loading) loadBots()
     }
 
     fun selectTab(tab: BotTab) = _state.update { it.copy(tab = tab) }
 
-    fun setQuery(query: String) = _state.update { it.copy(query = query) }
+    fun setQuery(query: String) { if (query.isBlank() && state.value.searchingAllTitles) stopTitleSearch(); _state.update { it.copy(query = query) } }
+    fun stopTitleSearch() { pageJob?.cancel(); _state.update { it.copy(loadingMore = false, searchingAllTitles = false) } }
+    fun searchAllTitles() = loadPages(all = true)
 
     private fun loadBots() {
         loadJob?.cancel()
+        pageJob?.cancel()
+        val generation = repository.generation
+        _state.update { it.copy(loadingMore = false, searchingAllTitles = false) }
         loadJob = viewModelScope.launch {
             _state.update { it.copy(loading = true, error = null) }
             val api = repository.api()
@@ -179,6 +185,8 @@ class SessionsViewModel @Inject constructor(
             }
             runCatching { api.bots() }.fold(
                 onSuccess = { bots ->
+                    currentCoroutineContext().ensureActive()
+                    if (generation != repository.generation) return@launch
                     if (bots.isEmpty()) {
                         // Signed in, but the account has no bot yet. Not an
                         // error: the empty state explains it better than a
@@ -189,13 +197,17 @@ class SessionsViewModel @Inject constructor(
                         return@launch
                     }
                     val lastBot = settings.lastBotId.first()
+                    currentCoroutineContext().ensureActive()
+                    if (generation != repository.generation) return@launch
                     val selected = bots.firstOrNull { it.id == (botId ?: lastBot) } ?: bots.first()
                     _state.update { it.copy(initialized = true, bots = bots, bot = selected) }
                     botId = selected.id
                     settings.setLastBotId(selected.id)
-                    loadSessions(selected.id)
+                    readSessions(selected.id, api, generation)
                 },
                 onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    if (generation != repository.generation) return@launch
                     _state.update {
                         it.copy(loading = false, initialized = true, error = describeFailure("加载 Bot 失败", error))
                     }
@@ -209,7 +221,7 @@ class SessionsViewModel @Inject constructor(
         if (botId == bot.id) return
         stopObservingRuns()
         botId = bot.id
-        _state.update { it.copy(bot = bot, sessions = emptyList(), folders = emptyList(), nextCursor = null, loadingMore = false, loadMoreError = null) }
+        _state.update { it.copy(bot = bot, sessions = emptyList(), folders = emptyList(), nextCursor = null, loadingMore = false, searchingAllTitles = false, loadMoreError = null) }
         viewModelScope.launch { settings.setLastBotId(bot.id) }
         loadSessions(bot.id)
     }
@@ -227,79 +239,93 @@ class SessionsViewModel @Inject constructor(
         loadJob?.cancel()
         pageJob?.cancel()
         val generation = repository.generation
-        val count = maxOf(50, state.value.sessions.size)
         loadJob = viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null, loadingMore = false, loadMoreError = null) }
+            _state.update { it.copy(loading = true, error = null, loadingMore = false, searchingAllTitles = false, loadMoreError = null) }
             val api = repository.api()
             if (api == null) {
                 _state.update { it.copy(loading = false, error = "未登录") }
                 return@launch
             }
-
-            // Folders and sessions are independent: a folder list that fails
-            // must not blank the sessions, and vice versa. The folder failure is
-            // therefore swallowed — the pinned section simply does not appear.
-            val folders = runCatching { api.workdirs(id) }.getOrDefault(emptyList())
-            val sessions = runCatching {
-                var page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50)
-                var items = page.items
-                // Refresh every loaded page so returning from a chat retains older rows.
-                while (items.size < count && !page.nextCursor.isNullOrBlank()) {
-                    val cursor = page.nextCursor
-                    page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor)
-                    items = appendSessions(items, page.items)
-                    if (page.nextCursor == cursor) break
-                }
-                page.copy(items = items)
-            }
-            if (generation != repository.generation || botId != id) return@launch
-
-            sessions.fold(
-                onSuccess = { page ->
-                    _state.update {
-                        it.copy(
-                            loading = false,
-                            sessions = page.items,
-                            nextCursor = page.nextCursor,
-                            folders = folders.filter(Workdir::isActive),
-                            error = null,
-                        )
-                    }
-                    statusSocket?.observeSessions(page.items.map { it.id }.toSet())
-                },
-                onFailure = { error ->
-                    if (error is CancellationException) throw error
-                    _state.update {
-                        it.copy(
-                            loading = false,
-                            folders = folders.filter(Workdir::isActive),
-                            error = describeFailure("加载会话失败", error),
-                        )
-                    }
-                },
-            )
+            readSessions(id, api, generation)
         }
     }
 
-    fun loadMore() {
+    private suspend fun readSessions(id: String, api: MemohApi, generation: Long) {
+        val count = maxOf(50, state.value.sessions.size)
+        // Folders and sessions are independent: a folder list that fails
+        // must not blank the sessions, and vice versa. The folder failure is
+        // therefore swallowed — the pinned section simply does not appear.
+        val folders = try { api.workdirs(id) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { emptyList() }
+        val sessions = runCatching {
+            var page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50)
+            var items = page.items
+            // Refresh every loaded page so returning from a chat retains older rows.
+            while (items.size < count && !page.nextCursor.isNullOrBlank()) {
+                val cursor = page.nextCursor
+                page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor)
+                items = appendSessions(items, page.items)
+                if (page.nextCursor == cursor) break
+            }
+            page.copy(items = items)
+        }
+        currentCoroutineContext().ensureActive()
+        if (generation != repository.generation || botId != id) return
+
+        sessions.fold(
+            onSuccess = { page ->
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        sessions = page.items,
+                        nextCursor = page.nextCursor,
+                        folders = folders.filter(Workdir::isActive),
+                        error = null,
+                    )
+                }
+                statusSocket?.observeSessions(page.items.map { it.id }.toSet())
+            },
+            onFailure = { error ->
+                if (error is CancellationException) throw error
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        folders = folders.filter(Workdir::isActive),
+                        error = describeFailure("加载会话失败", error),
+                    )
+                }
+            },
+        )
+    }
+
+    fun loadMore() = loadPages(all = false)
+
+    private fun loadPages(all: Boolean) {
         val current = state.value
         val id = botId ?: return
-        val cursor = current.nextCursor?.takeIf(String::isNotBlank) ?: return
+        var cursor = current.nextCursor?.takeIf(String::isNotBlank) ?: return
         if (current.loading || current.loadingMore) return
         val generation = repository.generation
-        _state.update { it.copy(loadingMore = true, loadMoreError = null) }
+        _state.update { it.copy(loadingMore = true, searchingAllTitles = all, loadMoreError = null) }
         pageJob = viewModelScope.launch {
             try {
                 val api = repository.api() ?: error("未登录")
-                val page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor)
-                if (botId != id || generation != repository.generation) return@launch
-                _state.update { it.copy(sessions = appendSessions(it.sessions, page.items),
-                    nextCursor = page.nextCursor?.takeUnless { next -> next == cursor }, loadingMore = false) }
-                statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
+                val seen = mutableSetOf<String>()
+                do {
+                    check(seen.add(cursor)) { "服务端返回了重复分页游标，请刷新后重试" }
+                    val page = api.sessions(id, types = Session.CHAT_TYPES, limit = if (all) 200 else 50, cursor = cursor)
+                    if (botId != id || generation != repository.generation) return@launch
+                    check(page.nextCursor != cursor) { "服务端返回了重复分页游标，请刷新后重试" }
+                    _state.update { it.copy(sessions = appendSessions(it.sessions, page.items), nextCursor = page.nextCursor) }
+                    statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
+                    cursor = page.nextCursor?.takeIf(String::isNotBlank) ?: break
+                } while (all)
+                _state.update { it.copy(loadingMore = false, searchingAllTitles = false) }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 if (botId == id && generation == repository.generation)
-                    _state.update { it.copy(loadingMore = false, loadMoreError = describeFailure("加载更多失败", e)) }
+                    _state.update { it.copy(loadingMore = false, searchingAllTitles = false, loadMoreError = describeFailure("加载更多失败", e)) }
             }
         }
     }

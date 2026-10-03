@@ -12,6 +12,13 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import dev.memoh.core.data.SessionRepository
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import dev.memoh.core.model.TeamMembership
+
+data class CloudTeamsState(val loading: Boolean = false, val teams: List<TeamMembership> = emptyList(), val error: String? = null)
 
 /**
  * Appearance preferences.
@@ -26,6 +33,29 @@ class SettingsViewModel @Inject constructor(
 ) : ViewModel() {
 
     val session = repository.state
+    private val _cloudTeams = MutableStateFlow(CloudTeamsState())
+    val cloudTeams = _cloudTeams.asStateFlow()
+    private var teamsJob: Job? = null
+    private var teamsAccount: String? = null
+    fun loadCloudTeams() {
+        teamsJob?.cancel()
+        val generation = repository.generation
+        val account = repository.state.value.account?.accountId
+        teamsAccount = account
+        teamsJob = viewModelScope.launch {
+            _cloudTeams.value = CloudTeamsState(loading = true)
+            try {
+                val teams = repository.cloudTeams()
+                if (generation == repository.generation) _cloudTeams.value = CloudTeamsState(teams = teams)
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (generation == repository.generation) _cloudTeams.value = CloudTeamsState(error = "加载团队失败，请重试") }
+        }
+    }
+    fun selectCloudTeam(id: String) {
+        if (teamsAccount != repository.state.value.account?.accountId) return
+        val team = cloudTeams.value.teams.firstOrNull { it.team?.teamId == id }?.team ?: return
+        repository.selectCloudTeam(team)
+    }
     val backgroundMonitor = settings.backgroundMonitor.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val liveUpdates = settings.liveUpdates.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val notifyReplyDone = settings.notifyOnReplyDone.stateIn(viewModelScope, SharingStarted.Eagerly, true)

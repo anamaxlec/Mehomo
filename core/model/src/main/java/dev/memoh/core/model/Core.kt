@@ -159,7 +159,8 @@ data class ChatModel(
     val config: ChatModelConfig? = null,
 ) {
     val isSelectable: Boolean get() = type == "chat" && enable != false
-    val label: String get() = displayName?.takeIf(String::isNotBlank) ?: name.orEmpty().ifBlank { id }
+    val label: String get() = displayName?.takeIf(String::isNotBlank) ?: name?.takeIf(String::isNotBlank)
+        ?: modelId?.takeIf(String::isNotBlank) ?: id
     val efforts: List<String> get() = reasoning?.selectableEfforts
         ?: capabilities?.takeUnless { it.supportsReasoning == false }?.efforts.orEmpty()
 
@@ -362,6 +363,8 @@ data class Team(
     @SerialName("team_id") val teamId: String,
     val name: String = "",
     val slug: String? = null,
+    @SerialName("avatar_url") val avatarUrl: String? = null,
+    val description: String? = null,
 )
 
 @Serializable

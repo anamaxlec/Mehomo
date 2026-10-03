@@ -2,6 +2,8 @@ package dev.memoh.android
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
@@ -18,6 +20,7 @@ import dev.memoh.core.designsystem.component.*
 import dev.memoh.core.model.*
 import dev.memoh.feature.settings.SettingsViewModel
 import dev.memoh.feature.sessions.BotFeature
+import dev.memoh.feature.bots.ManagementPage
 
 @Composable
 fun ProfileScreen(
@@ -25,12 +28,16 @@ fun ProfileScreen(
     bot: Bot?,
     bots: List<Bot>,
     onSelectBot: (Bot) -> Unit,
+    onOpenManagement: (ManagementPage) -> Unit,
+    onOpenHistory: () -> Unit,
     onOpen: (BotFeature) -> Unit,
 ) {
     val session by settings.session.collectAsState()
     val mode by settings.themeMode.collectAsState()
     val accent by settings.accent.collectAsState()
     val floating by settings.floatingSections.collectAsState()
+    val teams by settings.cloudTeams.collectAsState()
+    var teamsOpen by remember(session.account?.accountId) { mutableStateOf(false) }
     var navigationOpen by remember { mutableStateOf(false) }
     var logoutOpen by remember { mutableStateOf(false) }
     var botOpen by remember { mutableStateOf(false) }
@@ -40,7 +47,7 @@ fun ProfileScreen(
     Scaffold(modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         topBar = { MemohPageTopBar("我的", scrollBehavior = scrollBehavior) }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, 110.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, maxOf(110.dp, LocalFloatingNavigationPadding.current)), verticalArrangement = Arrangement.spacedBy(24.dp)) {
             item {
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.extraLarge) {
                     Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -53,16 +60,66 @@ fun ProfileScreen(
             }
             item {
                 SectionLabel("工作空间")
+                val cloud = session.account?.kind == "cloud"
+                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                if (cloud) SettingsRow("Cloud 团队", teams.teams.firstOrNull { it.team?.teamId == session.account?.teamId }?.team?.name ?: "切换团队工作空间",
+                    Icons.Filled.Groups, index = 0, count = 2, tone = ListIconTone.Tertiary,
+                    onClick = { teamsOpen = true; settings.loadCloudTeams() }, trailing = Icons.Filled.ArrowDropDown)
                 Box {
                     SettingsRow(bot?.displayName ?: bot?.name ?: "选择 Bot",
                         if (session.account?.teamId != null) "已连接团队工作空间" else "当前 Bot 的功能与数据",
-                        Icons.Filled.SmartToy, onClick = { botOpen = true }, trailing = Icons.Filled.ArrowDropDown)
+                        Icons.Filled.SmartToy, index = if (cloud) 1 else 0, count = if (cloud) 2 else 1,
+                        onClick = { botOpen = true }, trailing = Icons.Filled.ArrowDropDown)
                     MemohPopupMenu(botOpen, { botOpen = false }, Alignment.TopStart) {
                         MemohMenuGroup { bots.forEachIndexed { index, item -> MemohMenuRow(item.displayName ?: item.name, Icons.Filled.SmartToy,
                             { onSelectBot(item); botOpen = false }, selected = item.id == bot?.id, selectable = true, index = index, count = bots.size) } }
                     }
                 }
-                if (bot != null) Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                }
+            }
+            val groups = listOf(
+                "Bot 与工作空间" to listOf(ManagementPage.Bots, ManagementPage.Bot, ManagementPage.Agents, ManagementPage.Workspace, ManagementPage.Computers, ManagementPage.Access, ManagementPage.Backup),
+                "模型与服务" to listOf(ManagementPage.Models, ManagementPage.Media, ManagementPage.Services),
+                "连接与自动化" to listOf(ManagementPage.Connectors, ManagementPage.Channels, ManagementPage.Hooks, ManagementPage.Network),
+                "账号" to listOf(ManagementPage.Team, ManagementPage.Account),
+            )
+            groups.forEach { (title, entries) ->
+            val pages = entries.filter { (!it.needsBot || bot != null) && (it != ManagementPage.Network || session.account?.kind != "cloud") && (it != ManagementPage.Team || session.account?.kind == "cloud") }
+            if (pages.isNotEmpty()) item {
+                SectionLabel(title)
+                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    pages.forEachIndexed { index, page ->
+                        SettingsRow(page.title, page.description, when (page) {
+                            ManagementPage.Bots -> Icons.Filled.Dashboard
+                            ManagementPage.Bot -> Icons.Filled.SmartToy
+                            ManagementPage.Agents -> Icons.Filled.Psychology
+                            ManagementPage.Models -> Icons.Filled.ModelTraining
+                            ManagementPage.Media -> Icons.Filled.PermMedia
+                            ManagementPage.Services -> Icons.Filled.TravelExplore
+                            ManagementPage.Connectors -> Icons.Filled.Extension
+                            ManagementPage.Computers -> Icons.Filled.Computer
+                            ManagementPage.Hooks -> Icons.Filled.Bolt
+                            ManagementPage.Channels -> Icons.Filled.Forum
+                            ManagementPage.Workspace -> Icons.Filled.Storage
+                            ManagementPage.Access -> Icons.Filled.Group
+                            ManagementPage.Backup -> Icons.Filled.Backup
+                            ManagementPage.Network -> Icons.Filled.Hub
+                            ManagementPage.Account -> Icons.Filled.AccountCircle
+                            ManagementPage.Team -> Icons.Filled.Groups
+                        }, index, pages.size, tone = when (page) {
+                            ManagementPage.Agents, ManagementPage.Access, ManagementPage.Services,
+                            ManagementPage.Connectors, ManagementPage.Hooks, ManagementPage.Team -> ListIconTone.Tertiary
+                            ManagementPage.Workspace, ManagementPage.Computers, ManagementPage.Media,
+                            ManagementPage.Backup, ManagementPage.Account -> ListIconTone.Secondary
+                            else -> ListIconTone.Primary
+                        }, onClick = { onOpenManagement(page) })
+                    }
+                }
+            }
+            }
+            if (bot != null) item {
+                SectionLabel("Bot 功能")
+                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     BotFeature.entries.forEachIndexed { index, feature ->
                         val section = MainSection.entries.first { it.feature == feature }
                         SettingsRow(feature.title, featureDescription(feature), section.icon, index = index,
@@ -71,6 +128,7 @@ fun ProfileScreen(
                     }
                 }
             }
+            item { SettingsRow("离线历史", "查看、搜索和管理近期会话缓存", Icons.Filled.OfflinePin, onClick = onOpenHistory) }
             item {
                 SectionLabel("个性化")
                     Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
@@ -104,6 +162,18 @@ fun ProfileScreen(
         }
     }
     if (navigationOpen) FloatingMenuSettings(floating, { navigationOpen = false }, settings::setFloatingSections)
+    if (teamsOpen) AlertDialog(onDismissRequest = { teamsOpen = false }, title = { Text("Cloud 团队") }, icon = { Icon(Icons.Filled.Groups, null) },
+        text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+            if (teams.loading) LoadingIndicator(Modifier.size(36.dp))
+            teams.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            teams.teams.forEachIndexed { index, membership -> membership.team?.let { team ->
+                SettingsRow(team.name, when (membership.role?.substringAfterLast('_')?.lowercase()) { "owner" -> "所有者"; "admin" -> "管理员"; "member" -> "成员"; else -> membership.role.orEmpty() },
+                    Icons.Filled.Groups, index, teams.teams.size, trailing = if (team.teamId == session.account?.teamId) Icons.Filled.Check else null,
+                    onClick = { settings.selectCloudTeam(team.teamId); teamsOpen = false })
+            } }
+            if (!teams.loading && teams.error == null && teams.teams.isEmpty()) Text("当前账号尚未加入团队")
+        } }, confirmButton = { MemohActionButton("完成", Icons.Filled.Check, { teamsOpen = false }) },
+        dismissButton = { if (teams.error != null) MemohActionButton("重试", Icons.Filled.Refresh, settings::loadCloudTeams) })
     if (logoutOpen) AlertDialog(onDismissRequest = { logoutOpen = false }, icon = { Icon(Icons.AutoMirrored.Filled.Logout, null) },
         title = { Text("退出登录") }, text = { Text("清除本机的当前登录凭据，再次使用时需要重新登录。") },
         confirmButton = { MemohActionButton("退出登录", Icons.AutoMirrored.Filled.Logout, { logoutOpen = false; settings.signOut() }, primary = true, danger = true) },

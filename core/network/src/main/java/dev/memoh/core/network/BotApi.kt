@@ -38,6 +38,9 @@ fun apiBody(vararg values: Pair<String, Any?>): JsonObject = buildJsonObject {
     }
 }
 
+suspend fun MemohApi.exportMcp(botId: String): JsonElement = managementRead("bots", botId, "mcp-ops", "export")
+suspend fun MemohApi.importMcp(botId: String, config: JsonObject) = managementWrite(listOf("bots", botId, "mcp-ops", "import"), "PUT", config)
+
 private suspend inline fun <reified T> MemohApi.get(path: String): T = call(path, "GET", null, deserializer = serializer<T>())
 private suspend inline fun <reified T> MemohApi.change(path: String, method: String, body: JsonObject = apiBody()): T =
     call(path, method, body.toString(), deserializer = serializer<T>())

@@ -26,6 +26,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -33,17 +40,22 @@ import androidx.compose.ui.unit.dp
 import dev.memoh.core.model.*
 import dev.memoh.core.network.apiBody
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.LocalFloatingNavigationPadding
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohListSkeleton
 import dev.memoh.core.designsystem.component.MemohPageTopBar
 import dev.memoh.core.designsystem.component.MemohRefreshBox
+import dev.memoh.core.designsystem.component.MemohPopupMenu
+import dev.memoh.core.designsystem.component.MemohMenuGroup
+import dev.memoh.core.designsystem.component.MemohMenuRow
 import kotlinx.serialization.json.*
 import java.text.NumberFormat
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-private data class EditField(val key: String, val label: String, val value: String = "", val multiline: Boolean = false, val secret: Boolean = false)
+private data class EditField(val key: String, val label: String, val value: String = "", val multiline: Boolean = false, val secret: Boolean = false,
+    val choices: List<Pair<String, String>> = emptyList(), val visible: (Map<String, String>) -> Boolean = { true })
 private data class Editor(val title: String, val fields: List<EditField>, val save: (Map<String, String>) -> Unit)
 private data class Confirmation(val title: String, val message: String, val action: () -> Unit)
 
@@ -54,6 +66,7 @@ fun BotFeatureScreen(
     viewModel: BotFeatureViewModel,
     onBack: (() -> Unit)? = null,
     onOpenSession: (String) -> Unit = {},
+    onOpenConnectors: (() -> Unit)? = null,
     showTitle: Boolean = true,
 ) {
     if (state.feature == BotFeature.Files) {
@@ -63,6 +76,22 @@ fun BotFeatureScreen(
     var editor by remember(state.botId, state.feature) { mutableStateOf<Editor?>(null) }
     var confirmation by remember { mutableStateOf<Confirmation?>(null) }
     var details by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var scheduleOpen by remember { mutableStateOf(false) }
+    var editedSchedule by remember { mutableStateOf<BotSchedule?>(null) }
+    var focusedMemory by remember { mutableStateOf<MemoryEntry?>(null) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var exportError by remember { mutableStateOf<String?>(null) }
+    val mcpSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        val config = state.mcpExport
+        if (uri != null && config != null) scope.launch {
+            try {
+                withContext(Dispatchers.IO) { requireNotNull(context.contentResolver.openOutputStream(uri)).use { it.write(config.toByteArray()) } }
+                viewModel.closeMcpExport()
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { exportError = "保存 MCP 配置失败" }
+        }
+    }
     fun memoryEditor(memory: MemoryEntry? = null) {
         editor = Editor(if (memory == null) "添加记忆" else "编辑记忆",
             listOf(EditField("text", "记忆内容", memory?.memory.orEmpty(), multiline = true))) {
@@ -70,20 +99,9 @@ fun BotFeatureScreen(
         }
     }
     fun scheduleEditor(schedule: BotSchedule? = null) {
-        editor = Editor(if (schedule == null) "新建日程" else "编辑日程", listOf(
-            EditField("name", "名称", schedule?.name.orEmpty()),
-            EditField("pattern", "时间规则（cron）", schedule?.pattern ?: "0 9 * * *"),
-            EditField("command", "执行任务", schedule?.command.orEmpty(), multiline = true),
-            EditField("limit", "最多执行次数（空白为不限）", schedule?.maxCalls?.toString().orEmpty()),
-        )) { values ->
-            val limit = values.getValue("limit").trim()
-            val count = limit.takeIf { it.isNotBlank() }?.toIntOrNull()
-            require(limit.isBlank() || (count != null && count > 0)) { "次数应为正整数" }
-            viewModel.saveSchedule(schedule?.id, apiBody("name" to values.getValue("name").trim(),
-                "pattern" to values.getValue("pattern").trim(), "command" to values.getValue("command").trim(),
-                "max_calls" to (count?.let(::JsonPrimitive) ?: JsonNull),
-                "enabled" to (schedule?.enabled ?: true), "run_target" to if (schedule == null) "new_session" else null))
-        }
+        editedSchedule = schedule
+        scheduleOpen = true
+        viewModel.scheduleOptions()
     }
     fun skillEditor(skill: InstalledSkill? = null) {
         editor = Editor(if (skill == null) "创建技能" else "编辑技能", listOf(EditField("raw", "SKILL.md",
@@ -95,22 +113,24 @@ fun BotFeatureScreen(
         val config = connection?.config
         editor = Editor(if (connection == null) "添加 MCP" else "编辑 MCP", listOf(
             EditField("name", "名称", connection?.name.orEmpty()),
-            EditField("transport", "传输（http / stdio）", connection?.type ?: "http"),
-            EditField("url", "HTTP 地址", config?.get("url")?.jsonPrimitive?.contentOrNull.orEmpty()),
-            EditField("command", "stdio 命令", config?.get("command")?.jsonPrimitive?.contentOrNull.orEmpty()),
-            EditField("args", "命令参数（JSON 数组）", config?.get("args")?.toString() ?: "[]"),
-            EditField("headers", "HTTP headers（JSON 对象）", config?.get("headers")?.toString() ?: "{}", secret = true),
-            EditField("env", "环境变量（JSON 对象）", config?.get("env")?.toString() ?: "{}", secret = true),
+            EditField("transport", "传输方式", connection?.type ?: "http", choices = listOf("http" to "HTTP", "sse" to "SSE", "stdio" to "stdio")),
+            EditField("url", "服务地址", config?.get("url")?.jsonPrimitive?.contentOrNull.orEmpty(), visible = { it["transport"] != "stdio" }),
+            EditField("command", "启动命令", config?.get("command")?.jsonPrimitive?.contentOrNull.orEmpty(), visible = { it["transport"] == "stdio" }),
+            EditField("cwd", "工作目录（可选）", config?.get("cwd")?.jsonPrimitive?.contentOrNull.orEmpty(), visible = { it["transport"] == "stdio" }),
+            EditField("args", "命令参数（JSON 数组）", config?.get("args")?.toString() ?: "[]", visible = { it["transport"] == "stdio" }),
+            EditField("headers", "HTTP headers（JSON 对象）", config?.get("headers")?.toString() ?: "{}", secret = true, visible = { it["transport"] != "stdio" }),
+            EditField("env", "环境变量（JSON 对象）", config?.get("env")?.toString() ?: "{}", secret = true, visible = { it["transport"] == "stdio" }),
         )) { values ->
             val transport = values.getValue("transport").trim()
-            require(transport in listOf("http", "stdio")) { "传输应为 http 或 stdio" }
-            require(if (transport == "http") values.getValue("url").startsWith("http") else values.getValue("command").isNotBlank()) { "请填写地址或命令" }
+            require(transport in listOf("http", "sse", "stdio")) { "请选择传输方式" }
+            require(if (transport != "stdio") values.getValue("url").startsWith("http") else values.getValue("command").isNotBlank()) { "请填写地址或命令" }
             val args = Json.parseToJsonElement(values.getValue("args")) as? JsonArray ?: error("参数应为 JSON 数组")
             val headers = Json.parseToJsonElement(values.getValue("headers")) as? JsonObject ?: error("headers 应为 JSON 对象")
             val env = Json.parseToJsonElement(values.getValue("env")) as? JsonObject ?: error("环境变量应为 JSON 对象")
             viewModel.saveMcp(connection?.id, apiBody("name" to values.getValue("name").trim(), "transport" to transport,
-                "is_active" to (connection?.isActive ?: true), "url" to values.getValue("url").takeIf { transport == "http" },
-                "command" to values.getValue("command").takeIf { transport == "stdio" }, "args" to args, "headers" to headers, "env" to env))
+                "is_active" to (connection?.isActive ?: true), "url" to values.getValue("url").takeIf { transport != "stdio" },
+                "command" to values.getValue("command").takeIf { transport == "stdio" }, "cwd" to values.getValue("cwd").takeIf { transport == "stdio" },
+                "args" to args.takeIf { transport == "stdio" }, "headers" to headers.takeIf { transport != "stdio" }, "env" to env.takeIf { transport == "stdio" }))
         }
     }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -125,7 +145,7 @@ fun BotFeatureScreen(
         MemohRefreshBox(refreshing = (state.loading && state.hasLoaded) || state.busy,
             onRefresh = viewModel::refresh, enabled = !state.busy && !initialLoading && state.botId.isNotBlank(),
             modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 100.dp),
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = maxOf(100.dp, LocalFloatingNavigationPadding.current)),
             verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
             item {
                 if (state.botId.isBlank()) EmptyNote("请选择一个 Bot", "选择 Bot 后查看和管理它的工作空间。")
@@ -168,6 +188,8 @@ fun BotFeatureScreen(
                     }
                     itemsIndexed(state.memories) { index, memory ->
                         FeatureCard(memory.memory ?: "空记忆", featureTime(memory.updatedAt ?: memory.createdAt), index, state.memories.size, titleIsBody = true) {
+                            memory.score?.let { Text("相关度 · %.3f".format(it), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+                            FeatureAction("详情与来源", Icons.Filled.Info, { focusedMemory = memory })
                             if (memory.id != null) {
                                 FeatureActions {
                                     FeatureAction("编辑", Icons.Filled.Edit, { memoryEditor(memory) }, enabled = !state.busy)
@@ -312,6 +334,9 @@ fun BotFeatureScreen(
                             Text(app.description.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 3)
                             FeatureActions {
                                 FeatureAction("更新", Icons.Filled.Update, { viewModel.update(app) }, enabled = !state.busy && app.registryId != null && app.appId != null)
+                                if (app.status == "needs_auth" || app.connectors.orEmpty().any { it.status != "active" }) onOpenConnectors?.let { open ->
+                                    FeatureAction("连接外部服务", Icons.Filled.Link, open, enabled = !state.busy)
+                                }
                                 if (app.status != "installed") FeatureAction("继续安装", Icons.Filled.PlayArrow, { viewModel.resume(app) }, enabled = !state.busy && app.installationId != null)
                                 FeatureAction("移除", Icons.Filled.DeleteOutline, { viewModel.previewRemove(app) }, enabled = !state.busy && app.installationId != null, danger = true)
                             }
@@ -342,7 +367,18 @@ fun BotFeatureScreen(
                     if (!state.loading && (if (state.browsing) count == 0 else if (apps) state.apps.isEmpty() else state.skills.isEmpty())) item { EmptyNote("暂无${if (apps) "应用" else "技能"}", if (state.browsing) "尝试其他关键词。" else "到商店浏览并安装。") }
                 }
                 BotFeature.Mcp -> {
-                    item { Box(Modifier.padding(bottom = 14.dp)) { FeatureAction("添加 MCP", Icons.Filled.Add, { mcpEditor() }, enabled = !state.busy, primary = true) } }
+                    item { FeatureActions {
+                        FeatureAction("添加 MCP", Icons.Filled.Add, { mcpEditor() }, enabled = !state.busy, primary = true)
+                        FeatureAction("导入 JSON", Icons.Filled.FileUpload, {
+                            editor = Editor("导入 MCP", listOf(EditField("config", "MCP 配置", "{\"mcpServers\":{}}", multiline = true))) { values ->
+                                val config = Json.parseToJsonElement(values.getValue("config")) as? JsonObject ?: error("MCP 配置应为 JSON 对象")
+                                val wrapped = if ("mcpServers" in config) config else JsonObject(mapOf("mcpServers" to config))
+                                require(wrapped["mcpServers"] is JsonObject) { "mcpServers 应为 JSON 对象" }
+                                viewModel.importMcp(wrapped)
+                            }
+                        }, enabled = !state.busy)
+                        FeatureAction("导出配置", Icons.Filled.FileDownload, viewModel::exportMcp, enabled = !state.busy && state.connections.isNotEmpty())
+                    } }
                     if (initialLoading) item(key = "initial-feature-loading") {
                         MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
                     }
@@ -353,6 +389,11 @@ fun BotFeatureScreen(
                             FeatureActions {
                                 FeatureAction("编辑", Icons.Filled.Edit, { mcpEditor(connection) }, enabled = !state.busy)
                                 FeatureAction("检查连接", Icons.Filled.NetworkCheck, { connection.id?.let(viewModel::probeMcp) }, enabled = !state.busy)
+                                if (connection.type in listOf("http", "sse")) FeatureAction("账号授权", Icons.Filled.Login, { viewModel.mcpAuthorization(connection) }, enabled = !state.busy)
+                                FeatureAction(if (connection.isActive == true) "停用" else "启用", Icons.Filled.PowerSettingsNew, { viewModel.toggleMcp(connection) }, enabled = !state.busy)
+                                FeatureAction("查看工具", Icons.Filled.Build, { details = (connection.name ?: "MCP") to connection.toolsCache.orEmpty().joinToString("\n\n") { tool ->
+                                    listOfNotNull(tool.name, tool.description, tool.inputSchema?.let { "参数\n${Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), it)}" }).joinToString("\n")
+                                } }, enabled = connection.toolsCache.orEmpty().isNotEmpty())
                                 FeatureAction("删除", Icons.Filled.DeleteOutline,
                                     { confirmation = Confirmation("删除 MCP", "断开并删除 ${connection.name.orEmpty()}。", { connection.id?.let(viewModel::deleteMcp) }) }, enabled = !state.busy, danger = true)
                             }
@@ -366,19 +407,49 @@ fun BotFeatureScreen(
         }
     }
     editor?.let { value -> EditDialog(value, state, onDismiss = { editor = null }) }
+    state.mcpAuthorization?.let { McpAuthorizationDialog(it, state.busy, state.error, viewModel) }
+    state.mcpExport?.let { config -> AlertDialog(onDismissRequest = viewModel::closeMcpExport, title = { Text("导出 MCP 配置") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("配置可用于其他客户端，可能包含连接凭据。保存后请妥善保管。")
+            exportError?.let { Text(it, color = MaterialTheme.colorScheme.error) } }
+    }, confirmButton = { FeatureAction("保存 JSON", Icons.Filled.FileDownload, { exportError = null; mcpSaver.launch("mcp-config.json") }, primary = true) },
+        dismissButton = { FeatureAction("取消", Icons.Filled.Close, viewModel::closeMcpExport) }) }
     confirmation?.let { value -> AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(value.title) }, text = { Text(value.message) },
         confirmButton = { FeatureAction("确认", Icons.Filled.Check, { confirmation = null; value.action() }, primary = true) },
         dismissButton = { FeatureAction("取消", Icons.Filled.Close, { confirmation = null }) }) }
     details?.let { (title, text) -> ContentDialog(title, { details = null }) { Text(text, style = MaterialTheme.typography.bodyMedium) } }
     state.graph?.let { graph -> ContentDialog("记忆关系", viewModel::closeGraph) {
         Text("${graph.nodes.orEmpty().size} 个节点 · ${graph.edges.orEmpty().size} 条关系", style = MaterialTheme.typography.labelLarge)
+        graph.nodes.orEmpty().forEachIndexed { index, node ->
+            SegmentedListItem(onClick = {
+                val memory = (state.memories + state.graphMemories).firstOrNull { it.id in node.memoryIds.orEmpty() || it.id == node.id }
+                focusedMemory = memory ?: MemoryEntry(id = node.id, memory = node.memory ?: node.label, metadata = node.metadata)
+            }, shapes = ListItemDefaults.segmentedShapes(index, graph.nodes.orEmpty().size),
+                colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
+                leadingContent = { Icon(Icons.Filled.Hub, null) }, supportingContent = { Text("${node.count ?: node.memoryIds.orEmpty().size} 条关联记忆") },
+                trailingContent = { Icon(Icons.Filled.ChevronRight, null) }) { Text(node.label ?: node.memory ?: node.id.orEmpty()) }
+        }
         graph.edges.orEmpty().forEach { edge ->
             val source = graph.nodes.orEmpty().firstOrNull { it.id == edge.source }
             val target = graph.nodes.orEmpty().firstOrNull { it.id == edge.target }
             Text("${source?.label ?: source?.memory ?: edge.source} → ${edge.rel.orEmpty()} → ${target?.label ?: target?.memory ?: edge.target}", style = MaterialTheme.typography.bodyMedium)
         }
-        if (graph.edges.isNullOrEmpty()) graph.nodes.orEmpty().forEach { Text(it.label ?: it.memory.orEmpty()) }
     } }
+    focusedMemory?.let { memory -> ContentDialog("记忆详情", { focusedMemory = null }) {
+        Text(memory.memory.orEmpty(), style = MaterialTheme.typography.bodyLarge)
+        memory.createdAt?.let { Text("记录时间 · ${featureTime(it)}", style = MaterialTheme.typography.bodySmall) }
+        memory.updatedAt?.let { Text("更新时间 · ${featureTime(it)}", style = MaterialTheme.typography.bodySmall) }
+        memory.score?.let { Text("相关度 · %.3f".format(it), style = MaterialTheme.typography.bodySmall) }
+        memory.metadata?.takeIf { it.isNotEmpty() }?.let { metadata ->
+            val sessionId = (metadata["session_id"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+            sessionId?.let { FeatureAction("打开来源会话", Icons.AutoMirrored.Filled.Chat, { focusedMemory = null; viewModel.closeGraph(); onOpenSession(it) }) }
+            Text(Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), metadata), style = MaterialTheme.typography.bodySmall)
+        }
+        val node = state.graph?.nodes?.firstOrNull { it.id == memory.id || memory.id in it.memoryIds.orEmpty() }
+        node?.memoryIds.orEmpty().forEach { id -> (state.memories + state.graphMemories).firstOrNull { it.id == id }?.let { related ->
+            TextButton({ focusedMemory = related }) { Text(related.memory ?: id) }
+        } }
+    } }
+    if (scheduleOpen) ScheduleEditor(editedSchedule, state, viewModel) { scheduleOpen = false }
     state.logs?.let { logs -> ContentDialog(state.logSchedule?.name ?: "执行记录", viewModel::closeLogs) {
         if (logs.items.isNullOrEmpty()) Text("暂无执行记录")
         logs.items.orEmpty().forEach { log ->
@@ -419,17 +490,30 @@ fun BotFeatureScreen(
     LaunchedEffect(state.busy, state.notice, state.error) { if (submitted && !state.busy && state.error == null && state.notice != null) onDismiss() }
     MemohFormDialog(onDismissRequest = { if (!state.busy) onDismiss() }, title = editor.title, text = {
         Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            editor.fields.forEach { field -> OutlinedTextField(value = values.getValue(field.key), onValueChange = { values = values + (field.key to it) },
+            editor.fields.filter { it.visible(values) }.forEach { field ->
+                if (field.choices.isNotEmpty()) {
+                    var expanded by remember(field.key) { mutableStateOf(false) }
+                    Box {
+                        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth(), enabled = !state.busy, shapes = ButtonDefaults.shapes()) {
+                            Text("${field.label}：${field.choices.firstOrNull { it.first == values[field.key] }?.second.orEmpty()}", Modifier.weight(1f)); Icon(Icons.Filled.ArrowDropDown, null)
+                        }
+                        MemohPopupMenu(expanded, { expanded = false }, Alignment.TopStart) { MemohMenuGroup {
+                            field.choices.forEachIndexed { index, choice -> MemohMenuRow(choice.second, Icons.Filled.Check, { values = values + (field.key to choice.first); expanded = false },
+                                selected = values[field.key] == choice.first, selectable = true, index = index, count = field.choices.size) }
+                        } }
+                    }
+                } else OutlinedTextField(value = values.getValue(field.key), onValueChange = { values = values + (field.key to it) },
                 label = { Text(field.label, style = MaterialTheme.typography.bodySmall) }, singleLine = !field.multiline, minLines = if (field.multiline) 4 else 1,
                 visualTransformation = if (field.secret) PasswordVisualTransformation() else VisualTransformation.None,
-                textStyle = MaterialTheme.typography.bodyMedium, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = !state.busy) }
+                textStyle = MaterialTheme.typography.bodyMedium, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = !state.busy)
+            }
             (validation ?: state.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         }
     }, confirmButton = { FeatureAction("保存", Icons.Filled.Save, {
         try {
-            val optional = if (editor.fields.any { it.key == "transport" }) listOf("url", "command") else listOf("limit")
-            require(editor.fields.filter { it.key !in optional }.all { values[it.key]?.isNotBlank() == true }) { "请填写必填项" }
+            val optional = if (editor.fields.any { it.key == "transport" }) listOf("url", "command", "cwd") else listOf("limit")
+            require(editor.fields.filter { it.key !in optional && it.visible(values) }.all { values[it.key]?.isNotBlank() == true }) { "请填写必填项" }
             validation = null; editor.save(values); submitted = true
         } catch (e: Exception) { validation = e.message ?: "请检查输入" }
     }, enabled = !state.busy, primary = true) }, dismissButton = { FeatureAction("取消", Icons.Filled.Close, onDismiss, enabled = !state.busy) })
@@ -651,6 +735,7 @@ private fun featureStatus(value: String?): String? = when (value) {
     "discovered" -> "待安装"
     "installing" -> "安装中"
     "failed", "error" -> "失败"
+    "needs_auth" -> "等待授权"
     "enabled", "active" -> "已启用"
     "effective" -> "已生效"
     "disabled", "inactive" -> "已停用"

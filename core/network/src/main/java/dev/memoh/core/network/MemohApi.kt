@@ -302,6 +302,27 @@ class MemohApi(
         }
     }
 
+    internal suspend fun binaryPost(path: String, body: okhttp3.RequestBody, limitBytes: Long = 16 * 1024 * 1024L): Pair<String, ByteArray> = withContext(Dispatchers.IO) {
+        if (endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
+        var lease = if (!endpoint.isCloud) freshLease() else null
+        fun sendBody() = networkClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
+            .newCall(request(path, "POST", null, lease).newBuilder().post(body).build()).execute()
+        var response = sendBody()
+        if (response.code == 401) {
+            response.close()
+            if (endpoint.isCloud) { auth?.onSessionExpired(); throw SessionExpiredException() }
+            lease = refreshOnce(lease); response = sendBody()
+            if (response.code == 401) { response.close(); auth?.onSessionExpired(); throw SessionExpiredException() }
+        }
+        response.use {
+            if (!it.isSuccessful) throw ApiException(it.code, it.body.string(), "请求失败（HTTP ${it.code}）")
+            val source = it.body.source()
+            source.request(limitBytes + 1)
+            require(source.buffer.size <= limitBytes) { "返回的文件超过 ${limitBytes / 1024 / 1024} MB" }
+            it.body.contentType()?.toString().orEmpty().substringBefore(';').ifBlank { "audio/mpeg" } to source.readByteArray()
+        }
+    }
+
     private suspend inline fun <reified T> request(
         path: String,
         authenticated: Boolean = true,

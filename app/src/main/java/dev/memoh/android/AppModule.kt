@@ -9,6 +9,8 @@ import dagger.hilt.components.SingletonComponent
 import dev.memoh.core.data.CredentialStore
 import dev.memoh.core.data.SessionRepository
 import dev.memoh.core.data.SettingsStore
+import dev.memoh.core.data.ChatHistoryStore
+import dev.memoh.core.data.AttachmentDraftStore
 import dev.memoh.core.network.CloudAuth
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -65,6 +67,16 @@ object AppModule {
     @Singleton
     fun provideSettingsStore(@ApplicationContext context: Context): SettingsStore =
         SettingsStore(context)
+
+    @Provides
+    @Singleton
+    fun provideChatHistoryStore(@ApplicationContext context: Context, json: Json): ChatHistoryStore =
+        ChatHistoryStore(java.io.File(context.noBackupFilesDir, "chat_history"), json)
+
+    @Provides
+    @Singleton
+    fun provideAttachmentDraftStore(@ApplicationContext context: Context, json: Json): AttachmentDraftStore =
+        AttachmentDraftStore(java.io.File(context.noBackupFilesDir, "attachment_drafts"), json)
 
     @Provides
     @Singleton
