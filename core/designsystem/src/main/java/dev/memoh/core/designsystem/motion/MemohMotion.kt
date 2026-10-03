@@ -109,11 +109,12 @@ object MemohMotion {
         }) + scaleIn(tween(NAVIGATION_MS, easing = PredictiveEasing), initialScale = 0.95f) +
             slideInHorizontally(tween(NAVIGATION_MS, easing = PredictiveEasing)) { -enteringOffset }
 
+    /** Geometry only; predictive entry opacity is driven by the seekable content scope. */
     fun predictivePopExit(fromLeft: Boolean, displayMargin: Int): ExitTransition =
         scaleOut(tween(NAVIGATION_MS, easing = PredictiveEasing), targetScale = PREDICTIVE_TARGET_SCALE) +
             slideOutHorizontally(tween(NAVIGATION_MS, easing = PredictiveEasing)) { fullWidth ->
                 if (fromLeft) (fullWidth * (1f - PREDICTIVE_TARGET_SCALE) / 2f).toInt() - displayMargin else 0
-            } + detailFadeOut()
+            }
 
     // -- in-place -----------------------------------------------------------
 

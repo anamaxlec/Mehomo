@@ -130,7 +130,7 @@ class PredictiveNavigationTest {
             assertTrue("Current page scales down", early.width < bounds("viewport").width * .98f)
             progress(.5f, edge)
             assertTrue("Scale follows gesture progress", bounds("Memory").width < early.width - 1f)
-            assertEquals("Bottom page's light scrim unveils with the gesture", .9f, pixel().green, .05f)
+            assertEquals("The half-drag keeps half of the current page visible", .45f, pixel().green, .05f)
             assertEquals(MainSection.Memory, destination.section)
             compose.runOnIdle { compose.activity.onBackPressedDispatcher.dispatchOnBackCancelled() }; advance(32)
             assertTrue("Cancellation rewinds instead of snapping", bounds("Memory").width < bounds("viewport").width * .99f)
@@ -176,7 +176,8 @@ class PredictiveNavigationTest {
                 assertTrue("NavHost uses predictive scale rather than ordinary pop", early.width < bounds("viewport").width * .98f)
                 progress(.5f, edge)
                 assertTrue(bounds("detail").width < early.width - 1f)
-                assertEquals(if (night) .6f else .9f, pixel().green, .05f)
+                assertEquals("Preview fades with the finger, independently of the click-back timeline",
+                    if (night) .3f else .45f, pixel().green, .05f)
                 assertEquals("detail", current())
                 compose.runOnIdle { compose.activity.onBackPressedDispatcher.dispatchOnBackCancelled() }; advance(32)
                 assertTrue("Cancellation preserves the predictive spec", bounds("detail").width < bounds("viewport").width * .99f)
@@ -218,11 +219,99 @@ class PredictiveNavigationTest {
             }
             advance(80)
             assertTrue("A quick flick must not skip predictive scale", bounds("detail").width < bounds("viewport").width * .98f)
+            val early = pixel().green
             advance(80)
-            assertTrue("Unveiling continues after the outgoing fade finishes", pixel().green in .8f.. .98f)
+            val later = pixel().green
+            assertTrue("A quick flick fades continuously through the predictive movement", later > early + .08f && later < .8f)
             assertUnveilingTail()
             assertEquals(1f, pixel().green, .04f)
         }
+    }
+
+    @Test fun previewOpacityFollowsTheWholeDragAndCommitNeverRestoresTheOutgoingPage() {
+        lateinit var open: () -> Unit
+        compose.mainClock.autoAdvance = false
+        compose.setContent { MemohTheme {
+            val nav = rememberNavController()
+            open = { nav.navigate("detail") }
+            MemohNavHost(nav, "parent", Modifier.size(300.dp).testTag("viewport")) {
+                memohComposable("parent") { Page("parent", Color.White) }
+                memohComposable("detail") { Page("detail", Color.Red) }
+            }
+        } }
+        advance()
+        for (edge in listOf(BackEventCompat.EDGE_LEFT, BackEventCompat.EDGE_RIGHT)) {
+            compose.runOnIdle(open); advance()
+            start(.1f, edge)
+            for (fraction in listOf(.1f, .2f, .3f, .5f, .75f)) {
+                progress(fraction, edge)
+                // A red page at alpha 1 - p overlays the white parent, whose
+                // light scrim is 0.2 * (1 - p). Both remain visible mid-drag.
+                assertEquals("Current content faded too early at progress $fraction",
+                    fraction * (.8f + .2f * fraction), pixel().green, .035f)
+            }
+            progress(.5f, edge)
+            val beforeRelease = pixel().green
+            compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
+            advance(16)
+            assertTrue("Commit must not restart the current page at full opacity", pixel().green >= beforeRelease - .02f)
+            assertUnveilingTail()
+        }
+    }
+
+    @Test fun aNonGestureSystemBackUsesOrdinaryReturnWithoutScaleOrScrim() {
+        lateinit var open: () -> Unit
+        compose.mainClock.autoAdvance = false
+        compose.setContent { MemohTheme {
+            val nav = rememberNavController()
+            open = { nav.navigate("detail") }
+            MemohNavHost(nav, "parent", Modifier.size(300.dp).testTag("viewport")) {
+                memohComposable("parent") { Page("parent", Color.White) }
+                memohComposable("detail") { Page("detail", Color.Red) }
+            }
+        } }
+        advance()
+        compose.runOnIdle(open); advance()
+        compose.runOnIdle {
+            val dispatcher = compose.activity.onBackPressedDispatcher
+            dispatcher.dispatchOnBackStarted(BackEventCompat(0f, 0f, 0f, BackEventCompat.EDGE_NONE))
+            dispatcher.dispatchOnBackProgressed(BackEventCompat(0f, 0f, 0f, BackEventCompat.EDGE_NONE))
+            dispatcher.onBackPressed()
+        }
+        advance(80)
+        assertEquals("A button back event must not shrink the page", bounds("viewport").width, bounds("detail").width, 1f)
+        assertTrue("System button back keeps the ordinary short fade", pixel().green in .05f.. .95f)
+        advance(80)
+        assertEquals("Button back must not leave a dimmed predictive preview", 1f, pixel().green, .04f)
+        advance()
+    }
+
+    @Test fun aShellNonGestureSystemBackUsesOrdinaryReturnWithoutScaleOrScrim() {
+        var destination by mutableStateOf(SectionDestination(MainSection.Profile, SectionMotion.None))
+        compose.mainClock.autoAdvance = false
+        compose.setContent { MemohTheme {
+            SectionContent(destination,
+                SectionDestination(MainSection.Profile, SectionMotion.Pop).takeIf { destination.section == MainSection.Memory },
+                onBack = { destination = SectionDestination(MainSection.Profile, SectionMotion.Pop) },
+                modifier = Modifier.size(300.dp).testTag("viewport")) { target ->
+                Page(target.section.name, if (target.section == MainSection.Memory) Color.Red else Color.White)
+            }
+        } }
+        advance()
+        compose.runOnIdle { destination = SectionDestination(MainSection.Memory, SectionMotion.Push) }; advance()
+        compose.runOnIdle {
+            val dispatcher = compose.activity.onBackPressedDispatcher
+            dispatcher.dispatchOnBackStarted(BackEventCompat(0f, 0f, 0f, BackEventCompat.EDGE_NONE))
+            dispatcher.dispatchOnBackProgressed(BackEventCompat(0f, 0f, 0f, BackEventCompat.EDGE_NONE))
+            dispatcher.onBackPressed()
+        }
+        advance(80)
+        assertEquals("A feature's button back must not shrink the page", bounds("viewport").width, bounds("Memory").width, 1f)
+        assertTrue("A feature's system button back keeps the ordinary short fade", pixel().green in .05f.. .95f)
+        advance(80)
+        assertEquals("A feature's button back must not dim its parent", 1f, pixel().green, .04f)
+        advance()
+        assertEquals(MainSection.Profile, destination.section)
     }
 
     @Test fun cancellingBeforeTheFirstProgressEventRestoresTheEntryAndOrdinaryBack() {
@@ -339,6 +428,29 @@ class PredictiveNavigationTest {
             compose.runOnIdle { destination = SectionDestination(MainSection.Memory, SectionMotion.Push) }; advance(entryTime)
             compose.runOnIdle { destination = SectionDestination(MainSection.Profile, SectionMotion.Pop) }
             assertUnveilingTail()
+        }
+    }
+
+    @Test fun aCancelledShellGestureFollowedByButtonReturnDoesNotReplayTheFade() {
+        var destination by mutableStateOf(SectionDestination(MainSection.Profile, SectionMotion.None))
+        compose.mainClock.autoAdvance = false
+        compose.setContent { MemohTheme {
+            SectionContent(destination,
+                SectionDestination(MainSection.Profile, SectionMotion.Pop).takeIf { destination.section == MainSection.Memory },
+                onBack = { destination = SectionDestination(MainSection.Profile, SectionMotion.Pop) },
+                modifier = Modifier.size(300.dp).testTag("viewport")) { target ->
+                Page(target.section.name, if (target.section == MainSection.Memory) Color.Red else Color.White)
+            }
+        } }
+        advance()
+        for (delay in listOf(0L, 48L, 1000L)) {
+            compose.runOnIdle { destination = SectionDestination(MainSection.Memory, SectionMotion.Push) }; advance()
+            start(.5f, BackEventCompat.EDGE_LEFT)
+            compose.runOnIdle { compose.activity.onBackPressedDispatcher.dispatchOnBackCancelled() }
+            if (delay > 0) advance(delay)
+            compose.runOnIdle { destination = SectionDestination(MainSection.Profile, SectionMotion.Pop) }
+            assertUnveilingTail()
+            assertEquals(MainSection.Profile, destination.section)
         }
     }
 }

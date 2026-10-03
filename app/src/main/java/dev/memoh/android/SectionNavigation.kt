@@ -65,8 +65,8 @@ internal fun SectionContent(
                 if (target != null) {
                     preview = target.section
                     progress = event.progress
-                    predictiveEdge = event.swipeEdge
-                    predicting = true
+                    predictiveEdge = event.swipeEdge.takeUnless { it == NavigationEvent.EDGE_NONE }
+                    predicting = predictiveEdge != null
                 }
             }
             if (target != null) onBack()
@@ -102,8 +102,10 @@ internal fun SectionContent(
                     .apply { targetContentZIndex = -1f }
             } else sectionTransition(destination.motion, geometry.distance * if (rtl) -1 else 1)
         }) { target ->
+        val previewAlpha = predictiveNavigationAlpha(predictiveEdge != null && target != preview,
+            returning = target != destination.section)
         Box(Modifier.fillMaxSize().graphicsLayer {
-            shape = corners; clip = true; alpha = if (target == interruptedEntrance) 0f else 1f
+            shape = corners; clip = true; alpha = if (target == interruptedEntrance) 0f else previewAlpha.value
         }) { content(SectionDestination(target, destination.motion)) }
     }
 }

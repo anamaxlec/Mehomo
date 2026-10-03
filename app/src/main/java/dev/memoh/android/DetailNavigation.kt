@@ -4,6 +4,10 @@ import androidx.compose.animation.AnimatedContentScope
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.AbsoluteRoundedCornerShape
@@ -42,6 +46,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 internal data class NavigationGeometry(val distance: Int, val margin: Int, val scrim: Color)
 
@@ -96,7 +101,8 @@ internal fun MemohNavHost(
         val observer = scope.launch(Dispatchers.Main.immediate, start = CoroutineStart.UNDISPATCHED) {
             dispatcher?.transitionState?.collect { state ->
                 if (state is NavigationEventTransitionState.InProgress &&
-                    state.direction == NavigationEventTransitionState.TRANSITIONING_BACK) {
+                    state.direction == NavigationEventTransitionState.TRANSITIONING_BACK &&
+                    state.latestEvent.swipeEdge != NavigationEvent.EDGE_NONE) {
                     if (!motion.tracking) {
                         motion.predictiveEntryId = navController.currentBackStackEntry?.id
                         motion.sawProgress = false
@@ -136,7 +142,8 @@ internal fun MemohNavHost(
     // NavHost attaches the navigator while composing its graph.
     SideEffect { if (entryFlow == null) entryFlow = navigator.backStack }
     val entries = entryFlow?.collectAsState()?.value
-    CompositionLocalProvider(LocalNavigationCorners provides corners, LocalNavigationEntries provides entries) {
+    CompositionLocalProvider(LocalNavigationCorners provides corners, LocalNavigationEntries provides entries,
+        LocalPredictiveEntry provides motion.predictiveEntryId) {
         NavHost(navController, startDestination, modifier.clipToBounds(),
             enterTransition = { motion.enter(initialState.id, pop = false, sectionReturn) },
             exitTransition = { motion.exit(initialState.id, pop = false, sectionReturn) },
@@ -148,6 +155,26 @@ internal fun MemohNavHost(
 
 private val LocalNavigationCorners = staticCompositionLocalOf<Shape> { RectangleShape }
 private val LocalNavigationEntries = staticCompositionLocalOf<List<NavBackStackEntry>?> { null }
+private val LocalPredictiveEntry = staticCompositionLocalOf<String?> { null }
+
+/** Keeps a cancelled preview's last opacity when a return interrupts its rewind. */
+@Composable
+internal fun AnimatedContentScope.predictiveNavigationAlpha(isPreview: Boolean, returning: Boolean): State<Float> {
+    val previewAlpha = transition.animateFloat(
+        transitionSpec = { tween(MemohMotion.NAVIGATION_MS, easing = LinearEasing) }, label = "predictiveOpacity",
+    ) { if (it == EnterExitState.Visible) 1f else 0f }
+    val completion = remember(isPreview, returning) { Animatable(previewAlpha.value) }
+    LaunchedEffect(isPreview, returning) {
+        if (isPreview && returning) {
+            completion.animateTo(0f, tween((completion.value * MemohMotion.NAVIGATION_MS).roundToInt(), easing = LinearEasing))
+        }
+    }
+    return when {
+        !isPreview -> remember { mutableFloatStateOf(1f) }
+        returning -> completion.asState()
+        else -> previewAlpha
+    }
+}
 
 /** Clips each entry before NavHost scales it, matching Flare's device-corner decorator. */
 internal fun NavGraphBuilder.memohComposable(
@@ -158,12 +185,13 @@ internal fun NavGraphBuilder.memohComposable(
     composable(route, arguments) { entry ->
         val corners = LocalNavigationCorners.current
         val returning = LocalNavigationEntries.current?.none { it.id == entry.id } == true
+        val previewAlpha = predictiveNavigationAlpha(LocalPredictiveEntry.current == entry.id, returning)
         // NavHost rewinds an interrupted entrance, but can draw another forward
         // frame before that rewind starts. A popped, unfinished entry must not
         // appear again while its old entrance is being cancelled.
         val interruptedEntrance = remember(returning) { returning && transition.currentState == EnterExitState.PreEnter }
         Box(Modifier.fillMaxSize().graphicsLayer {
-            shape = corners; clip = true; alpha = if (interruptedEntrance) 0f else 1f
+            shape = corners; clip = true; alpha = if (interruptedEntrance) 0f else previewAlpha.value
         }) { content(entry) }
     }
 }

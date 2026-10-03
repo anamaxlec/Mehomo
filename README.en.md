@@ -8,7 +8,7 @@
 
 Mehomo brings conversations and an agent's cloud workspace into one Android app. It connects to **official Memoh Cloud** and **self-hosted Memoh**. This is an independent, unofficial client.
 
-The current release is **[v0.1.10](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.10)**, adding native management, Cloud teams, attachment drafts, offline history and rich content, with shared floating navigation and refined back transitions. [Detailed release notes](docs/releases/v0.1.10.md)
+The current release is **[v0.1.11](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.11)**, refining back transitions in chats and management pages. Button back uses a short fade and horizontal movement; predictive back follows the gesture continuously. [Release notes](docs/releases/v0.1.11.md) · [v0.1.10 feature update](docs/releases/v0.1.10.md)
 
 ## Material 3 Expressive, throughout
 
@@ -90,7 +90,7 @@ Background Notifications offers current-Bot monitoring, completion alerts and de
 
 Complete connector authorization through the provider. Computers connects authorized devices; network settings appear for self-hosted accounts. Read PDFs page by page and preview Office document content, or open complex layouts in a system app.
 
-This release passes 214 JVM tests, the release build and lint, plus 15 API 36 navigation and loading tests covering menu navigation, transition direction, predictive back, larger text and chat loading.
+This release passes 214 JVM tests, the release build and lint, plus 17 API 36 navigation tests covering button back, both gesture edges, light and dark themes, RTL, cancellation, quick returns, floating navigation, transition direction and larger text. Chat and Bot settings transitions were also checked in screen recordings.
 
 ## Build
 
