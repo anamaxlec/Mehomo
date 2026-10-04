@@ -105,6 +105,9 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
     chatTarget: ChatTarget? = null, onTargetConsumed: () -> Unit = {}) {
     val navController = rememberNavController()
     val settings: SettingsViewModel = hiltViewModel()
+    val updates: AppUpdateViewModel = hiltViewModel()
+    val updateState by updates.state.collectAsState()
+    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { updates.check() }
     val session by settings.session.collectAsState()
     val configured by settings.floatingSections.collectAsState()
     val sections = configured.mapNotNull { name -> MainSection.entries.firstOrNull { it.name == name } }
@@ -154,7 +157,8 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 }
             }
 
-            when (state.step) {
+            androidx.activity.compose.BackHandler(state.step == LoginStep.Cloud || state.step == LoginStep.SelfHosted) { viewModel.backToPicker() }
+            LoginStepContent(state.step) { step -> when (step) {
                 LoginStep.ServerPicker -> ServerPickerScreen(
                     onSelectCloud = viewModel::showCloud,
                     onSelectSelfHosted = viewModel::showSelfHosted,
@@ -183,12 +187,13 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                     busy = state.form.busy,
                     onSelect = viewModel::selectTeam,
                 )
-            }
+            } }
         }
 
         memohComposable(Routes.MAIN) {
             MainShell(
                 navigation = navigation,
+                updates = updates,
                 onOpenSession = { botId, sessionId ->
                     navController.navigate(Routes.chat(botId, sessionId))
                 },
@@ -343,6 +348,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             }
         }
     }
+    AppUpdateReminder(updateState, updates::dismissReminder)
 }
 
 /**
@@ -354,6 +360,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
 @Composable
 private fun MainShell(
     navigation: SectionNavigationState,
+    updates: AppUpdateViewModel,
     onOpenSession: (botId: String, sessionId: String) -> Unit,
     onOpenManagement: (botId: String, page: ManagementPage) -> Unit,
     onOpenHistory: () -> Unit,
@@ -429,6 +436,7 @@ private fun MainShell(
 
                         MainSection.Profile -> ProfileScreen(
                             settings = settings,
+                            updates = updates,
                             bot = sessionsState.bot,
                             bots = sessionsState.bots,
                             onSelectBot = sessions::selectBot,

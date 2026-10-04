@@ -78,6 +78,7 @@ fun BotFeatureScreen(
     var details by remember { mutableStateOf<Pair<String, String>?>(null) }
     var scheduleOpen by remember { mutableStateOf(false) }
     var editedSchedule by remember { mutableStateOf<BotSchedule?>(null) }
+    var scheduleSort by remember { mutableStateOf("name") }
     var focusedMemory by remember { mutableStateOf<MemoryEntry?>(null) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -207,10 +208,22 @@ fun BotFeatureScreen(
                     if (initialLoading) item(key = "initial-feature-loading") {
                         MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
                     }
-                    itemsIndexed(state.schedules) { index, schedule ->
-                        FeatureCard(schedule.name ?: "未命名日程", "${schedule.pattern.orEmpty()} · 已运行 ${schedule.currentCalls ?: 0} 次${schedule.maxCalls?.let { " / $it" }.orEmpty()}", index, state.schedules.size) {
+                    if (state.schedules.isNotEmpty()) item {
+                        Text("${state.schedules.size} 个日程", style = MaterialTheme.typography.labelLarge)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("name" to "名称", "active" to "启用状态").forEach { (id, label) ->
+                                ScheduleFilterChip(scheduleSort == id, label) { scheduleSort = id }
+                            }
+                        }
+                    }
+                    val schedules = if (scheduleSort == "active") state.schedules.sortedWith(compareByDescending<BotSchedule> { it.enabled == true }.thenBy { it.name.orEmpty() })
+                        else state.schedules.sortedBy { it.name.orEmpty() }
+                    itemsIndexed(schedules, key = { index, schedule -> schedule.id ?: index }) { index, schedule ->
+                        FeatureCard(schedule.name ?: "未命名日程", scheduleDescription(schedule.pattern.orEmpty()), index, schedules.size) {
                             Column {
                                 Text(schedule.command.orEmpty(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                schedule.description?.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                ScheduleSummary(schedule, state.scheduleOptions.timezone)
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(if (schedule.enabled == true) "已启用" else "已暂停", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                                     Switch(checked = schedule.enabled == true, onCheckedChange = { viewModel.toggleSchedule(schedule) }, enabled = !state.busy)
@@ -450,16 +463,8 @@ fun BotFeatureScreen(
         } }
     } }
     if (scheduleOpen) ScheduleEditor(editedSchedule, state, viewModel) { scheduleOpen = false }
-    state.logs?.let { logs -> ContentDialog(state.logSchedule?.name ?: "执行记录", viewModel::closeLogs) {
-        if (logs.items.isNullOrEmpty()) Text("暂无执行记录")
-        logs.items.orEmpty().forEach { log ->
-            Text("${log.status.orEmpty()} · ${log.startedAt.orEmpty()}", style = MaterialTheme.typography.labelLarge)
-            Text(log.resultText ?: log.errorMessage.orEmpty(), style = MaterialTheme.typography.bodyMedium)
-            log.sessionId?.let { id -> FeatureActions { FeatureAction("查看执行会话", Icons.AutoMirrored.Filled.Chat,
-                { viewModel.closeLogs(); onOpenSession(id) }) } }
-            HorizontalDivider()
-        }
-    } }
+    state.logSchedule?.let { schedule -> ScheduleLogsDialog(state, { viewModel.logs(schedule) }, { viewModel.logs(schedule, more = true) },
+        viewModel::closeLogs, { id -> viewModel.closeLogs(); onOpenSession(id) }) }
     state.removal?.let { (app, preview) ->
         val dependencies = preview["dependencies"] as? JsonArray
         val connectors = preview["connectors"] as? JsonArray

@@ -65,7 +65,8 @@ suspend fun MemohApi.schedules(botId: String): List<BotSchedule> = get<ScheduleL
 suspend fun MemohApi.saveSchedule(botId: String, id: String?, body: JsonObject): BotSchedule =
     change("${botPath(botId)}/schedule${id?.let { "/${segment(it)}" }.orEmpty()}", if (id == null) "POST" else "PUT", body)
 suspend fun MemohApi.deleteSchedule(botId: String, id: String): Unit = change("${botPath(botId)}/schedule/${segment(id)}", "DELETE")
-suspend fun MemohApi.scheduleLogs(botId: String, id: String): ScheduleLogs = get("${botPath(botId)}/schedule/${segment(id)}/logs")
+suspend fun MemohApi.scheduleLogs(botId: String, id: String, offset: Int = 0): ScheduleLogs =
+    get("${botPath(botId)}/schedule/${segment(id)}/logs${query("limit" to "50", "offset" to offset.toString())}")
 suspend fun MemohApi.tokenUsage(botId: String, from: String, to: String): TokenUsageSummary =
     get("${botPath(botId)}/token-usage${query("from" to from, "to" to to)}")
 suspend fun MemohApi.tokenRecords(botId: String, from: String, to: String, offset: Int = 0): TokenUsageRecords =

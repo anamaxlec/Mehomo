@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dev.memoh.core.model.MemohAccent
 import dev.memoh.core.model.ThemeMode
@@ -47,6 +48,9 @@ class SettingsStore(private val context: Context) {
         val LIVE_UPDATES = booleanPreferencesKey("live_updates")
         val FLOATING_SECTIONS = stringPreferencesKey("floating_sections")
         val LAST_BOT_ID = stringPreferencesKey("last_bot_id")
+        val AUTO_UPDATE_CHECK = booleanPreferencesKey("auto_update_check")
+        val LAST_UPDATE_CHECK = longPreferencesKey("last_update_check")
+        val NOTIFIED_RELEASE = stringPreferencesKey("notified_release")
     }
 
     val themeMode: Flow<ThemeMode> = context.dataStore.data.map { prefs ->
@@ -89,6 +93,13 @@ class SettingsStore(private val context: Context) {
     }
 
     val lastBotId: Flow<String?> = context.dataStore.data.map { it[Keys.LAST_BOT_ID] }
+
+    val automaticUpdateChecks: Flow<Boolean> = context.dataStore.data.map { it[Keys.AUTO_UPDATE_CHECK] ?: true }
+    val lastUpdateCheck: Flow<Long> = context.dataStore.data.map { it[Keys.LAST_UPDATE_CHECK] ?: 0L }
+    val notifiedRelease: Flow<String?> = context.dataStore.data.map { it[Keys.NOTIFIED_RELEASE] }
+    suspend fun setAutomaticUpdateChecks(enabled: Boolean) { context.dataStore.edit { it[Keys.AUTO_UPDATE_CHECK] = enabled } }
+    suspend fun recordUpdateCheck(time: Long) { context.dataStore.edit { it[Keys.LAST_UPDATE_CHECK] = time } }
+    suspend fun markReleaseNotified(version: String) { context.dataStore.edit { it[Keys.NOTIFIED_RELEASE] = version } }
 
     suspend fun setThemeMode(mode: ThemeMode) {
         context.dataStore.edit { it[Keys.THEME_MODE] = mode.name }

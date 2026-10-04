@@ -26,6 +26,15 @@ class BotApiIntegrationTest {
     private fun response(body: String = "{}", status: Int = 200) { server.enqueue(MockResponse().setResponseCode(status).setBody(body)) }
     private fun body() = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
 
+    @Test fun `schedule history keeps its total and loads later pages by offset`() = runTest {
+        response("""{"items":[{"id":"log-51","status":"failed","error_message":"timeout"}],"total_count":123}""")
+        val page = api().scheduleLogs("bot", "schedule", offset = 50)
+        assertEquals(123L, page.totalCount); assertEquals("failed", page.items!!.single().status)
+        val request = server.takeRequest().requestUrl!!
+        assertEquals("/bots/bot/schedule/schedule/logs", request.encodedPath)
+        assertEquals("50", request.queryParameter("offset")); assertEquals("50", request.queryParameter("limit"))
+    }
+
     @Test fun `session pagination round trips opaque cursors without changing plus or separators`() = runTest {
         val cursor = "older+page/with=padding&marker"
         response("""{"items":[{"id":"recent","title":"Recent"}],"next_cursor":"$cursor"}""")

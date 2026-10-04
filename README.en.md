@@ -8,7 +8,7 @@
 
 Mehomo brings conversations and an agent's cloud workspace into one Android app. It connects to **official Memoh Cloud** and **self-hosted Memoh**. This is an independent, unofficial client.
 
-The current release is **[v0.1.11](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.11)**, refining back transitions in chats and management pages. Button back uses a short fade and horizontal movement; predictive back follows the gesture continuously. [Release notes](docs/releases/v0.1.11.md) · [v0.1.10 feature update](docs/releases/v0.1.10.md)
+The current release is **[v0.1.12](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.12)**, expanding schedules and execution history, adding installed-version display and GitHub release checks, and animating navigation from the welcome page to both login forms. [Release notes](docs/releases/v0.1.12.md) · [v0.1.11 back transitions](docs/releases/v0.1.11.md)
 
 ## Material 3 Expressive, throughout
 
@@ -37,7 +37,8 @@ Mehomo connects your phone to an existing Memoh Bot: start a task, follow its ex
 | Attachments and decisions | Pick files/images or take a photo; preview, remove and manage attachments inside the expanded composer; choose original/compressed images, share from Android and restore drafts; approve/reject tools and answer structured questions |
 | Queues and controls | Add, edit, delete and reorder follow-ups; steer supported runs; runtime/permission modes, goals and quick actions |
 | Memory | List, create, edit, delete and search memories; status, graph and compaction |
-| Schedules | Daily, weekly and custom cron with timezone and next-run preview; Agent, model, reasoning, workspace and run-limit settings; execution logs |
+| Schedules | Minute intervals, hourly, daily, weekly, monthly, yearly and advanced Cron; existing-rule editing, Bot timezone and next-run preview; Agent, model, reasoning, target session, workdir and run-limit settings; pause, resume, sort and delete |
+| Schedule history | Paginated execution status, start/end times, expandable and selectable results/errors, refresh and links to execution sessions |
 | Usage and resources | 7/30/90-day token totals, provider/model breakdowns, paginated invocation records; CPU/memory/storage when supplied by the server |
 | Apps and skills | Search catalogs, inspect details, install apps with SSE progress, inspect installed items, update/removal actions; import/edit/delete skills |
 | MCP | HTTP/SSE/stdio configuration, JSON import/export, OAuth authorization and revocation, connection probes and tool metadata |
@@ -58,6 +59,8 @@ Math, Mermaid and static SVG rendering use bundled assets. PDF pages render nati
 | Cloud teams and profile | Team selection, team profile, members, invitations, roles and ownership; quotas and billing link; official Cloud personal profile |
 
 The composer supports camera capture, image compression and persisted text/file drafts. Recent history can be read and searched offline. Optional background monitoring delivers completion/decision notifications and Android Live Updates.
+
+Profile shows the installed app version and provides manual checks for the latest stable GitHub release. Automatic checks run once a day when opening the app and show release notes with a signed APK download link when an update is available. Cloud and self-hosted login forms use the app's horizontal page transitions.
 
 Floating navigation is shared across main destinations, Bot features, management menus and workspace views. It collapses while scrolling, hides for the keyboard and reserves space at the bottom of each page. Transitions follow the configured destination order, including RTL layouts. Back transitions use Flare-style movement and a short fade, with predictive back following gesture progress. Initial chat loading uses skeletons; loading earlier messages uses a separate 48dp indicator while message positions remain stable.
 

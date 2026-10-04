@@ -11,6 +11,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlinx.serialization.json.*
 import javax.inject.Inject
@@ -40,9 +42,13 @@ data class BotFeatureState(
     val schedules: List<BotSchedule> = emptyList(),
     val scheduleWire: Map<String, JsonObject> = emptyMap(),
     val scheduleOptions: ScheduleOptions = ScheduleOptions(),
+    val scheduleOptionsLoading: Boolean = false,
+    val scheduleOptionsError: String? = null,
     val scheduleAgentModels: Map<String, List<ChatModel>> = emptyMap(),
     val logSchedule: BotSchedule? = null,
     val logs: ScheduleLogs? = null,
+    val logsLoading: Boolean = false,
+    val logsError: String? = null,
     val usage: TokenUsageSummary? = null,
     val usageDays: Int = 30,
     val usageFrom: String = LocalDate.now(ZoneOffset.UTC).minusDays(29).toString(),
@@ -78,6 +84,8 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     private val _state = MutableStateFlow(BotFeatureState())
     val state = _state.asStateFlow()
     private var loadJob: Job? = null
+    private var scheduleOptionsJob: Job? = null
+    private var logsJob: Job? = null
     private var subscription: Job? = null
     private var mcpAuthJob: Job? = null
     private val pages = BotFeaturePages()
@@ -93,6 +101,8 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
             pages.save(_state.value, generation)
         }
         closeMcpAuthorization()
+        scheduleOptionsJob?.cancel()
+        logsJob?.cancel()
         pageGeneration = generation
         loadJob?.cancel()
         _state.value = cachedState(botId, feature)
@@ -138,6 +148,9 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                                 val id = entry.jsonObject["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                                 id to entry.jsonObject
                             }.toMap())
+                        try { loaded = loaded.copy(scheduleOptions = loaded.scheduleOptions.copy(timezone = scheduleTimezone(api, current.botId))) }
+                        catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { /* A schedule list remains readable if the profile endpoint is unavailable. */ }
                     }
                     BotFeature.Usage -> {
                         loaded = loaded.copy(usage = api.tokenUsage(current.botId, current.usageFrom, current.usageTo))
@@ -170,7 +183,11 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                     // A list refresh can run while the user types into a file editor.
                     loaded.copy(loading = false, hasLoaded = true, busy = it.busy, progress = it.progress, removal = it.removal,
                         query = it.query, selectedFile = it.selectedFile, fileDocument = it.fileDocument,
-                        fileDraft = it.fileDraft, fileNew = it.fileNew, fileEditing = it.fileEditing)
+                        fileDraft = it.fileDraft, fileNew = it.fileNew, fileEditing = it.fileEditing,
+                        scheduleOptions = it.scheduleOptions.copy(timezone = loaded.scheduleOptions.timezone ?: it.scheduleOptions.timezone),
+                        scheduleOptionsLoading = it.scheduleOptionsLoading, scheduleOptionsError = it.scheduleOptionsError,
+                        scheduleAgentModels = it.scheduleAgentModels, logSchedule = it.logSchedule, logs = it.logs,
+                        logsLoading = it.logsLoading, logsError = it.logsError)
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(loading = false, error = e.message ?: "加载失败") } }
@@ -314,9 +331,44 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     }
     fun closeGraph() { _state.update { it.copy(graph = null) } }
     fun saveSchedule(id: String?, body: JsonObject, onSaved: () -> Unit = {}) = action("日程已保存") { api, bot -> api.saveSchedule(bot, id, body); onSaved() }
-    fun scheduleOptions() = action(refresh = false) { api, bot ->
-        val zone = api.bot(bot).timezone ?: runCatching { api.managementRead("users", "me").jsonObject["timezone"]?.jsonPrimitive?.contentOrNull }.getOrNull()
-        _state.update { it.copy(scheduleOptions = ScheduleOptions(api.models(), api.agents(bot), api.workdirs(bot), api.sessions(bot).items, zone)) }
+    private suspend fun scheduleTimezone(api: MemohApi, bot: String): String? = api.bot(bot).timezone?.takeIf(String::isNotBlank)
+        ?: (api.managementRead("users", "me") as? JsonObject)?.get("timezone")?.jsonPrimitive?.contentOrNull
+
+    fun scheduleOptions() {
+        scheduleOptionsJob?.cancel()
+        val current = state.value
+        val generation = repository.generation
+        scheduleOptionsJob = viewModelScope.launch {
+            _state.update { it.copy(scheduleOptionsLoading = true, scheduleOptionsError = null) }
+            val errors = mutableListOf<String>()
+            suspend fun <T> option(label: String, fallback: T, read: suspend () -> T): T = try { read() }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { errors += label; fallback }
+            try {
+                val api = repository.api() ?: error("请先登录")
+                val options = coroutineScope {
+                    val models = async { option("模型", current.scheduleOptions.models) { api.models() } }
+                    val agents = async { option("Agent", current.scheduleOptions.agents) { api.agents(current.botId) } }
+                    val workdirs = async { option("工作目录", current.scheduleOptions.workdirs) { api.workdirs(current.botId) } }
+                    val sessions = async { option("会话", current.scheduleOptions.sessions) {
+                        val items = mutableListOf<Session>(); var cursor: String? = null
+                        do {
+                            val page = api.sessions(current.botId, cursor = cursor)
+                            items += page.items
+                            val next = page.nextCursor
+                            if (next == cursor) break
+                            cursor = next
+                        } while (cursor != null)
+                        items.distinctBy { it.id }
+                    } }
+                    val timezone = async { option("时区", current.scheduleOptions.timezone) { scheduleTimezone(api, current.botId) } }
+                    ScheduleOptions(models.await(), agents.await(), workdirs.await(), sessions.await(), timezone.await())
+                }
+                if (generation == repository.generation && itMatches(current)) _state.update { it.copy(scheduleOptions = options,
+                    scheduleOptionsLoading = false, scheduleOptionsError = errors.takeIf { it.isNotEmpty() }?.let { missing -> "${missing.joinToString("、")}加载失败，点击重试" }) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(scheduleOptionsLoading = false, scheduleOptionsError = "日程选项加载失败，请重试") } }
+        }
     }
     fun scheduleAgentOptions(id: String) = action(refresh = false) { api, bot ->
         try { val models = api.agentModels(bot, id).pickerModels; _state.update { it.copy(scheduleAgentModels = it.scheduleAgentModels + (id to models)) } }
@@ -325,11 +377,24 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     }
     fun deleteSchedule(id: String) = action("日程已删除") { api, bot -> api.deleteSchedule(bot, id) }
     fun toggleSchedule(schedule: BotSchedule) = action { api, bot -> api.saveSchedule(bot, requireNotNull(schedule.id), apiBody("enabled" to (schedule.enabled != true))) }
-    fun logs(schedule: BotSchedule) = action(refresh = false) { api, bot ->
-        val logs = api.scheduleLogs(bot, requireNotNull(schedule.id))
-        _state.update { it.copy(logSchedule = schedule, logs = logs) }
+    fun logs(schedule: BotSchedule, more: Boolean = false) {
+        val id = schedule.id ?: return
+        if (more && state.value.logsLoading) return
+        logsJob?.cancel()
+        val current = state.value
+        val generation = repository.generation
+        val offset = if (more) current.logs?.items.orEmpty().size else 0
+        _state.update { it.copy(logSchedule = schedule, logs = if (more) it.logs else null, logsLoading = true, logsError = null) }
+        logsJob = viewModelScope.launch {
+            try {
+                val page = (repository.api() ?: error("请先登录")).scheduleLogs(current.botId, id, offset)
+                if (generation == repository.generation && itMatches(current) && state.value.logSchedule?.id == id) _state.update { it.copy(
+                    logs = page.copy(items = if (more) (current.logs?.items.orEmpty() + page.items.orEmpty()).distinctBy { log -> log.id } else page.items), logsLoading = false) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(logsLoading = false, logsError = "执行记录加载失败，请重试") } }
+        }
     }
-    fun closeLogs() { _state.update { it.copy(logSchedule = null, logs = null) } }
+    fun closeLogs() { logsJob?.cancel(); _state.update { it.copy(logSchedule = null, logs = null, logsLoading = false, logsError = null) } }
     fun moreRecords() = action(refresh = false) { api, bot ->
         val current = state.value
         val page = api.tokenRecords(bot, current.usageFrom, current.usageTo, current.records.size)

@@ -25,6 +25,7 @@ import dev.memoh.feature.bots.ManagementPage
 @Composable
 fun ProfileScreen(
     settings: SettingsViewModel,
+    updates: AppUpdateViewModel,
     bot: Bot?,
     bots: List<Bot>,
     onSelectBot: (Bot) -> Unit,
@@ -37,6 +38,9 @@ fun ProfileScreen(
     val accent by settings.accent.collectAsState()
     val floating by settings.floatingSections.collectAsState()
     val teams by settings.cloudTeams.collectAsState()
+    val update by updates.state.collectAsState()
+    val automaticUpdates by updates.automatic.collectAsState()
+    var updatesOpen by remember { mutableStateOf(false) }
     var teamsOpen by remember(session.account?.accountId) { mutableStateOf(false) }
     var navigationOpen by remember { mutableStateOf(false) }
     var logoutOpen by remember { mutableStateOf(false) }
@@ -129,6 +133,8 @@ fun ProfileScreen(
                 }
             }
             item { SettingsRow("离线历史", "查看、搜索和管理近期会话缓存", Icons.Filled.OfflinePin, onClick = onOpenHistory) }
+            item { SettingsRow("版本与更新", "Mehomo ${update.currentVersion} · ${update.description()}", Icons.Filled.SystemUpdate,
+                tone = ListIconTone.Tertiary, onClick = { updatesOpen = true }) }
             item {
                 SectionLabel("个性化")
                     Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
@@ -156,11 +162,13 @@ fun ProfileScreen(
             item {
                 SettingsRow("退出登录", "再次使用时需要重新登录", Icons.AutoMirrored.Filled.Logout, tone = ListIconTone.Error,
                     onClick = { logoutOpen = true }, trailing = null)
-                Text("Mehomo", Modifier.fillMaxWidth().padding(top = 20.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                Text("Mehomo ${update.currentVersion}", Modifier.fillMaxWidth().padding(top = 20.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
+    if (updatesOpen) AppUpdateSettings(update, automaticUpdates, updates::setAutomatic, { updates.check(manual = true) },
+        { updatesOpen = false; updates.showRelease() }, { updatesOpen = false })
     if (navigationOpen) FloatingMenuSettings(floating, { navigationOpen = false }, settings::setFloatingSections)
     if (teamsOpen) AlertDialog(onDismissRequest = { teamsOpen = false }, title = { Text("Cloud 团队") }, icon = { Icon(Icons.Filled.Groups, null) },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
