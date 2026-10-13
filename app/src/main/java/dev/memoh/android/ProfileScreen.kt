@@ -82,8 +82,8 @@ fun ProfileScreen(
                 }
             }
             val groups = listOf(
-                "Bot 与工作空间" to listOf(ManagementPage.Bots, ManagementPage.Bot, ManagementPage.Agents, ManagementPage.Workspace, ManagementPage.Computers, ManagementPage.Access, ManagementPage.Backup),
-                "模型与服务" to listOf(ManagementPage.Models, ManagementPage.Media, ManagementPage.Services),
+                "Bot 与工作空间" to listOf(ManagementPage.Bots, ManagementPage.Bot, ManagementPage.Agents, ManagementPage.Dependencies, ManagementPage.Workspace, ManagementPage.Computers, ManagementPage.Access, ManagementPage.Backup),
+                "模型与服务" to listOf(ManagementPage.Providers),
                 "连接与自动化" to listOf(ManagementPage.Connectors, ManagementPage.Channels, ManagementPage.Hooks, ManagementPage.Network),
                 "账号" to listOf(ManagementPage.Team, ManagementPage.Account),
             )
@@ -97,6 +97,8 @@ fun ProfileScreen(
                             ManagementPage.Bots -> Icons.Filled.Dashboard
                             ManagementPage.Bot -> Icons.Filled.SmartToy
                             ManagementPage.Agents -> Icons.Filled.Psychology
+                            ManagementPage.Dependencies -> Icons.Filled.Build
+                            ManagementPage.Providers -> Icons.Filled.Cloud
                             ManagementPage.Models -> Icons.Filled.ModelTraining
                             ManagementPage.Media -> Icons.Filled.PermMedia
                             ManagementPage.Services -> Icons.Filled.TravelExplore

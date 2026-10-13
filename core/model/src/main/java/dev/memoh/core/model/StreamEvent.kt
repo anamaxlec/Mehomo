@@ -28,7 +28,12 @@ data class UIStreamEvent(
     // --- rejection / error ---
     val code: String? = null,
     val message: String? = null,
-    val feedback: String? = null,
+    val feedback: kotlinx.serialization.json.JsonElement? = null,
+    val args: kotlinx.serialization.json.JsonObject? = null,
+    val fault: String? = null,
+    val status: Int? = null,
+    @SerialName("request_id") val requestId: String? = null,
+    @SerialName("trace_id") val traceId: String? = null,
 
     // --- runtime frames ---
     val snapshot: RuntimeSnapshot? = null,
@@ -70,6 +75,11 @@ data class UIStreamEvent(
     }
 
     val isKnown: Boolean get() = type in KNOWN
+    val problem: MemohError get() {
+        val legacy = error?.problem ?: MemohError.parse(feedback, status)
+        return if (!code.isNullOrBlank()) MemohError(code, args ?: legacy.args, status ?: legacy.status, fault ?: legacy.fault,
+            requestId ?: legacy.requestId, traceId ?: legacy.traceId) else legacy
+    }
 }
 
 @Serializable
@@ -96,7 +106,13 @@ data class CommandActionResult(
 data class CommandActionError(
     val code: String = "",
     val message: String = "",
-)
+    val args: kotlinx.serialization.json.JsonObject? = null,
+    val fault: String? = null,
+    @SerialName("request_id") val requestId: String? = null,
+    @SerialName("trace_id") val traceId: String? = null,
+) {
+    val problem: MemohError get() = MemohError(code, args, fault = fault, requestId = requestId, traceId = traceId)
+}
 
 // ---------------------------------------------------------------------------
 // Session activity SSE (`GET /bots/{bot_id}/sessions/events`)

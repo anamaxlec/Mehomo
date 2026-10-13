@@ -18,6 +18,8 @@ import dev.memoh.core.designsystem.component.MemohComposerSurface
 import dev.memoh.core.designsystem.component.MemohComposerTextField
 import dev.memoh.core.model.QueueItem
 import dev.memoh.core.model.RuntimeModeState
+import dev.memoh.core.model.hasCodexUsage
+import dev.memoh.core.designsystem.component.CodexUsagePanel
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -31,6 +33,10 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
     var confirm by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
     LaunchedEffect(Unit) {
         while (true) { viewModel.refreshControls(); delay(5000) }
+    }
+    val usageSupported = state.agents.any { it.id == state.selectedAgentId && it.hasCodexUsage }
+    LaunchedEffect(state.selectedAgentId, usageSupported) {
+        if (usageSupported) while (true) { viewModel.refreshCodexUsage(); delay(60_000) }
     }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -47,6 +53,8 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
                 }
             }
             state.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+            if (usageSupported) CodexUsagePanel(state.codexUsage.takeIf { state.codexUsageAgentId == state.selectedAgentId },
+                state.codexUsageLoading, state.codexUsageError, viewModel::refreshCodexUsage)
             state.commandOutput?.let { ControlCard("执行结果", Icons.Filled.Terminal) { Text(it, style = MaterialTheme.typography.bodyMedium) } }
             ControlCard("消息队列", Icons.Filled.Queue) {
                 Text("后续消息在当前任务结束后执行；插话交给正在运行的任务处理。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -86,4 +86,13 @@ class MemohMenuPositionProviderTest {
         margin = 16,
         gap = 12,
     )
+
+    @Test
+    fun contextPopoverKeepsItsTriggerVisibleWithAnEightPixelGap() {
+        val provider = MemohMenuPositionProvider(Alignment.BottomEnd, null, 16, 8, aboveAnchor = true)
+        val anchor = IntRect(260, 600, 330, 640)
+        val position = provider.calculatePosition(anchor, IntSize(400, 800), LayoutDirection.Ltr, IntSize(240, 300))
+        assertEquals(IntOffset(90, 292), position)
+        assertEquals(8, anchor.top - provider.geometry!!.menuBounds.bottom)
+    }
 }

@@ -25,4 +25,7 @@ enum class WorkspaceSurface(val title: String) { Terminal("终端"), Browser("�
     override fun toString() = "RuntimeDisplaySession(sessionId=$sessionId)"
 }
 @Serializable data class DisplayPrepareEvent(val type: String, val step: String? = null,
-    val detail: String? = null, val message: String? = null, val percent: Int? = null)
+    val detail: String? = null, val message: String? = null, val percent: Int? = null,
+    val code: String? = null, val args: kotlinx.serialization.json.JsonObject? = null, val fault: String? = null,
+    @SerialName("request_id") val requestId: String? = null,
+    @SerialName("trace_id") val traceId: String? = null)

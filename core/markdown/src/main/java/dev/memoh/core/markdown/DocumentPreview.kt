@@ -1,5 +1,6 @@
 package dev.memoh.core.markdown
 
+
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
@@ -65,7 +66,7 @@ fun DocumentPreview(source: String, name: String, mime: String? = null, onDismis
                 })
             }
         } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { value = DocumentState.Failed(e.message ?: "文件加载失败") }
+        catch (e: Exception) { value = DocumentState.Failed("文件加载失败，请重试") }
     }
     val ready = state as? DocumentState.Ready
     val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(mime ?: "application/octet-stream")) { uri ->

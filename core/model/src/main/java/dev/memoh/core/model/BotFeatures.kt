@@ -126,6 +126,8 @@ data class ScheduleLog(
     @SerialName("bot_id") val botId: String? = null,
     @SerialName("completed_at") val completedAt: String? = null,
     @SerialName("error_message") val errorMessage: String? = null,
+    @SerialName("error_code") val errorCode: String? = null,
+    @SerialName("error_args") val errorArgs: Map<String, String>? = null,
     val id: String? = null,
     @SerialName("result_text") val resultText: String? = null,
     @SerialName("schedule_id") val scheduleId: String? = null,
@@ -148,7 +150,13 @@ data class TokenUsageSummary(
     val chat: List<DailyTokenUsage>? = null,
     val discuss: List<DailyTokenUsage>? = null,
     val schedule: List<DailyTokenUsage>? = null,
-)
+    val memory: List<DailyTokenUsage>? = null,
+) {
+    val categories: List<Pair<String, List<DailyTokenUsage>>> get() = listOf(
+        "对话" to chat.orEmpty(), "讨论" to discuss.orEmpty(), "定时任务" to schedule.orEmpty(),
+        "外部 Agent" to acpAgent.orEmpty(), "记忆" to memory.orEmpty())
+    val all: List<DailyTokenUsage> get() = categories.flatMap { it.second }
+}
 
 @Serializable
 data class DailyTokenUsage(
@@ -314,6 +322,7 @@ data class InstalledApps(
     @SerialName("dependency_catalog_stale") val dependencyCatalogStale: Boolean? = null,
     val items: List<InstalledApp>? = null,
     @SerialName("workspace_state") val workspaceState: String? = null,
+    @SerialName("update_checks_incomplete") val updateChecksIncomplete: Boolean = false,
 )
 
 @Serializable
@@ -333,6 +342,8 @@ data class InstalledApp(
     @SerialName("installed_at") val installedAt: String? = null,
     @SerialName("last_checked_at") val lastCheckedAt: String? = null,
     @SerialName("last_error") val lastError: String? = null,
+    @SerialName("last_error_code") val lastErrorCode: String? = null,
+    @SerialName("last_error_args") val lastErrorArgs: Map<String, String>? = null,
     val license: String? = null,
     val name: String? = null,
     val reason: String? = null,
@@ -449,6 +460,8 @@ data class SupermarketAppTranslation(
 data class AppInstallEvent(
     val args: JsonObject? = null,
     val code: String? = null,
+    val fault: String? = null,
+    @SerialName("trace_id") val traceId: String? = null,
     val data: String? = null,
     val detail: String? = null,
     val id: String? = null,

@@ -49,12 +49,23 @@ internal fun LazyListScope.channelAccessRules(state: ManagementState, vm: Manage
     if ("acl-default" in state.data) {
         val default = state.data["acl-default"].obj().text("default_effect")
         item { GroupLabel("平台访问控制") }
-        item { ManagementRow("访问模式", if (default == "deny") "白名单：仅允许名单中的成员" else "黑名单：拒绝名单中的成员", Icons.Filled.Shield,
+        item { ManagementRow("访问模式", if (default == "deny") "默认拒绝，符合允许规则的消息可触发" else "默认允许，符合拒绝规则的消息被拦截", Icons.Filled.Shield,
             enabled = editable, onClick = {
                 editor(ManagementEditor("平台访问模式", listOf(FormField("default_effect", "模式", default, choices = listOf("allow" to "黑名单模式", "deny" to "白名单模式")))) { body, saved ->
                     vm.write(base + "default-effect", "PUT", body, onSaved = saved)
                 })
             }) }
+        if ("acl-rules" in state.data) item {
+            val rules = state.data["acl-rules"].objects("items")
+            ManagementNotice(listOf("private" to "私聊", "group" to "群聊", "thread" to "话题").joinToString("\n") { (kind, label) ->
+                "$label：${effectiveChannelAccess(default, rules, kind)}"
+            })
+        }
+        item {
+            val exempt = channels.filter { it.flag("owner_only") }.map { it.text("display_name").ifBlank { it.text("type") } }
+            ManagementNotice("以上规则仅控制 IM 消息；App 和 Web 访问由 Bot 成员权限决定。" +
+                if (exempt.isNotEmpty()) "仅所有者使用的渠道（${exempt.joinToString("、")}）不受此聊天 ACL 限制。" else "")
+        }
     }
     if ("acl-rules" in state.data) {
         item { Actions { MemohActionButton("添加访问规则", Icons.Filled.Add, { ruleEditor() }, enabled = editable, primary = true) } }
@@ -74,4 +85,18 @@ internal fun LazyListScope.channelAccessRules(state: ManagementState, vm: Manage
         if (rules.isEmpty()) item { ManagementNotice("尚未添加规则，平台成员按当前访问模式处理。") }
     }
     state.data["acl-rules-error"]?.let { error -> item { ManagementNotice((error as? JsonPrimitive)?.content.orEmpty()) } }
+}
+
+internal fun effectiveChannelAccess(default: String, rules: List<JsonObject>, kind: String): String {
+    val applicable = rules.filter { rule ->
+        rule.flag("enabled", true) && rule.text("action").let { it.isBlank() || it == "chat.trigger" } &&
+            rule.text("effect").let { it.isNotBlank() && it != default } &&
+            rule["source_scope"].obj().text("conversation_type").let { it.isBlank() || it == kind }
+    }
+    val wide = applicable.any { rule ->
+        rule.text("channel_identity_id").isBlank() && rule.text("subject_channel_type").isBlank() &&
+            rule["source_scope"].obj().let { it.text("conversation_id").isBlank() && it.text("thread_id").isBlank() }
+    }
+    return if (default == "allow") when { wide -> "全部拒绝"; applicable.isNotEmpty() -> "除符合拒绝规则的成员或会话外均允许"; else -> "全部允许" }
+        else when { wide -> "全部允许"; applicable.isNotEmpty() -> "仅允许符合规则的成员或会话"; else -> "全部拒绝" }
 }

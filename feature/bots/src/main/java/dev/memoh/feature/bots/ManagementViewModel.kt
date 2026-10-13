@@ -23,6 +23,8 @@ enum class ManagementPage(val title: String, val description: String) {
     Bots("Bot 管理", "创建、查看和管理 Bot"),
     Bot("Bot 设置", "名称、默认对话、上下文和工具策略"),
     Agents("Agent 设置", "启停、认证和默认 Agent"),
+    Dependencies("运行依赖", "安装、更新和修复工作空间中的工具"),
+    Providers("供应商与能力", "模型、记忆、搜索、网页读取、语音与视频"),
     Models("模型设置", "供应商、模型目录和连接测试"),
     Media("语音与视频", "语音合成、转录和视频模型"),
     Services("工具服务", "记忆、搜索和网页读取服务"),
@@ -37,7 +39,7 @@ enum class ManagementPage(val title: String, val description: String) {
     Account("个人资料", "资料、渠道身份和电脑访问"),
     Team("Cloud 团队与额度", "团队资料、成员、邀请和套餐用量"),
     ;
-    val needsBot: Boolean get() = this !in listOf(Bots, Models, Media, Services, Computers, Backup, Account, Team)
+    val needsBot: Boolean get() = this !in listOf(Bots, Providers, Models, Media, Services, Computers, Backup, Account, Team)
 }
 
 internal fun JsonElement?.obj(): JsonObject = this as? JsonObject ?: JsonObject(emptyMap())
@@ -53,6 +55,9 @@ data class ManagementState(
     val error: String? = null, val notice: String? = null, val result: JsonElement? = null,
     val authorization: JsonObject? = null,
     val agentOptions: Map<String, JsonObject> = emptyMap(),
+    val codexUsage: Map<String, dev.memoh.core.model.CodexUsage> = emptyMap(),
+    val codexUsageErrors: Map<String, String> = emptyMap(),
+    val codexUsageLoading: Set<String> = emptySet(),
     val dependencyPrompt: JsonObject? = null,
     val operationLog: String? = null,
     val audio: AudioPreview? = null,
@@ -70,10 +75,12 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     private var job: Job? = null
     private var authJob: Job? = null
     private var authId: String? = null
+    private var removalJob: Job? = null
 
     fun open(botId: String, page: ManagementPage) {
         if (state.value.botId == botId && state.value.page == page && state.value.loaded) return
         job?.cancel()
+        removalJob?.cancel()
         _state.value = ManagementState(botId, page, cloud = repository.state.value.account?.kind == "cloud")
         refresh()
     }
@@ -155,7 +162,8 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                 optional("channels", "channels")
             }
             ManagementPage.Workspace -> {
-                optional("container", *base, "container")
+                try { get("container", *base, "container") }
+                catch (e: ApiException) { if (e.status == 404) data["container"] = JsonObject(emptyMap()) else throw e }
                 optional("metrics", *base, "container", "metrics")
                 optional("capabilities", "ping")
                 if (data["capabilities"].obj().flag("snapshot_supported", true)) optional("snapshots", *base, "container", "snapshots")
@@ -188,6 +196,17 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                 get("agents", *base, "agents")
                 get("settings", *base, "settings")
                 get("profiles", "acp", "profiles")
+            }
+            ManagementPage.Dependencies -> { get("dependencies", *base, "dependencies") }
+            ManagementPage.Providers -> {
+                get("models", "models"); get("providers", "providers")
+                optional("templates", "provider-templates")
+                for (kind in listOf("search", "fetch", "memory")) {
+                    optional("$kind-providers", "$kind-providers"); optional("$kind-meta", "$kind-providers", "meta")
+                }
+                for (kind in listOf("speech", "transcription", "video")) {
+                    optional("$kind-providers", "$kind-providers"); optional("$kind-models", "$kind-models")
+                }
             }
             ManagementPage.Models -> {
                 get("models", "models"); get("providers", "providers")
@@ -371,6 +390,63 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
         }
     }
 
+    fun loadCodexUsage(id: String) {
+        val current = state.value
+        val agent = current.data["agents"].objects("items").firstOrNull { it.text("id") == id } ?: return
+        if (agent.text("runtime") != "codex" || agent["metadata"].obj().text("auth") != "chatgpt" || agent.text("agent_credential_id").isBlank() || id in current.codexUsageLoading) return
+        val generation = repository.generation
+        viewModelScope.launch {
+            _state.update { it.copy(codexUsageLoading = it.codexUsageLoading + id, codexUsageErrors = it.codexUsageErrors - id) }
+            try {
+                val usage = (repository.api() ?: throw SessionExpiredException()).codexUsage(current.botId, id)
+                if (generation == repository.generation && state.value.botId == current.botId)
+                    _state.update { it.copy(codexUsage = it.codexUsage + (id to usage), codexUsageLoading = it.codexUsageLoading - id) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (generation == repository.generation && state.value.botId == current.botId)
+                    _state.update { it.copy(codexUsageErrors = it.codexUsageErrors + (id to e.userMessage("额度暂不可用，请重试")), codexUsageLoading = it.codexUsageLoading - id) }
+            }
+        }
+    }
+
+    fun checkDependencyUpdates() {
+        if (!state.value.canManageBot) return
+        val generation = repository.generation
+        transfer(null) { api, current ->
+            val result = api.managementResult(listOf("bots", current.botId, "dependencies", "check-updates"))
+            if (generation == repository.generation) _state.update { it.copy(data = it.data + ("dependencies" to result),
+                notice = if (result.obj().flag("update_checks_incomplete")) "有些依赖尚未完成检查，已保留上次结果。" else "依赖更新检查已完成") }
+        }
+    }
+
+    fun dependencyAction(id: String, action: String) {
+        val current = state.value
+        if (!current.canManageBot || action !in listOf("install", "update", "reinstall", "rollback")) return
+        val dependency = current.data["dependencies"].objects("items").firstOrNull { it.text("id") == id } ?: return
+        if (JsonPrimitive(action) !in (dependency["actions"] as? JsonArray).orEmpty()) return
+        val generation = repository.generation
+        transfer(null) { api, snapshot ->
+            _state.update { it.copy(operationLog = "正在处理 ${dependency.text("name")}…") }
+            if (action == "rollback") api.managementResult(listOf("bots", snapshot.botId, "dependencies", id, action))
+            else {
+                var done = false
+                val path = listOf("bots", snapshot.botId, "dependencies", id, action)
+                api.managementStream(path).collect { event ->
+                    if (generation != repository.generation) throw CancellationException()
+                    val frame = event.obj()
+                    when (frame.text("type")) {
+                        "error" -> throw UserFacingException(dev.memoh.core.model.MemohError.parse(frame).text())
+                        "done" -> done = true
+                        else -> _state.update { it.copy(operationLog = (it.operationLog.orEmpty() + "\n" + frame.text("data")).takeLast(12000)) }
+                    }
+                }
+                if (!done) throw UserFacingException("连接已结束，尚未确认操作完成。请刷新依赖状态。")
+            }
+            val result = api.managementRead("bots", snapshot.botId, "dependencies")
+            if (generation == repository.generation) _state.update { it.copy(data = it.data + ("dependencies" to result), operationLog = null, notice = "依赖操作已完成") }
+        }
+    }
+
     fun enableAgent(agent: JsonObject, enabled: Boolean) {
         if (!enabled || agent["dependency"].obj().text("dependency_id").isBlank()) {
             write(listOf("bots", state.value.botId, "agents", agent.text("id")), "PATCH", apiBody("enabled" to enabled)); return
@@ -413,7 +489,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                     val frame = event.obj()
                     when (frame.text("type")) {
                         "done" -> done = true
-                        "error" -> error(frame.text("message").ifBlank { frame.text("detail").ifBlank { "运行依赖安装失败" } })
+                        "error" -> throw UserFacingException(dev.memoh.core.model.MemohError.parse(frame).text())
                         else -> _state.update { it.copy(operationLog = (it.operationLog.orEmpty() + "\n" + frame.text("data")).takeLast(12000)) }
                     }
                 }
@@ -475,6 +551,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
         }
     }
     fun dismiss() { _state.update { it.copy(error = null, notice = null, result = null) } }
+    fun dismissOperationLog() { if (!state.value.busy) _state.update { it.copy(operationLog = null) } }
 
     fun cloudWrite(path: List<String>, method: String, body: JsonObject? = null, removedTeam: Boolean = false, onSaved: () -> Unit = {}) {
         val current = state.value
@@ -501,7 +578,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
             _state.update { it.copy(busy = true, error = null, notice = null) }
             try {
                 task(repository.api() ?: error("请先登录"), current)
-                if (generation == repository.generation) _state.update { it.copy(busy = false, notice = notice) }
+                if (generation == repository.generation) _state.update { it.copy(busy = false, notice = notice ?: it.notice) }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error = errorText(e)) } }
         }
@@ -510,10 +587,56 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     fun removeWorkspace(preserveData: Boolean, onSaved: () -> Unit) {
         if (!state.value.canManageBot) return
         val generation = repository.generation
-        transfer("工作空间已删除") { api, current ->
+        transfer(null) { api, current ->
             api.deleteWorkspace(current.botId, preserveData)
+            if (generation == repository.generation && state.value.botId == current.botId) {
+                _state.update {
+                    val container = JsonObject(it.data["container"].obj() + ("removal" to apiBody("state" to "removing", "preserve_data" to preserveData)))
+                    it.copy(data = it.data + ("container" to container), notice = "删除请求已受理，正在删除工作空间")
+                }
+                onSaved()
+            }
+        }
+    }
+
+    fun observeWorkspaceRemoval() {
+        removalJob?.cancel()
+        val current = state.value
+        if (current.page != ManagementPage.Workspace || current.data["container"].obj()["removal"].obj().text("state") != "removing") return
+        val generation = repository.generation
+        removalJob = viewModelScope.launch {
+            while (generation == repository.generation && state.value.botId == current.botId && state.value.page == current.page) {
+                delay(2000)
+                try {
+                    val container = repository.api()?.managementRead("bots", current.botId, "container") ?: return@launch
+                    if (generation != repository.generation) return@launch
+                    _state.update { it.copy(data = it.data + ("container" to container), error = null,
+                        notice = it.notice.takeIf { _ -> container.obj()["removal"].obj().text("state") == "removing" }) }
+                    if (container.obj()["removal"].obj().text("state") != "removing") return@launch
+                } catch (e: CancellationException) { throw e }
+                catch (e: ApiException) {
+                    if (generation != repository.generation) return@launch
+                    if (e.status == 404) {
+                        _state.update { it.copy(data = it.data + ("container" to JsonObject(emptyMap())), notice = "工作空间已删除", error = null) }
+                        return@launch
+                    }
+                    _state.update { it.copy(error = errorText(e)) }
+                } catch (e: Exception) {
+                    if (generation == repository.generation) _state.update { it.copy(error = errorText(e)) }
+                }
+            }
+        }
+    }
+
+    fun stopWorkspaceObservation() { removalJob?.cancel(); removalJob = null }
+
+    fun cancelWorkspaceRemoval() {
+        if (!state.value.canManageBot) return
+        val generation = repository.generation
+        transfer("已保留工作空间") { api, current ->
+            api.cancelWorkspaceRemoval(current.botId)
             val loaded = load(api, current)
-            if (generation == repository.generation) { _state.update { it.copy(bot = loaded.first, data = loaded.second) }; onSaved() }
+            if (generation == repository.generation) _state.update { it.copy(data = loaded.second, bot = loaded.first) }
         }
     }
 
@@ -567,15 +690,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
 }
 
 internal fun errorText(error: Exception): String {
-    if (error is ApiException) {
-        val detail = runCatching { Json.parseToJsonElement(error.body.orEmpty()).obj().let { it.text("detail").ifBlank { it.text("message") } } }.getOrDefault("")
-        return when (error.status) {
-            403 -> "当前账号没有此功能的管理权限"
-            404 -> "当前服务未提供此功能"
-            else -> detail.ifBlank { "请求失败（${error.status}）" }
-        }
-    }
-    return error.message ?: "连接失败，请检查网络后重试"
+    return error.userMessage()
 }
 
 internal fun runtimeConnectCommand(origin: String, key: String, team: String): String {

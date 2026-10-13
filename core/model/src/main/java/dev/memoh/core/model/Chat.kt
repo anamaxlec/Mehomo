@@ -405,6 +405,7 @@ data class RuntimeCurrentRunView(
     @SerialName("proposed_terminal_status") val proposedTerminalStatus: String? = null,
     @SerialName("finish_proposed_at") val finishProposedAt: String? = null,
     val operation: RuntimeRunOperation? = null,
+    val retry: RuntimeRetry? = null,
 ) {
     val safeMessages: List<UIMessage> get() = messages.orEmpty()
     val isTerminal: Boolean get() = RunStatus.isTerminal(status)
@@ -428,7 +429,33 @@ data class RuntimeCurrentRunPatch(
     val error: String? = null,
     @SerialName("updated_at") val updatedAt: String? = null,
     @SerialName("owner_lease_expires_at") val ownerLeaseExpiresAt: String? = null,
+    val retry: RuntimeRetry? = null,
+    @SerialName("clear_retry") val clearRetry: Boolean = false,
 )
+
+@Serializable
+data class RuntimeRetry(
+    val attempt: Int = 0,
+    @SerialName("max_attempt") val maxAttempt: Int = 0,
+    @SerialName("delay_ms") val delayMs: Long = 0,
+    val reason: String? = null,
+    @SerialName("retry_at") val retryAt: String? = null,
+) {
+    fun description(): String {
+        val cause = when (reason) {
+            "rate_limited" -> "服务限流"
+            "server_error" -> "模型服务暂时出错"
+            "stream_incomplete" -> "响应中断"
+            "network" -> "网络连接中断"
+            else -> "暂时无法继续"
+        }
+        val time = retryAt?.let { runCatching {
+            java.time.Instant.parse(it).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"))
+        }.getOrNull() }
+        return "$cause · 等待重试" + (if (maxAttempt > 0) "（$attempt/$maxAttempt）" else "") +
+            (time?.let { " · 预计 $it" } ?: if (delayMs > 0) " · 等待 ${(delayMs + 999) / 1000} 秒" else "")
+    }
+}
 
 @Serializable
 data class RuntimeMessageAppend(

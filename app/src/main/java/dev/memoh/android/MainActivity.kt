@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var repository: SessionRepository
     private var sharedContent by mutableStateOf<SharedContent?>(null)
     private var chatTarget by mutableStateOf<ChatTarget?>(null)
+    private var providerImport by mutableStateOf<dev.memoh.core.model.ProviderImport?>(null)
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -45,6 +46,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun receiveIntent(intent: Intent) {
+        val providerLink = if (intent.action == Intent.ACTION_VIEW) intent.dataString else intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+        if (providerLink != null && dev.memoh.core.model.ProviderImport.isLink(providerLink)) {
+            try { providerImport = dev.memoh.core.model.ProviderImport.parseLink(providerLink) }
+            catch (e: IllegalArgumentException) { android.widget.Toast.makeText(this, e.message ?: "导入链接无效", android.widget.Toast.LENGTH_LONG).show() }
+            intent.data = null
+            intent.removeExtra(Intent.EXTRA_TEXT)
+            return
+        }
         SharedContent.from(intent)?.let { sharedContent = it }
         val account = intent.getStringExtra("account_id")
         val bot = intent.getStringExtra("bot_id")
@@ -95,7 +104,7 @@ class MainActivity : ComponentActivity() {
             }
 
             MemohTheme(darkTheme = darkTheme, accent = accent) {
-                MemohApp(sharedContent, { sharedContent = null }, chatTarget, { chatTarget = null })
+                MemohApp(sharedContent, { sharedContent = null }, chatTarget, { chatTarget = null }, providerImport, { providerImport = null })
             }
         }
     }

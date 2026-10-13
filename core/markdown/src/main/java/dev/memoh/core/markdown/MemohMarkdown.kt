@@ -145,7 +145,15 @@ object MemohMarkdown {
         val math = remember(markdown) { protectMath(markdown) }
         val document = remember(math.markdown) { parse(math.markdown) }
         val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
-        val linkHandler = onLinkClick ?: { url: String -> runCatching { uriHandler.openUri(url) }; Unit }
+        val workspaceHandler = LocalWorkspaceLinkHandler.current
+        val linkHandler = MarkdownLinkHandler(workspaceHandler != null || onLinkClick != null) { url ->
+            when (val link = classifyWorkspaceLink(url)) {
+                is WorkspaceLink.File, is WorkspaceLink.Preview -> if (workspaceHandler != null) workspaceHandler(link) else onLinkClick?.invoke(url)
+                is WorkspaceLink.External -> if (onLinkClick != null) onLinkClick(link.url) else runCatching { uriHandler.openUri(link.url) }
+                is WorkspaceLink.Native -> if (onLinkClick != null) onLinkClick(link.url) else runCatching { uriHandler.openUri(link.url) }
+                null -> Unit
+            }
+        }
         androidx.compose.runtime.CompositionLocalProvider(inlineMath provides math.expressions) {
         SelectionContainer {
             Column(
@@ -627,9 +635,10 @@ object MemohMarkdown {
 
                 is Link -> {
                     val url = current.destination.orEmpty()
-                    val parsed = runCatching { java.net.URI(url) }.getOrNull()
-                    val scheme = parsed?.scheme?.lowercase()
-                    val safe = parsed != null && (scheme == null || scheme in setOf("http", "https", "mailto", "tel"))
+                    val link = classifyWorkspaceLink(url)
+                    val scheme = runCatching { java.net.URI(url).scheme?.lowercase() }.getOrNull()
+                    val safe = link != null && (!(link is WorkspaceLink.File || link is WorkspaceLink.Preview) ||
+                        onLinkClick != null && (onLinkClick !is MarkdownLinkHandler || onLinkClick.workspaceEnabled))
                     if (!safe) {
                         appendInlineChildren(current, onLinkClick, linkColor, bold, italic, strike, code)
                         child = child.next

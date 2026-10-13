@@ -26,7 +26,10 @@ internal fun agentEditor(state: ManagementState, agent: JsonObject?, vm: Managem
         }, visible = ::direct),
         FormField("reasoning_effort", "思考强度", metadata.text("reasoning_effort"), choicesFor = { values ->
             val model = catalog()["models"].objects().firstOrNull { it.text("id") == values["model"] }.obj()
-            listOf("" to "模型默认") + model["reasoning_efforts"].objects().map { it.text("id") to it.text("name").ifBlank { it.text("id") } }
+            listOf("" to "模型默认") + model["reasoning_efforts"].objects().map {
+                val id = it.text("id")
+                id to dev.memoh.core.model.reasoningEffortLabel(id).let { label -> if (label == id) it.text("name").ifBlank { id } else label }
+            }
         }, visible = { it["provider"] == "codex" }),
         FormField("permission_mode", "执行权限", metadata.text("permission_mode"), choicesFor = {
             listOf("" to "Agent 默认") + vm.state.value.agentOptions[id]?.get("controls").obj()["modes"].obj()["available_modes"].objects()

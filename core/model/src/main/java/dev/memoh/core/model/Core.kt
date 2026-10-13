@@ -125,6 +125,16 @@ data class WorkspaceTargetsResponse(
 )
 
 @Serializable
+data class WorkdirDirectories(
+    @SerialName("workspace_target_id") val workspaceTargetId: String = "",
+    val path: String = "",
+    val directories: List<WorkdirDirectory> = emptyList(),
+)
+
+@Serializable
+data class WorkdirDirectory(val name: String = "", val path: String = "")
+
+@Serializable
 data class BotAgent(
     val id: String,
     @SerialName("bot_id") val botId: String? = null,
@@ -163,6 +173,7 @@ data class ChatModel(
         ?: modelId?.takeIf(String::isNotBlank) ?: id
     val efforts: List<String> get() = reasoning?.selectableEfforts
         ?: capabilities?.takeUnless { it.supportsReasoning == false }?.efforts.orEmpty()
+    val reasoningAlwaysOn: Boolean get() = reasoning?.let { it.supported && !it.canDisable && it.efforts.isNullOrEmpty() } == true
 
     /** Use the server's resolved default; the first tier may mean thinking is off. */
     fun resolveEffort(stored: String?): String? {
@@ -179,7 +190,11 @@ data class ChatModel(
 }
 
 @Serializable
-data class ChatModelConfig(@SerialName("context_window") val contextWindow: Long? = null)
+data class ChatModelConfig(
+    @SerialName("context_window") val contextWindow: Long? = null,
+    @SerialName("max_output_tokens") val maxOutputTokens: Long? = null,
+    @SerialName("thinking_mode") val thinkingMode: String? = null,
+)
 
 @Serializable
 data class ReasoningOptions(
@@ -195,6 +210,7 @@ data class ReasoningOptions(
 
 fun reasoningEffortLabel(value: String): String = when (value) {
     "disable", "none" -> "关闭"
+    "enabled" -> "开启"
     "adaptive" -> "自适应"
     "minimal" -> "最小"
     "low" -> "低"

@@ -1,5 +1,7 @@
 package dev.memoh.feature.login
 
+import dev.memoh.core.network.userMessage
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.memoh.core.data.CredentialStore
@@ -293,10 +295,7 @@ class LoginViewModel @Inject constructor(
      * when the real cause is an unreachable network.
      */
     private fun describeFailure(prefix: String, error: Throwable): String {
-        val detail = error.message?.takeIf(String::isNotBlank)
-            ?: error::class.java.simpleName
-        val status = (error as? ApiException)?.status
-        return if (status != null) "$prefix（HTTP $status）：$detail" else "$prefix：$detail"
+        return error.userMessage(prefix + "，请重试")
     }
 
     private fun fail(message: String) {

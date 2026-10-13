@@ -1,5 +1,6 @@
 package dev.memoh.core.markdown
 
+
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -69,7 +70,7 @@ fun MarkdownImage(
                 ImageState.Ready(bitmap.asImageBitmap())
             }
         } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { value = ImageState.Failed(e.message ?: "图片加载失败") }
+        catch (e: Exception) { value = ImageState.Failed("图片加载失败，请重试") }
     }
     val onLoading = LocalMarkdownImageLoading.current
     if (state is ImageState.Loading && onLoading != null) {

@@ -78,6 +78,18 @@ class ContentRenderingTest {
         assertEquals("false", evaluate(web, "document.getElementById('content').textContent.includes('MEMOHMATHEXPRESSION')"))
         screenshot("render-math-dark")
     }
+    @Test fun mathParagraphRetainsWorkspaceLinksAndMakesInvalidLinksPlain() {
+        compose.setContent { MemohTheme { Surface {
+            CompositionLocalProvider(dev.memoh.core.markdown.LocalWorkspaceLinkHandler provides { _: dev.memoh.core.markdown.WorkspaceLink -> }) {
+                MemohMarkdown.Markdown("公式 \\(x\\) · [文件](/data/report.md#L10) · [预览](http://localhost:5173/test) · [相对路径](report.md) · [无效](file:///tmp/a)")
+            }
+        } } }
+        val web = rendered { evaluate(it, "document.querySelectorAll('.katex').length === 1") == "true" }
+        assertEquals("2", evaluate(web, "document.querySelectorAll('#content a').length"))
+        assertEquals("true", evaluate(web, "[...document.querySelectorAll('#content a')].some(a=>a.getAttribute('href')==='/data/report.md#L10')"))
+        assertEquals("true", evaluate(web, "document.getElementById('content').textContent.includes('相对路径')"))
+    }
+
     @Test fun mermaidRendersLocallyWithoutHtmlLabels() {
         compose.setContent { MemohTheme { Surface { Column(Modifier.fillMaxSize().padding(20.dp)) {
             RichContent(RichFormat.Mermaid, "flowchart LR\n A[输入] --> B[执行任务]\n B --> C[完成提醒]")

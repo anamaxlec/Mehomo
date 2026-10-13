@@ -31,6 +31,7 @@ import dev.memoh.feature.chat.components.StatusLine
 import dev.memoh.feature.chat.components.StreamingCaret
 import dev.memoh.feature.chat.components.TextBlock
 import dev.memoh.feature.chat.components.ToolCard
+import dev.memoh.feature.chat.components.ProcessBlock
 import dev.memoh.feature.chat.components.MessageAttachment
 import dev.memoh.feature.chat.components.MessageActions
 
@@ -140,11 +141,21 @@ fun AssistantTurnItem(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        messages.forEachIndexed { index, message ->
-            MessageBlock(message = message, isStreaming = isStreaming && index == messages.lastIndex,
-                isRunActive = isStreaming)
+        val items = assistantRenderItems("turn", messages)
+        items.forEachIndexed { index, item ->
+            androidx.compose.runtime.key(item.key) {
+                AssistantMessageItem(item, isStreaming = isStreaming && index == items.lastIndex,
+                    isRunActive = isStreaming)
+            }
         }
     }
+}
+
+@Composable
+internal fun AssistantMessageItem(item: AssistantRenderItem, isStreaming: Boolean, isRunActive: Boolean,
+    onToggleDetails: () -> Unit = {}) {
+    if (item.isProcess) ProcessBlock(item.messages, isStreaming, isRunActive, onToggleDetails = onToggleDetails)
+    else MessageBlock(item.messages.single(), isStreaming, isRunActive, onToggleDetails)
 }
 
 /** The in-flight turn, rendered from the run view rather than history. */

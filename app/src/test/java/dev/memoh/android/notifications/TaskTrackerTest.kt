@@ -10,6 +10,20 @@ class TaskTrackerTest {
             snapshot = RuntimeSnapshot(sessionId = "session-1", epoch = "epoch", seq = seq,
                 currentRunView = RuntimeCurrentRunView(runId = runId, turnId = "turn-1", status = status, messages = messages)))
 
+    @Test fun `retry cause appears without a completion alert and clears with server state`() {
+        val tracker = TaskTracker()
+        tracker.apply(snapshot(RunStatus.RUNNING))
+        val waiting = tracker.apply(UIStreamEvent(UIStreamEvent.RUNTIME_DELTA, sessionId = "session-1", epoch = "epoch", seq = 2,
+            delta = RuntimeDelta(run = RuntimeCurrentRunPatch("run-1", retry = RuntimeRetry(2, 3, 1000, "rate_limited")))))!!
+        assertTrue(waiting.task!!.phase.contains("服务限流"))
+        assertTrue(waiting.task!!.phase.contains("2/3"))
+        assertFalse(waiting.alert)
+        assertFalse(waiting.task!!.terminal)
+        val cleared = tracker.apply(UIStreamEvent(UIStreamEvent.RUNTIME_DELTA, sessionId = "session-1", epoch = "epoch", seq = 3,
+            delta = RuntimeDelta(run = RuntimeCurrentRunPatch("run-1", clearRetry = true))))!!
+        assertEquals("执行中", cleared.task!!.phase)
+    }
+
     @Test fun `historic completion does not produce a notification`() {
         assertNull(TaskTracker().apply(snapshot(RunStatus.COMPLETED)))
     }

@@ -102,13 +102,23 @@ import androidx.lifecycle.LifecycleEventObserver
  */
 @Composable
 fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit = {},
-    chatTarget: ChatTarget? = null, onTargetConsumed: () -> Unit = {}) {
+    chatTarget: ChatTarget? = null, onTargetConsumed: () -> Unit = {},
+    providerImport: dev.memoh.core.model.ProviderImport? = null, onProviderImportConsumed: () -> Unit = {}) {
     val navController = rememberNavController()
     val settings: SettingsViewModel = hiltViewModel()
     val updates: AppUpdateViewModel = hiltViewModel()
     val updateState by updates.state.collectAsState()
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { updates.check() }
     val session by settings.session.collectAsState()
+    var manualProviderImport by remember { mutableStateOf<dev.memoh.core.model.ProviderImport?>(null) }
+    val activeProviderImport = providerImport ?: manualProviderImport
+    val providerImporter: dev.memoh.feature.bots.ProviderImportViewModel = hiltViewModel()
+    val providerImportState by providerImporter.state.collectAsState()
+    LaunchedEffect(activeProviderImport, session.account?.accountId) { providerImporter.reset() }
+    if (activeProviderImport != null && session.loggedIn) dev.memoh.feature.bots.ProviderImportDialog(
+        activeProviderImport, session.account?.username.orEmpty() + " · " + session.endpoint?.origin.orEmpty(), providerImportState,
+        { providerImporter.confirm(activeProviderImport) }, { onProviderImportConsumed(); manualProviderImport = null; providerImporter.reset() },
+        { onProviderImportConsumed(); manualProviderImport = null; providerImporter.reset(); navController.navigate(Routes.management("", ManagementPage.Providers.name)) })
     val configured by settings.floatingSections.collectAsState()
     val sections = configured.mapNotNull { name -> MainSection.entries.firstOrNull { it.name == name } }
         .ifEmpty { listOf(MainSection.Chats, MainSection.Profile) }
@@ -220,25 +230,31 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             ManagementScreen(state, vm, onBack = { navController.popBackStack() },
                 onOpenBot = { navController.navigate(Routes.management(it, ManagementPage.Bot.name)) },
                 onOpenPage = { navController.navigate(Routes.management(botId, it.name)) },
-                onOpenApps = { navController.navigate(Routes.feature(botId, BotFeature.Apps.name)) })
+                onOpenApps = { navController.navigate(Routes.feature(botId, BotFeature.Apps.name)) },
+                onProviderImport = { manualProviderImport = it })
         }
 
-        memohComposable(Routes.FEATURE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("feature") { type = NavType.StringType })) { entry ->
+        memohComposable(Routes.FEATURE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("feature") { type = NavType.StringType },
+            navArgument("path") { type = NavType.StringType; nullable = true; defaultValue = null })) { entry ->
             val botId = entry.arguments?.getString("botId").orEmpty()
             val feature = BotFeature.entries.firstOrNull { it.name == entry.arguments?.getString("feature") } ?: BotFeature.Memory
             val viewModel: BotFeatureViewModel = hiltViewModel()
             val state by viewModel.state.collectAsState()
-            LaunchedEffect(botId, feature) { viewModel.open(botId, feature) }
+            val path = entry.arguments?.getString("path")
+            LaunchedEffect(botId, feature, path) {
+                if (feature == BotFeature.Files && path != null) viewModel.openFileLink(botId, path) else viewModel.open(botId, feature)
+            }
             BotFeatureScreen(state.forScreen(botId, feature, viewModel), viewModel, onBack = { navController.popBackStack() },
                 onOpenConnectors = { navController.navigate(Routes.management(botId, ManagementPage.Connectors.name)) },
                 onOpenSession = { navController.navigate(Routes.chat(botId, it)) })
         }
 
-        memohComposable(Routes.WORKSPACE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("surface") { type = NavType.StringType })) { entry ->
+        memohComposable(Routes.WORKSPACE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("surface") { type = NavType.StringType },
+            navArgument("address") { type = NavType.StringType; nullable = true; defaultValue = null })) { entry ->
             val botId = entry.arguments?.getString("botId").orEmpty()
             val surface = WorkspaceSurface.entries.firstOrNull { it.name == entry.arguments?.getString("surface") } ?: WorkspaceSurface.Terminal
             val viewModel: WorkspaceViewModel = hiltViewModel()
-            WorkspaceScreen(botId, "", surface, viewModel, onBack = { navController.popBackStack() }, bottomControlSpace = true)
+            WorkspaceScreen(botId, "", surface, viewModel, onBack = { navController.popBackStack() }, bottomControlSpace = true, initialAddress = entry.arguments?.getString("address"))
         }
 
         memohComposable(
@@ -288,6 +304,8 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 }
             }
             if (controlsOpen) ChatControlsSheet(state, viewModel, { controlsOpen = false })
+            if (state.contextInspectorOpen) dev.memoh.feature.chat.components.ContextInspectorSheet(state,
+                viewModel::loadContextLifecycle, viewModel::closeContextInspector, viewModel::refreshSessionInfo, viewModel::compact)
 
             // The session object is needed for its channel type and runtime, so
             // it is rebuilt from the id rather than passed through the route.
@@ -299,7 +317,17 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 dev.memoh.core.markdown.LocalMarkdownImageLoader provides remember(viewModel) { viewModel::loadMedia },
                 dev.memoh.feature.chat.components.LocalChatBotId provides botId,
             ) {
-            ChatScreen(
+            androidx.compose.runtime.CompositionLocalProvider(
+                dev.memoh.core.designsystem.component.LocalErrorActionHandler provides { action ->
+                    navController.navigate(Routes.management(botId, dev.memoh.feature.bots.managementPageForError(action).name))
+                },
+                dev.memoh.core.markdown.LocalWorkspaceLinkHandler provides { link ->
+                when (link) {
+                    is dev.memoh.core.markdown.WorkspaceLink.File -> navController.navigate(Routes.feature(botId, BotFeature.Files.name, link.path))
+                    is dev.memoh.core.markdown.WorkspaceLink.Preview -> navController.navigate(Routes.workspace(botId, WorkspaceSurface.Browser.name, link.address))
+                    else -> Unit
+                }
+            }) { ChatScreen(
                 state = state,
                 onBack = { navController.popBackStack() },
                 onSend = viewModel::send,
@@ -330,7 +358,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onOpenControls = { controlsOpen = true },
                 onNewSession = viewModel::newSession,
                 onRefreshContext = viewModel::refreshSessionInfo,
-                onCompactContext = viewModel::compact,
+                onInspectContext = viewModel::openContextInspector,
                 onOpenFeature = { navController.navigate(Routes.feature(botId, it)) },
                 onPickAttachment = { images -> attachmentPicker.launch(if (images) arrayOf("image/*") else arrayOf("*/*")) },
                 onTakePhoto = {
@@ -344,7 +372,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onConfirmFolder = viewModel::confirmFolderChange,
                 onCancelFolder = viewModel::cancelFolderChange,
                 onOpenSurface = { navController.navigate(Routes.workspace(botId, it.name)) },
-            )
+            ) }
             }
         }
     }
@@ -506,6 +534,14 @@ private fun SessionsSection(
     fileContent: @Composable () -> Unit,
     onOpenFolder: (dev.memoh.core.model.Workdir) -> Unit,
 ) {
+    val folders: dev.memoh.feature.sessions.FolderEditorViewModel = hiltViewModel()
+    val folderState by folders.state.collectAsState()
+    var folderEditorOpen by remember(state.bot?.id) { mutableStateOf(false) }
+    DisposableEffect(folders) { onDispose { folders.stop() } }
+    LaunchedEffect(folderState.saved, folderEditorOpen) {
+        if (folderEditorOpen && folderState.saved) { folderEditorOpen = false; folders.stop(); viewModel.refresh() }
+    }
+    if (folderEditorOpen) dev.memoh.feature.sessions.FolderEditorSheet(folderState, folders) { folderEditorOpen = false; folders.stop() }
     SessionsScreen(
         state = state,
         onSelectBot = viewModel::selectBot,
@@ -529,6 +565,9 @@ private fun SessionsSection(
         scheduleContent = scheduleContent,
         fileContent = fileContent,
         onOpenFolder = onOpenFolder,
+        onCreateFolder = { folders.open(state.bot?.id.orEmpty(), null); folderEditorOpen = true },
+        onEditFolder = { folder -> folders.open(state.bot?.id.orEmpty(), folder); folderEditorOpen = true },
+        onNewFolderSession = { folder -> viewModel.createSession(folder.id) { onOpenSession(state.bot?.id.orEmpty(), it.id) } },
         onBarExpandedChange = onBarExpandedChange,
     )
 }

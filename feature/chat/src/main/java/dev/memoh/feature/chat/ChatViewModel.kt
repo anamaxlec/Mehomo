@@ -108,15 +108,24 @@ data class ChatUiState(
     val controls: RuntimeControls? = null,
     val goal: RuntimeGoal? = null,
     val controlsError: String? = null,
+    val codexUsage: CodexUsage? = null,
+    val codexUsageLoading: Boolean = false,
+    val codexUsageError: String? = null,
+    val codexUsageAgentId: String? = null,
     val notice: String? = null,
     val sessionInfo: SessionInfo? = null,
     val sessionInfoLoading: Boolean = false,
     val sessionInfoError: String? = null,
+    val contextInspectorOpen: Boolean = false,
+    val contextLifecycle: ContextLifecycleResponse? = null,
+    val contextLifecycleLoading: Boolean = false,
+    val contextLifecycleError: String? = null,
     val botPermissions: List<String>? = null,
     val pendingFolderChange: Boolean = false,
     val pendingFolderId: String? = null,
     val navigateSessionId: String? = null,
     val error: String? = null,
+    val errorProblem: MemohError? = null,
     /** True until the first snapshot of the current session arrives. */
     val awaitingSnapshot: Boolean = true,
     val offlineSyncedAt: Long? = null,
@@ -145,7 +154,8 @@ data class ChatUiState(
                 ?: models.firstOrNull()
                 ?: return null
             val effort = model.resolveEffort(reasoningEffort)?.takeIf { it in model.efforts }
-            return if (effort != null) "${model.label} · ${reasoningEffortLabel(effort)}" else model.label
+            return if (model.reasoningAlwaysOn) "${model.label} · 思考始终开启"
+                else if (effort != null) "${model.label} · ${reasoningEffortLabel(effort)}" else model.label
         }
 
     /**
@@ -334,6 +344,7 @@ class ChatViewModel @Inject constructor(
     private var socket: ChatSocket? = null
     private var historyJob: kotlinx.coroutines.Job? = null
     private var sessionInfoJob: kotlinx.coroutines.Job? = null
+    private var contextLifecycleJob: Job? = null
     private var openJob: Job? = null
     private var attachmentJob: Job? = null
     private var draftAddress: Triple<String, String, String>? = null
@@ -354,6 +365,8 @@ class ChatViewModel @Inject constructor(
     fun open(botId: String, sessionId: String) {
         if (_state.value.session?.id == sessionId && socket != null) return
         openJob?.cancel()
+        contextLifecycleJob?.cancel()
+        sessionInfoJob?.cancel()
         attachmentJob?.cancel()
         attachmentReadId++
         socket?.close(); socket = null
@@ -527,7 +540,8 @@ class ChatViewModel @Inject constructor(
                     current.copy(
                         pending = current.pending.filterNot { it.invocationId == invocationId },
                         regeneration = current.regeneration?.takeUnless { it.invocationId == invocationId },
-                        error = event.message ?: "消息被服务器拒绝",
+                        error = event.problem.text().takeIf(String::isNotBlank),
+                        errorProblem = event.problem,
                         // Restore the text so it is not lost; the composer picks
                         // this up as a draft.
                         draft = listOfNotNull(rejected?.text, current.draft.takeIf(String::isNotBlank)).joinToString("\n"),
@@ -539,14 +553,15 @@ class ChatViewModel @Inject constructor(
             }
 
             UIStreamEvent.CONTROL_ACK -> {
-                if (!event.code.isNullOrBlank()) _state.update { it.copy(error = "操作未完成：${event.code}") }
+                if (!event.code.isNullOrBlank() || event.error != null || event.applied == false)
+                    _state.update { it.copy(error = event.problem.text().takeIf(String::isNotBlank), errorProblem = event.problem) }
                 else if (event.applied == true) _state.update { it.copy(notice = "操作已提交") }
             }
 
-            UIStreamEvent.ERROR -> {
+            UIStreamEvent.ERROR, UIStreamEvent.COMMAND_ERROR -> {
                 // An in-stream error must not clear what is already rendered.
-                val message = event.message ?: "运行出错"
-                _state.update { it.copy(error = message,
+                val message = event.problem.text().takeIf(String::isNotBlank)
+                _state.update { it.copy(error = message, errorProblem = event.problem,
                     regeneration = it.regeneration?.takeUnless { retry -> retry.invocationId == event.invocationId }) }
             }
 
@@ -567,6 +582,7 @@ class ChatViewModel @Inject constructor(
             if (current.runtime.run == null || current.runtime.run?.isTerminal == true) {
                 current.session?.let { session -> viewModelScope.launch { loadHistory(current.botId, session) } }
                 refreshSessionInfo()
+                if (state.value.contextInspectorOpen) loadContextLifecycle()
             }
         }
     }
@@ -671,10 +687,10 @@ class ChatViewModel @Inject constructor(
         val session = current.session ?: return
         if (current.busy) return
         viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null, notice = null) }
+            _state.update { it.copy(busy = true, error = null, errorProblem = null, notice = null) }
             try { work(repository.api() ?: error("未登录"), current, session) }
             catch (e: CancellationException) { throw e }
-            catch (e: Exception) { _state.update { it.copy(error = e.message ?: "操作失败") } }
+            catch (e: Exception) { _state.update { it.copy(error = e.userMessage("操作失败").takeIf(String::isNotBlank), errorProblem = (e as? ApiException)?.problem) } }
             finally { _state.update { it.copy(busy = false) } }
         }
     }
@@ -721,6 +737,7 @@ class ChatViewModel @Inject constructor(
         val updated = api.updateSession(current.botId, session.id, apiBody("bot_agent_id" to (agentId ?: ""),
             "runtime_type" to if (agentId == null) "model" else null))
         _state.update { it.copy(session = updated, selectedAgentId = updated.botAgentId,
+            codexUsageLoading = false, codexUsage = null, codexUsageError = null, codexUsageAgentId = null,
             selectedModelId = updated.preferredChatModelId, models = emptyList(), modelCatalogLoading = true, modelProviders = emptyList(), reasoningEffort = updated.preferredReasoningEffort, awaitingSnapshot = true) }
         connectSocket(current.botId, updated)
         loadCapabilities(current.botId, updated)
@@ -733,13 +750,13 @@ class ChatViewModel @Inject constructor(
             val api = repository.api() ?: return@launch
             try { val queue = api.queue(current.botId, session.id); _state.update { it.copy(queue = queue) } }
             catch (e: CancellationException) { throw e }
-            catch (e: Exception) { _state.update { it.copy(controlsError = "队列：${e.message}") } }
+            catch (e: Exception) { _state.update { it.copy(controlsError = "队列：${e.userMessage()}") } }
             try {
                 val controls = api.runtimeControls(current.botId, session.id)
                 val goal = if (controls.capabilities?.goal == true) api.runtimeGoal(current.botId, session.id)["goal"]?.takeIf { it !is JsonNull }?.let { json.decodeFromJsonElement(RuntimeGoal.serializer(), it) } else null
                 _state.update { it.copy(controls = controls, goal = goal, controlsError = null) }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { _state.update { it.copy(controlsError = "运行控制：${e.message}") } }
+            catch (e: Exception) { _state.update { it.copy(controlsError = "运行控制：${e.userMessage()}") } }
         }
     }
     fun enqueue(text: String, steer: Boolean) = operation { api, current, session ->
@@ -805,7 +822,58 @@ class ChatViewModel @Inject constructor(
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
-                _state.update { if (it.session?.id == session.id) it.copy(sessionInfoLoading = false, sessionInfoError = e.message ?: "上下文信息加载失败") else it }
+                _state.update { if (it.session?.id == session.id) it.copy(sessionInfoLoading = false, sessionInfoError = e.userMessage("上下文信息加载失败")) else it }
+            }
+        }
+    }
+
+    fun refreshCodexUsage() {
+        val current = state.value
+        val agent = current.agents.firstOrNull { it.id == current.selectedAgentId && it.hasCodexUsage } ?: return
+        if (current.codexUsageLoading && current.codexUsageAgentId == agent.id) return
+        val generation = repository.generation
+        viewModelScope.launch {
+            _state.update { it.copy(codexUsageLoading = true, codexUsageError = null,
+                codexUsage = it.codexUsage.takeIf { _ -> it.codexUsageAgentId == agent.id }, codexUsageAgentId = agent.id) }
+            try {
+                val usage = (repository.api() ?: throw SessionExpiredException()).codexUsage(current.botId, agent.id)
+                if (generation == repository.generation && state.value.session?.id == current.session?.id && state.value.selectedAgentId == agent.id)
+                    _state.update { it.copy(codexUsage = usage, codexUsageLoading = false) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (generation == repository.generation && state.value.session?.id == current.session?.id && state.value.selectedAgentId == agent.id)
+                    _state.update { it.copy(codexUsageLoading = false, codexUsageError = e.userMessage("额度暂不可用，请重试")) }
+            }
+        }
+    }
+
+    fun openContextInspector() {
+        _state.update { it.copy(contextInspectorOpen = true, contextLifecycle = null) }
+        loadContextLifecycle()
+    }
+
+    fun closeContextInspector() {
+        contextLifecycleJob?.cancel()
+        _state.update { it.copy(contextInspectorOpen = false, contextLifecycleLoading = false) }
+    }
+
+    fun loadContextLifecycle(older: Boolean = false) {
+        contextLifecycleJob?.cancel()
+        val current = state.value
+        val session = current.session ?: return
+        if (!current.contextInspectorOpen) return
+        val generation = repository.generation
+        contextLifecycleJob = viewModelScope.launch {
+            _state.update { it.copy(contextLifecycleLoading = true, contextLifecycleError = null) }
+            try {
+                val page = (repository.api() ?: throw SessionExpiredException()).contextLifecycle(current.botId, session.id,
+                    if (older || current.contextLifecycle?.limit == 200) 200 else 50)
+                if (generation == repository.generation && state.value.session?.id == session.id && state.value.contextInspectorOpen)
+                    _state.update { it.copy(contextLifecycle = page, contextLifecycleLoading = false) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (generation == repository.generation && state.value.session?.id == session.id && state.value.contextInspectorOpen)
+                    _state.update { it.copy(contextLifecycleLoading = false, contextLifecycleError = e.userMessage("上下文记录加载失败")) }
             }
         }
     }
@@ -1006,7 +1074,7 @@ class ChatViewModel @Inject constructor(
         )
     }
 
-    fun clearError() = _state.update { it.copy(error = null, notice = null) }
+    fun clearError() = _state.update { it.copy(error = null, errorProblem = null, notice = null) }
     fun removeAttachment(index: Int) { _state.update { it.copy(attachments = it.attachments.filterIndexed { i, _ -> i != index }) }; persistAttachments() }
     fun attach(context: Context, uri: Uri) = attach(context, listOf(uri))
 
@@ -1057,7 +1125,7 @@ class ChatViewModel @Inject constructor(
                 _state.update { it.copy(attachments = it.attachments + attachment) }
                 persistAttachments()
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { _state.update { it.copy(error = e.message ?: "读取附件失败") } }
+                catch (e: Exception) { _state.update { it.copy(error = e.userMessage("读取附件失败")) } }
             } } finally {
                 if (address == draftAddress && readId == attachmentReadId) _state.update { it.copy(attachmentLoading = false) }
                 onConsumed()

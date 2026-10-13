@@ -120,6 +120,43 @@ class ChatSocketIntegrationTest {
             assertEquals("Bearer renewed", server.takeRequest(5, TimeUnit.SECONDS)!!.getHeader("Authorization"))
         } finally { socket.close(); scope.cancel(); server.shutdown() }
     }
+    @Test fun acceptanceLostBeforeReconnectReplaysTheSameInvocationOnlyUntilAcknowledged() {
+        val server = MockWebServer()
+        val frames = LinkedBlockingQueue<String>()
+        val connections = LinkedBlockingQueue<WebSocket>()
+        val accepted = LinkedBlockingQueue<String>()
+        repeat(3) { index -> server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) { connections.add(webSocket) }
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                frames.add(text)
+                val frame = json.parseToJsonElement(text).jsonObject
+                if (frame["type"]?.jsonPrimitive?.content == "message") {
+                    if (index == 0) webSocket.close(1001, "lost acceptance")
+                    else webSocket.send("""{"type":"run_accepted","invocation_id":"invocation-1","session_id":"session-1","duplicate":true}""")
+                }
+            }
+        })) }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val socket = ChatSocket(OkHttpClient(), json, scope, buildRequest = { Request.Builder().url(server.url("/web/ws")).build() },
+            onEvent = { if (it.type == "run_accepted") accepted.add(it.invocationId.orEmpty()) })
+        try {
+            socket.connect("session-1")
+            assertEquals("runtime_subscribe", next(frames)["type"]!!.jsonPrimitive.content)
+            connections.poll(5, TimeUnit.SECONDS)
+            socket.send(WSClientMessage(type = WSClientMessage.MESSAGE, invocationId = "invocation-1", sessionId = "session-1", text = "fixture"))
+            val initial = next(frames)
+            val restored = listOf(next(frames), next(frames))
+            assertTrue(restored.any { it["type"]!!.jsonPrimitive.content == "runtime_subscribe" })
+            val replay = restored.single { it["type"]!!.jsonPrimitive.content == "message" }
+            assertEquals(initial, replay)
+            assertEquals("invocation-1", accepted.poll(5, TimeUnit.SECONDS))
+            connections.poll(5, TimeUnit.SECONDS)!!.close(1001, "after acceptance")
+            assertEquals("runtime_subscribe", next(frames)["type"]!!.jsonPrimitive.content)
+            assertNull("An accepted invocation must not be sent a third time", frames.poll(700, TimeUnit.MILLISECONDS))
+        } finally { socket.close(); scope.cancel(); server.shutdown() }
+    }
+
     private fun next(queue: LinkedBlockingQueue<String>): JsonObject =
         json.parseToJsonElement(queue.poll(8, TimeUnit.SECONDS) ?: throw AssertionError("No WebSocket frame received")).jsonObject
 }

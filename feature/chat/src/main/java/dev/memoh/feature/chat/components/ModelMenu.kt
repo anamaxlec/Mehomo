@@ -203,6 +203,8 @@ fun ModelMenu(
             }
 
             val efforts = selectedModel?.efforts.orEmpty()
+            if (selectedModel?.reasoningAlwaysOn == true) Text("此模型始终开启思考，由模型自动控制。", Modifier.padding(12.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (efforts.isNotEmpty()) {
                 val selectedEffort = selectedModel?.resolveEffort(reasoningEffort)
                 MemohMenuSection("思考强度")

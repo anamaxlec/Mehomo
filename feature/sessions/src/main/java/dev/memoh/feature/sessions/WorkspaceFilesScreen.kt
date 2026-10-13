@@ -1,5 +1,7 @@
 package dev.memoh.feature.sessions
 
+import dev.memoh.core.network.userMessage
+
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -74,7 +76,7 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
                 withContext(Dispatchers.IO) { requireNotNull(context.contentResolver.openOutputStream(uri)).use { it.write(bytes) } }
                 Toast.makeText(context, "文件已保存", Toast.LENGTH_SHORT).show()
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { Toast.makeText(context, e.message ?: "下载失败", Toast.LENGTH_LONG).show() }
+            catch (e: Exception) { Toast.makeText(context, e.userMessage("下载失败"), Toast.LENGTH_LONG).show() }
             finally { savingDownload = false; download = null }
         }
     }

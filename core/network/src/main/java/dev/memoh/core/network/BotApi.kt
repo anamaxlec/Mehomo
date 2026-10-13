@@ -46,6 +46,12 @@ private suspend inline fun <reified T> MemohApi.change(path: String, method: Str
     call(path, method, body.toString(), deserializer = serializer<T>())
 
 suspend fun MemohApi.session(botId: String, sessionId: String): Session = get(sessionPath(botId, sessionId))
+suspend fun MemohApi.workdirDirectories(botId: String, targetId: String, path: String? = null): WorkdirDirectories =
+    get("${botPath(botId)}/workdirs/directories${query("workspace_target_id" to targetId, "path" to path?.takeIf(String::isNotBlank))}")
+suspend fun MemohApi.createWorkdir(botId: String, name: String, path: String, targetId: String): Workdir =
+    change("${botPath(botId)}/workdirs", "POST", apiBody("name" to name, "path" to path, "workspace_target_id" to targetId))
+suspend fun MemohApi.renameWorkdir(botId: String, id: String, name: String): Workdir =
+    change("${botPath(botId)}/workdirs/${segment(id)}", "PATCH", apiBody("name" to name))
 suspend fun MemohApi.updateSession(botId: String, sessionId: String, body: JsonObject): Session = change(sessionPath(botId, sessionId), "PATCH", body)
 suspend fun MemohApi.newSession(botId: String, body: JsonObject): Session = change("${botPath(botId)}/sessions", "POST", body)
 suspend fun MemohApi.forkSession(botId: String, sessionId: String, turnId: String? = null): Session =
@@ -69,8 +75,8 @@ suspend fun MemohApi.scheduleLogs(botId: String, id: String, offset: Int = 0): S
     get("${botPath(botId)}/schedule/${segment(id)}/logs${query("limit" to "50", "offset" to offset.toString())}")
 suspend fun MemohApi.tokenUsage(botId: String, from: String, to: String): TokenUsageSummary =
     get("${botPath(botId)}/token-usage${query("from" to from, "to" to to)}")
-suspend fun MemohApi.tokenRecords(botId: String, from: String, to: String, offset: Int = 0): TokenUsageRecords =
-    get("${botPath(botId)}/token-usage/records${query("from" to from, "to" to to, "limit" to "50", "offset" to offset.toString())}")
+suspend fun MemohApi.tokenRecords(botId: String, from: String, to: String, offset: Int = 0, sessionType: String? = null): TokenUsageRecords =
+    get("${botPath(botId)}/token-usage/records${query("from" to from, "to" to to, "limit" to "50", "offset" to offset.toString(), "session_type" to sessionType?.takeIf(String::isNotBlank))}")
 suspend fun MemohApi.containerMetrics(botId: String): ContainerMetrics = get("${botPath(botId)}/container/metrics")
 
 suspend fun MemohApi.installedApps(botId: String): InstalledApps = get("${botPath(botId)}/apps")
@@ -121,6 +127,10 @@ suspend fun MemohApi.uploadFile(botId: String, path: String, name: String, mime:
             .addFormDataPart("file", name, bytes.toRequestBody(mime.toMediaType())).build()))
 fun workspaceDownloadPath(botId: String, path: String): String = "${botPath(botId)}/container/fs/download${query("path" to path)}"
 suspend fun MemohApi.runtimeGoal(botId: String, sessionId: String): JsonObject = get("${sessionPath(botId, sessionId)}/runtime-controls/goal")
+suspend fun MemohApi.codexUsage(botId: String, agentId: String): CodexUsage =
+    get("${botPath(botId)}/agents/${segment(agentId)}/codex/usage")
+suspend fun MemohApi.contextLifecycle(botId: String, sessionId: String, limit: Int = 50): ContextLifecycleResponse =
+    get("${sessionPath(botId, sessionId)}/context-lifecycle${query("limit" to limit.coerceIn(1, 200).toString())}")
 suspend fun MemohApi.setRuntimeMode(botId: String, sessionId: String, mode: String, kind: String = "permission"): JsonElement = change("${sessionPath(botId, sessionId)}/runtime-controls/mode", "PATCH", apiBody("mode_id" to mode, "mode_kind" to kind))
 suspend fun MemohApi.controlRuntimeGoal(botId: String, sessionId: String, action: String): Unit = change("${sessionPath(botId, sessionId)}/runtime-controls/goal", "POST", apiBody("action" to action))
 suspend fun MemohApi.runtimeCommand(botId: String, sessionId: String, body: JsonObject): JsonElement = change("${sessionPath(botId, sessionId)}/runtime-controls/commands", "POST", body)
@@ -147,7 +157,7 @@ internal fun <T> MemohApi.sse(path: String, serializer: KSerializer<T>, body: Js
             response.use {
                 if (!it.isSuccessful) {
                     if (it.code == 401) streamUnauthorized()
-                    close(ApiException(it.code, null, "连接失败（HTTP ${it.code}）")); return
+                    close(ApiException(it.code, it.body.string(), "连接失败（HTTP ${it.code}）")); return
                 }
                 try {
                     val reader = it.body.source()

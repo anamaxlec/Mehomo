@@ -35,10 +35,42 @@ internal fun formatted(value: JsonElement) = pretty.encodeToString(JsonElement.s
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: () -> Unit,
-    onOpenPage: (ManagementPage) -> Unit, onOpenApps: () -> Unit, onOpenBot: (String) -> Unit) {
+    onOpenPage: (ManagementPage) -> Unit, onOpenApps: () -> Unit, onOpenBot: (String) -> Unit,
+    onProviderImport: (dev.memoh.core.model.ProviderImport) -> Unit = {}) {
     var editor by remember(state.page, state.botId) { mutableStateOf<ManagementEditor?>(null) }
     var confirmation by remember { mutableStateOf<ConfirmAction?>(null) }
     var filter by remember { mutableStateOf("") }
+    var importLinkOpen by remember { mutableStateOf(false) }
+    var importLink by remember { mutableStateOf("") }
+    var importLinkError by remember { mutableStateOf<String?>(null) }
+    if (importLinkOpen) MemohFormDialog("导入供应商链接", { importLinkOpen = false; importLink = ""; importLinkError = null },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(importLink, { importLink = it }, Modifier.fillMaxWidth(), label = { Text("粘贴 Memoh 导入链接") },
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), minLines = 2)
+            importLinkError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Text("下一步预览供应商信息，确认后才会保存。", style = MaterialTheme.typography.bodySmall)
+        } },
+        confirmButton = { TextButton({
+            try {
+                val payload = dev.memoh.core.model.ProviderImport.parseLink(importLink)
+                importLinkOpen = false; importLink = ""; importLinkError = null; onProviderImport(payload)
+            } catch (e: IllegalArgumentException) { importLinkError = e.message ?: "导入链接无效" }
+        }, enabled = importLink.isNotBlank()) { Text("预览") } },
+        dismissButton = { TextButton({ importLinkOpen = false; importLink = ""; importLinkError = null }) { Text("取消") } })
+    var capability by androidx.compose.runtime.saveable.rememberSaveable(state.botId, state.page) { mutableStateOf("llm") }
+    val displayPage = if (state.page != ManagementPage.Providers) state.page else when (capability) {
+        "llm" -> ManagementPage.Models
+        "memory", "search", "fetch" -> ManagementPage.Services
+        else -> ManagementPage.Media
+    }
+    var usageAgent by remember(state.botId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(usageAgent) {
+        val id = usageAgent ?: return@LaunchedEffect
+        while (true) { vm.loadCodexUsage(id); kotlinx.coroutines.delay(60_000) }
+    }
+    val removalState = state.data["container"].obj()["removal"].obj().text("state")
+    LaunchedEffect(state.page, state.botId, removalState) { vm.observeWorkspaceRemoval() }
+    DisposableEffect(vm) { onDispose { vm.stopWorkspaceObservation() } }
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     var transcriptionModel by remember { mutableStateOf<JsonObject?>(null) }
@@ -85,15 +117,17 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
             FormField("type", "模型类型", model?.text("type") ?: "chat", choices = listOf("chat" to "对话", "embedding" to "Embedding", "speech" to "语音", "transcription" to "转录", "video" to "视频")),
             FormField("enable", "启用", (model?.flag("enable", true) ?: true).toString(), FieldKind.Toggle),
             FormField("context_window", "上下文窗口（tokens）", config.text("context_window"), FieldKind.Number, min = 1),
+            FormField("max_output_tokens", "最大输出（tokens，留空为未知）", config.text("max_output_tokens"), FieldKind.Number, min = 1, visible = { it["type"] == "chat" }),
+            FormField("thinking_mode", "思考机制", config.text("thinking_mode").let { if (it == "only_adaptive") "adaptive" else it },
+                choices = listOf("" to "由模型目录声明", "adaptive" to "自适应", "toggle" to "可开关", "always" to "始终开启", "none" to "无思考能力"), visible = { it["type"] == "chat" }),
             FormField("reasoning_efforts", "支持的思考强度", config["reasoning_efforts"]?.toString() ?: "[]", FieldKind.StringSet,
-                choices = listOf("disable", "minimal", "low", "medium", "high", "xhigh", "max").map { it to it }),
+                choices = listOf("disable", "minimal", "low", "medium", "high", "xhigh", "max").map { it to dev.memoh.core.model.reasoningEffortLabel(it) }),
             FormField("compatibilities", "模型能力", config["compatibilities"]?.toString() ?: "[]", FieldKind.StringSet,
                 choices = listOf("vision" to "识别图片", "tool-call" to "工具调用", "image-output" to "生成图片", "reasoning" to "推理")),
             FormField("description", "说明", config.text("description"), multiline = true),
-            FormField("config", "高级模型能力", formatted(JsonObject(config.filterKeys { it !in setOf("context_window", "reasoning_efforts", "compatibilities", "description") })), FieldKind.Object, multiline = true),
+            FormField("config", "高级模型能力", formatted(JsonObject(config.filterKeys { it !in modelConfigFields })), FieldKind.Object, multiline = true),
         ), if (model == null) listOf("models") else listOf("models", model.text("id")), if (model == null) "POST" else "PUT") { body ->
-            JsonObject(body.filterKeys { it !in setOf("context_window", "reasoning_efforts", "compatibilities", "description", "config") } + ("config" to JsonObject(body["config"].obj() +
-                body.filterKeys { it in setOf("context_window", "reasoning_efforts", "compatibilities", "description") && body[it] != JsonNull })))
+            modelFormBody(body)
         }
     }
     fun agentEditor(agent: JsonObject? = null) { vm.dismiss(); editor = agentEditor(state, agent, vm) }
@@ -118,6 +152,12 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     }
 
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    usageAgent?.let { id ->
+        ModalBottomSheet({ usageAgent = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+            CodexUsagePanel(state.codexUsage[id], id in state.codexUsageLoading, state.codexUsageErrors[id], { vm.loadCodexUsage(id) })
+            Spacer(Modifier.height(32.dp))
+        }
+    }
     Scaffold(Modifier.nestedScroll(scroll.nestedScrollConnection), containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         topBar = { MemohPageTopBar(state.page.title, onBack, scrollBehavior = scroll, actions = {
             FilledTonalIconButton(vm::refresh, enabled = !state.busy && !state.loading, shapes = IconButtonDefaults.shapes()) { Icon(Icons.Filled.Refresh, "刷新") }
@@ -131,7 +171,17 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                     state.notice?.let { ManagementNotice(it) }
                 }
                 if (state.loading && !state.loaded) item { MemohListSkeleton(leading = true, detailed = true) }
-                if (state.loaded) when (state.page) {
+                if (state.page == ManagementPage.Providers) item {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("llm" to "对话模型", "memory" to "记忆", "search" to "搜索", "fetch" to "网页读取",
+                            "speech" to "语音合成", "transcription" to "转录", "video" to "视频").forEach { (id, label) ->
+                            FilterChip(capability == id, { capability = id; filter = "" }, label = { Text(label) })
+                        }
+                    }
+                }
+                if (state.loaded) when (displayPage) {
+                    ManagementPage.Providers -> Unit
+                    ManagementPage.Dependencies -> dependencyRows(state, vm, { confirmation = it }, onOpenApps)
                     ManagementPage.Team -> cloudTeamTools(state, vm, { editor = it }, { confirmation = it }) { uriHandler.openUri(it) }
                     ManagementPage.Workspace, ManagementPage.Access, ManagementPage.Network, ManagementPage.Account ->
                         managementExtras(state, vm, { editor = it; vm.dismiss() }, { confirmation = it })
@@ -166,10 +216,12 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                                 settingField("chat_model_id", "对话模型", choices = modelChoices()),
                                 settingField("reasoning_effort", "思考强度").copy(choicesFor = { values ->
                                     val selected = models.firstOrNull { it.text("id") == values["chat_model_id"] }.obj()
-                                    val efforts = selected["reasoning_options"].obj()["efforts"] as? JsonArray ?: selected["config"].obj()["reasoning_efforts"] as? JsonArray
-                                    listOf("" to "模型默认") + efforts.orEmpty().map { it.jsonPrimitive.content to it.jsonPrimitive.content }
+                                    listOf("" to "模型默认") + managementChatModel(selected)?.efforts.orEmpty().map { it to dev.memoh.core.model.reasoningEffortLabel(it) }
                                 }),
-                                settingField("command_ui_language", "命令语言", choices = listOf("" to "默认", "zh" to "中文", "en" to "English"))), base + "settings")
+                                settingField("command_ui_language", "命令语言", choices = listOf("" to "默认", "zh" to "中文", "en" to "English"))), base + "settings") { body ->
+                                val selected = models.firstOrNull { it.text("id") == body.text("chat_model_id") }
+                                JsonObject(body + ("reasoning_effort" to JsonPrimitive(selected?.let(::managementChatModel)?.resolveEffort(body.text("reasoning_effort")).orEmpty())))
+                            }
                         }) }
                         item { ManagementRow("上下文压缩", "自动压缩、阈值与压缩模型", Icons.Filled.UnfoldLess, 1, 3, state.canManage && !state.busy, onClick = {
                             edit("上下文压缩", listOf(settingField("compaction_enabled", "自动压缩", FieldKind.Toggle).copy(value = settings.flag("compaction_enabled").toString()),
@@ -182,7 +234,8 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         item { GroupLabel("能力配置") }
                         item { ManagementRow("记忆、搜索与网页读取", "选择已配置的服务", Icons.Filled.Extension, 0, 4, state.canManage && !state.busy, onClick = {
                             edit("工具服务", listOf("memory" to "记忆服务", "search" to "搜索服务", "fetch" to "网页读取").map { (key, label) ->
-                                settingField("${key}_provider_id", label, choices = listOf("" to "未设置") + state.data["$key-providers"].objects().map { it.text("id") to it.text("name") }) }, base + "settings")
+                                settingField("${key}_provider_id", label, choices = listOf("" to "未设置") + state.data["$key-providers"].objects().map { it.text("id") to it.text("name") }) } +
+                                settingField("memory_llm_model_id", "记忆专用模型（留空使用对话模型）", choices = modelChoices()), base + "settings")
                         }) }
                         item { ManagementRow("多媒体", "图片、语音、转录和视频", Icons.Filled.PermMedia, 1, 4, state.canManage && !state.busy, onClick = {
                             edit("多媒体模型", listOf(settingField("image_model_id", "图片模型", choices = modelChoices("image")), settingField("tts_model_id", "语音模型", choices = modelChoices("speech")),
@@ -190,7 +243,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                                 settingField("display_enabled", "启用桌面显示", FieldKind.Toggle).copy(value = settings.flag("display_enabled").toString())), base + "settings")
                         }) }
                         item { ManagementRow("Agent 设置", "认证、运行配置和启停", Icons.Filled.Psychology, 2, 4, onClick = { onOpenPage(ManagementPage.Agents) }) }
-                        item { ManagementRow("模型设置", "供应商与模型目录", Icons.Filled.ModelTraining, 3, 4, onClick = { onOpenPage(ManagementPage.Models) }) }
+                        item { ManagementRow("供应商与能力", "模型、工具服务与多媒体", Icons.Filled.ModelTraining, 3, 4, onClick = { onOpenPage(ManagementPage.Providers) }) }
                     }
                     ManagementPage.Agents -> {
                         item { Actions { MemohActionButton("添加 Agent", Icons.Filled.Add, { agentEditor() }, enabled = state.canManage && !state.busy, primary = true) } }
@@ -207,6 +260,8 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                             ManagementRow(agent.text("name"), listOfNotNull(agent.text("runtime"), if (default) "默认" else null, if (agent.text("agent_credential_id").isNotBlank()) "已连接" else "待配置").joinToString(" · "),
                                 Icons.Filled.Psychology, index, agents.size, state.canManage && !state.busy, onClick = { agentEditor(agent) }, actions = actions,
                                 checked = agent.flag("enabled"), onChecked = { vm.enableAgent(agent, it) })
+                            if (agent.text("runtime") == "codex" && agent["metadata"].obj().text("auth") == "chatgpt" && agent.text("agent_credential_id").isNotBlank())
+                                TextButton({ usageAgent = agent.text("id") }) { Text("查看 ${agent.text("name")} 的账号额度") }
                         }
                         if (agents.isEmpty()) item { ManagementNotice("尚未添加 Agent。Memoh 默认运行方式仍可在对话中使用。") }
                     }
@@ -215,6 +270,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         val templates = state.data["templates"].objects().filter { it.text("domain") == "llm" }
                         item { Actions {
                             MemohActionButton("供应商", Icons.Filled.Add, { providerEditor() }, enabled = state.canManage && !state.busy, primary = true)
+                            MemohActionButton("导入链接", Icons.Filled.Link, { importLinkOpen = true }, enabled = !state.busy)
                             MemohActionButton("模型", Icons.Filled.Add, { modelEditor() }, enabled = state.canManage && !state.busy && providers.isNotEmpty())
                         } }
                         if (templates.isNotEmpty()) item { Actions {
@@ -285,7 +341,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         if (catalog.isEmpty()) item { ManagementNotice("当前服务没有开放连接器目录。") }
                     }
                     ManagementPage.Services -> {
-                        listOf("search" to "搜索", "fetch" to "网页读取", "memory" to "记忆").forEach { (kind, label) ->
+                        listOf("search" to "搜索", "fetch" to "网页读取", "memory" to "记忆").filter { state.page != ManagementPage.Providers || it.first == capability }.forEach { (kind, label) ->
                             val entries = state.data["$kind-providers"].objects()
                             val catalog = state.data["$kind-meta"].objects()
                             item { GroupLabel(label) }
@@ -314,7 +370,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                     }
                     ManagementPage.Media -> {
                         val templates = state.data["templates"].objects()
-                        listOf("speech" to "语音合成", "transcription" to "音频转录", "video" to "视频").forEach { (kind, label) ->
+                        listOf("speech" to "语音合成", "transcription" to "音频转录", "video" to "视频").filter { state.page != ManagementPage.Providers || it.first == capability }.forEach { (kind, label) ->
                             item { GroupLabel(label) }
                             item { Actions {
                                 val available = templates.filter { it.text("domain") == kind }
@@ -443,9 +499,13 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
         title = { Text("安装运行依赖") }, text = { Text("启用此 Agent 需要在当前 Bot 的工作空间安装 ${prompt.text("name").ifBlank { prompt.text("dependency") }}。") },
         confirmButton = { MemohActionButton("安装并启用", Icons.Filled.Download, vm::installAgentDependency, primary = true) },
         dismissButton = { TextButton(vm::dismissDependency) { Text("取消") } }) }
-    state.operationLog?.let { log -> AlertDialog(onDismissRequest = {}, title = { Text("安装 Agent") }, text = {
-        Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text(log, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
-    }, confirmButton = {}) }
+    state.operationLog?.let { log -> AlertDialog(onDismissRequest = vm::dismissOperationLog, title = { Text("依赖操作") }, text = {
+        Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text(log, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
+    }, confirmButton = { if (!state.busy) TextButton(vm::dismissOperationLog) { Text("关闭") } }) }
     confirmation?.let { action -> AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(action.title) }, text = { Text(action.message) },
         confirmButton = { MemohActionButton("确认", Icons.Filled.Check, { confirmation = null; action.run() }, primary = true) },
         dismissButton = { TextButton({ confirmation = null }) { Text("取消") } }) }
@@ -475,7 +535,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         data.flag("expired") -> "授权已过期，请重新连接"
                         url.isNotBlank() -> "前往授权页面完成连接，返回后会检查授权状态。"
                         data.flag("success") || data.flag("ok") -> "测试通过"
-                        data.text("message").isNotBlank() -> data.text("message")
+                        data.text("code").isNotBlank() || data.text("error_code").isNotBlank() -> dev.memoh.core.model.MemohError.parse(data).text()
                         data.text("text").isNotBlank() -> data.text("text")
                         data.text("token").isNotBlank() -> "关联码 · ${data.text("token")}\n有效期至 ${data.text("expires_at")}"
                         data["imported"] is JsonObject -> "已恢复 " + data["imported"].obj().entries.joinToString("、") { "${it.value.jsonPrimitive.content} 项 ${it.key}" }

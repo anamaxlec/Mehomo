@@ -44,17 +44,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, viewModel: WorkspaceViewModel,
-    onBack: (() -> Unit)? = null, bottomControlSpace: Boolean = false) {
+    onBack: (() -> Unit)? = null, bottomControlSpace: Boolean = false, initialAddress: String? = null) {
     val current by viewModel.state.collectAsState()
     val state = if (current.botId == botId && current.surface == surface) current
         else WorkspaceState(botId = botId, surface = surface, loading = botId.isNotBlank())
     var webView by remember(botId, surface) { mutableStateOf<WebView?>(null) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    LaunchedEffect(botId, surface) { viewModel.open(botId, surface) }
+    LaunchedEffect(botId, surface, initialAddress) { viewModel.open(botId, surface, initialAddress) }
     DisposableEffect(lifecycle, botId, surface) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) { viewModel.stop(botId, surface); webView?.onPause() }
-            if (event == Lifecycle.Event.ON_START) { viewModel.open(botId, surface); webView?.onResume(); webView?.reload() }
+            if (event == Lifecycle.Event.ON_START) { viewModel.open(botId, surface, initialAddress); webView?.onResume(); webView?.reload() }
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); viewModel.stop(botId, surface) }

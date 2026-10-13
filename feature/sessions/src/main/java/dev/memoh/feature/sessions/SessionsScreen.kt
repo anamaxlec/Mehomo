@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PendingActions
 import androidx.compose.material.icons.filled.Search
@@ -136,10 +137,23 @@ fun SessionsScreen(
     scheduleContent: (@Composable () -> Unit)? = null,
     fileContent: (@Composable () -> Unit)? = null,
     onOpenFolder: (Workdir) -> Unit = {},
+    onCreateFolder: () -> Unit = {},
+    onEditFolder: (Workdir) -> Unit = {},
+    onNewFolderSession: (Workdir) -> Unit = {},
     modifier: Modifier = Modifier,
     onBarExpandedChange: (Boolean) -> Unit = {},
 ) {
     var searching by remember { mutableStateOf(false) }
+    var folderDetails by remember(state.bot?.id) { mutableStateOf<Workdir?>(null) }
+    folderDetails?.let { folder ->
+        AlertDialog(onDismissRequest = { folderDetails = null }, title = { Text(folder.name) },
+            text = { Column { Text(folder.path.orEmpty()); Text(if (folder.targetKind == "remote") "绑定到远程电脑" else "绑定到云端工作空间", style = MaterialTheme.typography.bodySmall) } },
+            confirmButton = { Column {
+                TextButton({ folderDetails = null; onNewFolderSession(folder) }, enabled = folder.isActive && state.bot?.can("chat") == true && !state.creating) { Text("在此新建会话") }
+                if (folder.targetKind != "remote") TextButton({ folderDetails = null; onOpenFolder(folder) }) { Text("打开云端目录") }
+                if (state.bot?.can("manage") == true) TextButton({ folderDetails = null; onEditFolder(folder) }) { Text("编辑名称") }
+            } }, dismissButton = { TextButton({ folderDetails = null }) { Text("关闭") } })
+    }
 
     // The shell observes all panes' scrolls. Begin a tab switch with the full
     // navigation bar visible before the new pane starts scrolling.
@@ -196,6 +210,9 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
+                    if (!searching && state.bot?.can("manage") == true) IconButton(onCreateFolder) {
+                        Icon(Icons.Filled.CreateNewFolder, "新建文件夹")
+                    }
                     AnimatedVisibility(
                         visible = !searching,
                         enter = MemohMotion.controlEnter(),
@@ -300,7 +317,7 @@ fun SessionsScreen(
                             onOpenSession = onOpenSession,
                             onBeginRename = onBeginRename,
                             onBeginDelete = onBeginDelete,
-                            onOpenFolder = onOpenFolder,
+                            onOpenFolder = { folderDetails = it },
                             onLoadMore = onLoadMore,
                             onSearchAllTitles = onSearchAllTitles,
                             onStopTitleSearch = onStopTitleSearch,

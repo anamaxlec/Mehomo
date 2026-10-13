@@ -94,6 +94,7 @@ object RuntimeReducer {
                 error = patch.error ?: run.error,
                 updatedAt = patch.updatedAt ?: run.updatedAt,
                 ownerLeaseExpiresAt = patch.ownerLeaseExpiresAt ?: run.ownerLeaseExpiresAt,
+                retry = if (patch.clearRetry || dev.memoh.core.model.RunStatus.isTerminal(patch.status)) null else patch.retry ?: run.retry,
             )
         }
 

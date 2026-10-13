@@ -43,6 +43,9 @@ suspend fun MemohApi.deleteWorkspace(botId: String, preserveData: Boolean) {
     call(managementPath("bots", botId, "container") + "?preserve_data=$preserveData", "DELETE", null, deserializer = Unit.serializer())
 }
 
+suspend fun MemohApi.cancelWorkspaceRemoval(botId: String) =
+    managementWrite(listOf("bots", botId, "container", "removal", "cancel"), "POST")
+
 suspend fun MemohApi.importBotBackup(name: String, bytes: ByteArray, mode: String, botId: String?, passphrase: String,
     sections: JsonObject? = null, preview: Boolean = false): JsonElement = multipart(
         managementPath(*if (preview) arrayOf("bots", "backup", "import", "preview") else arrayOf("bots", "backup", "import")),

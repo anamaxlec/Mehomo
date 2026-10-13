@@ -49,12 +49,13 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
     private var terminalCols = 80
     private var terminalRows = 24
 
-    fun open(botId: String, surface: WorkspaceSurface) {
+    fun open(botId: String, surface: WorkspaceSurface, initialAddress: String? = null) {
         if (active && state.value.botId == botId && state.value.surface == surface) return
         stop()
-        _state.value = WorkspaceState(botId = botId, surface = surface)
+        _state.value = WorkspaceState(botId = botId, surface = surface, address = initialAddress ?: "localhost:5173/")
         active = true; terminalAutoConnect = true
         refresh()
+        if (surface == WorkspaceSurface.Browser && initialAddress != null) openBrowser()
     }
     fun refresh() {
         job?.cancel()
@@ -81,7 +82,7 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
                     WorkspaceSurface.Browser -> _state.update { it.copy(loading = false) }
                 }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (attempt == epoch && generation == repository.generation) _state.update { it.copy(loading = false, error = e.message ?: "工作区加载失败") } }
+            catch (e: Exception) { if (attempt == epoch && generation == repository.generation) _state.update { it.copy(loading = false, error = e.userMessage("工作区加载失败")) } }
         }
     }
     fun rendererReady() {
@@ -115,7 +116,7 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
                 terminal = connection
                 connection.connect(cols, rows)
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (attempt == epoch && generation == repository.generation) _state.update { it.copy(connecting = false, error = e.message ?: "终端连接失败") } }
+            catch (e: Exception) { if (attempt == epoch && generation == repository.generation) _state.update { it.copy(connecting = false, error = e.userMessage("终端连接失败")) } }
         }
     }
     fun terminalInput(bytes: ByteArray): Boolean {
@@ -132,7 +133,7 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
         if (!active || state.value.connecting) return
         val current = state.value
         val address = try { parseBrowserAddress(current.address) }
-            catch (e: Exception) { _state.update { it.copy(error = e.message) }; return }
+            catch (e: Exception) { _state.update { it.copy(error = e.userMessage()) }; return }
         disconnect()
         val attempt = epoch
         val generation = repository.generation
@@ -154,7 +155,7 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
                     }
                 }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (attempt == epoch) _state.update { it.copy(connecting = false, error = e.message ?: "预览连接失败") } }
+            catch (e: Exception) { if (attempt == epoch) _state.update { it.copy(connecting = false, error = e.userMessage("预览连接失败")) } }
         }
     }
     fun browserError(message: String) { _state.update { it.copy(error = message) } }
@@ -233,14 +234,15 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
                 var completed = false
                 api.prepareDisplay(current.botId).collect { event ->
                     if (attempt != epoch) return@collect
-                    if (event.type == "error") error(event.message ?: event.detail ?: "桌面环境准备失败")
+                    if (event.type == "error") throw UserFacingException(MemohError(event.code, event.args, fault = event.fault,
+                        requestId = event.requestId, traceId = event.traceId).text())
                     if (event.type == "complete") completed = true
                     _state.update { it.copy(preparePercent = event.percent, prepareMessage = event.message ?: event.detail ?: event.step) }
                 }
-                if (!completed) error("准备连接已结束，请检查桌面状态")
+                if (!completed) throw UserFacingException("准备连接已结束，请检查桌面状态")
                 _state.update { it.copy(preparing = false) }; refresh()
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (attempt == epoch) _state.update { it.copy(preparing = false, error = e.message ?: "准备失败") } }
+            catch (e: Exception) { if (attempt == epoch) _state.update { it.copy(preparing = false, error = e.userMessage("准备失败").takeIf(String::isNotBlank)) } }
         }
     }
     fun disconnect() {
@@ -272,12 +274,5 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
 }
 
 private fun workspaceError(error: Exception, fallback: String): String {
-    val api = error as? ApiException ?: return error.message ?: fallback
-    val detail = api.body?.let { body -> runCatching {
-        val value = kotlinx.serialization.json.Json.parseToJsonElement(body) as? kotlinx.serialization.json.JsonObject
-        listOf("detail", "message", "error").firstNotNullOfOrNull { key ->
-            (value?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.content?.takeIf(String::isNotBlank)
-        }
-    }.getOrNull() }
-    return "$fallback（HTTP ${api.status}）" + (detail?.take(300)?.let { "：$it" } ?: "")
+    return error.userMessage(fallback)
 }

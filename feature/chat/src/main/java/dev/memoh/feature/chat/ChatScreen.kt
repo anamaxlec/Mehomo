@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.LazyListState
@@ -107,6 +108,22 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.first
 
+/** The same item content identity keeps disclosures open when a live turn becomes history. */
+private fun LazyListScope.assistantMessages(
+    turnId: String,
+    messages: List<dev.memoh.core.model.UIMessage>,
+    isRunning: Boolean,
+    onToggleDetails: () -> Unit,
+) {
+    val renderItems = assistantRenderItems(turnId, messages)
+    itemsIndexed(renderItems, key = { _, item -> item.key }) { index, item ->
+        Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
+            AssistantMessageItem(item, isStreaming = isRunning && index == renderItems.lastIndex,
+                isRunActive = isRunning, onToggleDetails = onToggleDetails)
+        }
+    }
+}
+
 /**
  * The conversation screen.
  *
@@ -142,7 +159,7 @@ fun ChatScreen(
     onOpenControls: () -> Unit = {},
     onNewSession: () -> Unit = {},
     onRefreshContext: () -> Unit = {},
-    onCompactContext: () -> Unit = {},
+    onInspectContext: () -> Unit = {},
     onOpenFeature: (String) -> Unit = {},
     onPickAttachment: (Boolean) -> Unit = {},
     onTakePhoto: () -> Unit = {},
@@ -153,6 +170,7 @@ fun ChatScreen(
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
+    val errorActionHandler = dev.memoh.core.designsystem.component.LocalErrorActionHandler.current
     val scope = rememberCoroutineScope()
 
     val settled = state.settledHistory
@@ -340,12 +358,8 @@ fun ChatScreen(
                         ) {
                             settled.forEach { turn ->
                                 if (turn.isAssistant && turn.safeMessages.isNotEmpty()) {
-                                    val keys = assistantBlockKeys(turn.turnId, turn.safeMessages)
-                                    itemsIndexed(turn.safeMessages, key = { index, _ -> keys[index] }) { index, message ->
-                                        Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
-                                            MessageBlock(message, isStreaming = false, onToggleDetails = { followingLatest = false })
-                                        }
-                                    }
+                                    assistantMessages(turn.turnId, turn.safeMessages, isRunning = false,
+                                        onToggleDetails = { followingLatest = false })
                                 } else item(key = "turn-${turn.listKey}") {
                                     TurnItem(turn, Modifier.padding(top = 10.dp))
                                 }
@@ -369,14 +383,8 @@ fun ChatScreen(
                             // The live turn renders from the run view, which is
                             // authoritative while it is in flight.
                             if (liveMessages.isNotEmpty() && run != null) {
-                                val keys = assistantBlockKeys(run.turnId, liveMessages)
-                                itemsIndexed(liveMessages, key = { index, _ -> keys[index] }) { index, message ->
-                                    Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
-                                        MessageBlock(message, isStreaming = run?.isTerminal == false && index == liveMessages.lastIndex,
-                                            isRunActive = !run.isTerminal,
-                                            onToggleDetails = { followingLatest = false })
-                                    }
-                                }
+                                assistantMessages(run.turnId, liveMessages, isRunning = !run.isTerminal,
+                                    onToggleDetails = { followingLatest = false })
                                 item(key = "assistant-${run.turnId}:actions") {
                                     if (!run.isTerminal) Spacer(Modifier.height(MessageActionsHeight)) else {
                                     val turn = dev.memoh.core.model.UITurn(turnId = run.turnId, role = "assistant",
@@ -506,7 +514,7 @@ fun ChatScreen(
                                 onSelectWorkdir = onSelectWorkdir,
                                 onSelectAgent = onSelectAgent,
                             ),
-                            contextIndicator = { SessionContextIndicator(state, onRefreshContext, onCompactContext) },
+                            contextIndicator = { SessionContextIndicator(state, onRefreshContext, onInspectContext) },
                             plusMenu = { expanded, dismiss ->
                                 MemohPopupMenu(
                                     expanded = expanded,
@@ -567,7 +575,7 @@ fun ChatScreen(
                                             exit = shrinkVertically(MaterialTheme.motionScheme.fastSpatialSpec()) +
                                                 fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
                                         ) {
-                                            RunPhaseLine(phase = phaseLabel(current.status))
+                                            RunPhaseLine(phase = current.retry?.description() ?: phaseLabel(current.status))
                                         }
                                         // Pending decisions are handled in order,
                                         // one at a time.
@@ -605,6 +613,10 @@ fun ChatScreen(
                                         }
                                     }
                                     state.error?.let { message ->
+                                        state.errorProblem?.takeIf { it.text() == message }?.action?.let { action ->
+                                            if (errorActionHandler != null && state.botPermissions?.contains("manage") == true)
+                                                TextButton({ errorActionHandler(action) }) { Text(action.title) }
+                                        }
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             verticalAlignment = Alignment.CenterVertically,

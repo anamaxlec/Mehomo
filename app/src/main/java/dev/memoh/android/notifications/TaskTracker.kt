@@ -52,6 +52,7 @@ class TaskTracker {
             run.status == RunStatus.ADMITTING -> "准备执行"
             run.status == RunStatus.ABORTING -> "正在停止"
             run.status == RunStatus.FINISHING -> "正在收尾"
+            run.retry != null -> run.retry!!.description()
             else -> "执行中"
         }
         // Never announce historic terminal runs discovered on the first snapshot.

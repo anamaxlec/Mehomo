@@ -268,7 +268,7 @@ fun BotFeatureScreen(
                     item(key = "usage-summary") {
                         FeatureSwap(state.usage) { usage ->
                         if (usage != null) {
-                        val all = usage.chat.orEmpty() + usage.discuss.orEmpty() + usage.schedule.orEmpty() + usage.acpAgent.orEmpty()
+                        val all = usage.all
                         FeatureCard("Token 用量", "所选时间内的服务端记录", 0, if (state.metrics != null) 2 else 1) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 UsageTokenStats(all.sumOf { it.inputTokens ?: 0 }, all.sumOf { it.outputTokens ?: 0 })
@@ -276,6 +276,9 @@ fun BotFeatureScreen(
                                     first = { UsageStat("推理", format(all.sumOf { it.reasoningTokens ?: 0 }), Icons.Filled.Psychology, it) },
                                     second = { UsageStat("缓存读取", format(all.sumOf { it.cacheReadTokens ?: 0 }), Icons.Filled.Cached, it) },
                                 )
+                                usage.categories.filter { it.second.isNotEmpty() }.forEach { (label, values) ->
+                                    Text("$label · 输入 ${format(values.sumOf { it.inputTokens ?: 0 })} · 输出 ${format(values.sumOf { it.outputTokens ?: 0 })}", style = MaterialTheme.typography.bodySmall)
+                                }
                             }
                         }
                         }
@@ -299,6 +302,11 @@ fun BotFeatureScreen(
                     }
                     if (!initialLoading) item {
                         FeatureSectionLabel("使用记录${if (state.recordsError == null && state.usage != null) "（${state.recordCount}）" else ""}")
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("" to "全部", "chat" to "对话", "discuss" to "讨论", "schedule" to "日程", "acp_agent" to "外部 Agent", "memory" to "记忆").forEach { (id, label) ->
+                                FilterChip(state.usageType == id, { viewModel.usageType(id) }, label = { Text(label) }, enabled = !state.busy)
+                            }
+                        }
                         state.recordsError?.let { ErrorNotice(it, viewModel::refresh, viewModel::dismiss) }
                         if (!state.loading && state.usage != null && state.recordsError == null && state.records.isEmpty())
                             EmptyNote("暂无使用记录", "所选时间内还没有模型调用记录。")
@@ -310,6 +318,9 @@ fun BotFeatureScreen(
                 }
                 BotFeature.Apps, BotFeature.Skills -> {
                     val apps = state.feature == BotFeature.Apps
+                    if (apps && !state.browsing && state.appsChecksIncomplete) item {
+                        Text("部分应用的更新检查尚未完成，列表保留已获取的结果。", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodyMedium)
+                    }
                     item {
                         Column(Modifier.padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         ButtonGroup(modifier = Modifier.fillMaxWidth(), overflowIndicator = {}) {
@@ -343,11 +354,14 @@ fun BotFeatureScreen(
                     else if (apps) itemsIndexed(state.apps, key = { index, app -> "installed-app:${app.appId}:$index" }) { index, app -> FeatureCard(app.name ?: app.appId ?: "应用",
                         listOf(app.version, featureStatus(app.status)).filterNot { it.isNullOrBlank() }.joinToString(" · "), index, state.apps.size, modifier = Modifier.animateItem()) {
                         Column {
-                            app.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                            app.lastErrorCode?.takeIf(String::isNotBlank)?.let {
+                                Text(dev.memoh.core.model.errorMessage(it, app.lastErrorArgs), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                            }
+                            if (app.lastErrorCode.isNullOrBlank() && !app.lastError.isNullOrBlank()) Text("上次应用操作失败，请继续安装或重试。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                             Text(app.description.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 3)
                             FeatureActions {
                                 FeatureAction("更新", Icons.Filled.Update, { viewModel.update(app) }, enabled = !state.busy && app.registryId != null && app.appId != null)
-                                if (app.status == "needs_auth" || app.connectors.orEmpty().any { it.status != "active" }) onOpenConnectors?.let { open ->
+                                if (app.status == "needs_auth" || app.connectors.orEmpty().any { it.status !in listOf("linked", "active", "connected") }) onOpenConnectors?.let { open ->
                                     FeatureAction("连接外部服务", Icons.Filled.Link, open, enabled = !state.busy)
                                 }
                                 if (app.status != "installed") FeatureAction("继续安装", Icons.Filled.PlayArrow, { viewModel.resume(app) }, enabled = !state.busy && app.installationId != null)
@@ -713,6 +727,7 @@ fun BotFeatureScreen(
 }
 
 private fun usageSessionType(value: String?): Pair<String, ImageVector>? = when (value) {
+    "memory" -> "记忆" to Icons.Filled.Memory
     "chat" -> "对话" to Icons.AutoMirrored.Filled.Chat
     "discuss" -> "讨论" to Icons.Filled.Forum
     "schedule" -> "定时任务" to Icons.Filled.EventRepeat
@@ -739,6 +754,9 @@ private fun featureStatus(value: String?): String? = when (value) {
     "installed" -> "已安装"
     "discovered" -> "待安装"
     "installing" -> "安装中"
+    "updating" -> "更新中"
+    "removing" -> "移除中"
+    "partial" -> "部分完成"
     "failed", "error" -> "失败"
     "needs_auth" -> "等待授权"
     "enabled", "active" -> "已启用"

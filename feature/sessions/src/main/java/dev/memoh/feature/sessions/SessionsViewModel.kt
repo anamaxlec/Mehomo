@@ -1,5 +1,7 @@
 package dev.memoh.feature.sessions
 
+import dev.memoh.core.network.userMessage
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.memoh.core.data.SessionRepository
@@ -184,23 +186,29 @@ class SessionsViewModel @Inject constructor(
                 return@launch
             }
             runCatching { api.bots() }.fold(
-                onSuccess = { bots ->
+                onSuccess = { receivedBots ->
+                    val bots = availableBots(receivedBots)
                     currentCoroutineContext().ensureActive()
                     if (generation != repository.generation) return@launch
                     if (bots.isEmpty()) {
+                        stopObservingRuns(); botId = null
                         // Signed in, but the account has no bot yet. Not an
                         // error: the empty state explains it better than a
                         // spinner or a red bar would.
                         _state.update {
-                            it.copy(loading = false, initialized = true, bots = emptyList(), bot = null, sessions = emptyList())
+                            it.copy(loading = false, initialized = true, bots = emptyList(), bot = null, sessions = emptyList(), folders = emptyList(), nextCursor = null)
                         }
                         return@launch
                     }
                     val lastBot = settings.lastBotId.first()
                     currentCoroutineContext().ensureActive()
                     if (generation != repository.generation) return@launch
-                    val selected = bots.firstOrNull { it.id == (botId ?: lastBot) } ?: bots.first()
-                    _state.update { it.copy(initialized = true, bots = bots, bot = selected) }
+                    val selected = preferredBot(bots, botId ?: lastBot) ?: return@launch
+                    val changed = botId != selected.id
+                    if (changed) stopObservingRuns()
+                    _state.update { it.copy(initialized = true, bots = bots, bot = selected,
+                        sessions = if (changed) emptyList() else it.sessions, folders = if (changed) emptyList() else it.folders,
+                        nextCursor = if (changed) null else it.nextCursor, creating = if (changed) false else it.creating) }
                     botId = selected.id
                     settings.setLastBotId(selected.id)
                     readSessions(selected.id, api, generation)
@@ -218,6 +226,7 @@ class SessionsViewModel @Inject constructor(
 
     /** Switches the list to another bot. */
     fun selectBot(bot: Bot) {
+        if (bot.status == "deleting") return
         if (botId == bot.id) return
         stopObservingRuns()
         botId = bot.id
@@ -226,14 +235,7 @@ class SessionsViewModel @Inject constructor(
         loadSessions(bot.id)
     }
 
-    fun refresh() {
-        val id = botId
-        if (id == null) {
-            loadBots()
-            return
-        }
-        loadSessions(id)
-    }
+    fun refresh() { loadBots() }
 
     private fun loadSessions(id: String) {
         loadJob?.cancel()
@@ -330,8 +332,9 @@ class SessionsViewModel @Inject constructor(
         }
     }
 
-    fun createSession(onCreated: (Session) -> Unit) {
+    fun createSession(workdirId: String? = null, onCreated: (Session) -> Unit) {
         val id = botId ?: return
+        val generation = repository.generation
         if (_state.value.creating) return
         _state.update { it.copy(creating = true) }
         viewModelScope.launch {
@@ -340,8 +343,10 @@ class SessionsViewModel @Inject constructor(
                 _state.update { it.copy(creating = false, error = "未登录") }
                 return@launch
             }
-            runCatching { api.createSession(id, title = null) }.fold(
+            runCatching { api.createSession(id, title = null, workdirId = workdirId) }.fold(
                 onSuccess = { session ->
+                    currentCoroutineContext().ensureActive()
+                    if (generation != repository.generation || botId != id) return@fold
                     _state.update {
                         it.copy(creating = false, sessions = listOf(session) + it.sessions)
                     }
@@ -349,6 +354,8 @@ class SessionsViewModel @Inject constructor(
                     onCreated(session)
                 },
                 onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    if (generation != repository.generation || botId != id) return@fold
                     _state.update {
                         it.copy(creating = false, error = describeFailure("新建会话失败", error))
                     }
@@ -434,10 +441,7 @@ class SessionsViewModel @Inject constructor(
      * real cause; the type name is a poor label but an honest one.
      */
     private fun describeFailure(prefix: String, error: Throwable): String {
-        val detail = error.message?.takeIf(String::isNotBlank)
-            ?: error::class.java.simpleName
-        val status = (error as? dev.memoh.core.network.ApiException)?.status
-        return if (status != null) "$prefix（HTTP $status）：$detail" else "$prefix：$detail"
+        return error.userMessage(prefix + "，请重试")
     }
 
     /** Applies a title change pushed over the session-activity stream. */
@@ -463,6 +467,10 @@ class SessionsViewModel @Inject constructor(
     }
     override fun onCleared() { stopObservingRuns(); super.onCleared() }
 }
+
+internal fun availableBots(bots: List<Bot>): List<Bot> = bots.filter { it.status != "deleting" }
+internal fun preferredBot(bots: List<Bot>, preferredId: String?): Bot? = bots.firstOrNull { it.id == preferredId }
+    ?: bots.firstOrNull { it.status == "ready" || it.status.isNullOrBlank() } ?: bots.firstOrNull()
 
 /** Preserve live title/order changes when a subsequent page overlaps existing rows. */
 internal fun appendSessions(current: List<Session>, page: List<Session>): List<Session> =

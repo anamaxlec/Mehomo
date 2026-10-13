@@ -36,14 +36,28 @@ import okhttp3.Response
 import java.io.IOException
 
 /** A REST failure carrying the server's status and body for diagnostics. */
+@Suppress("UNUSED_PARAMETER")
 class ApiException(
     val status: Int,
     val body: String?,
     message: String,
-) : IOException(message) {
+) : IOException(dev.memoh.core.model.MemohError.parse(body, status).text()) {
+    val problem = dev.memoh.core.model.MemohError.parse(body, status)
     /** No usable credentials — the caller must send the user back to login. */
     val isUnauthorized: Boolean get() = status == 401 || status == 403
 }
+
+/** Only catalog copy and explicitly local messages should be shown to the user. */
+fun Throwable.userMessage(fallback: String = "操作失败，请稍后重试"): String = when (this) {
+    is ApiException -> problem.text()
+    is SessionExpiredException -> "登录已失效，请重新登录"
+    is UserFacingException -> message.orEmpty()
+    is java.net.SocketTimeoutException -> "连接超时，请重试"
+    is IOException -> "连接失败，请检查网络后重试"
+    else -> fallback
+}
+
+class UserFacingException(message: String) : IllegalStateException(message)
 
 /**
  * Raised when a request stayed unauthorized even after a refresh attempt. The

@@ -79,7 +79,8 @@ internal fun ScheduleLogsDialog(state: BotFeatureState, onRefresh: () -> Unit, o
                             Text(scheduleLogStatus(log.status), style = MaterialTheme.typography.titleSmall,
                                 color = if (!log.errorMessage.isNullOrBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
                             Text(logTime(log.startedAt) + log.completedAt?.let { " → ${logTime(it)}" }.orEmpty(), style = MaterialTheme.typography.bodySmall)
-                            val result = listOfNotNull(log.errorMessage?.takeIf(String::isNotBlank), log.resultText?.takeIf(String::isNotBlank)).joinToString("\n")
+                            val failure = (log.errorCode ?: log.errorMessage)?.takeIf(String::isNotBlank)?.let { dev.memoh.core.model.errorMessage(it, log.errorArgs) }?.takeIf(String::isNotBlank)
+                            val result = listOfNotNull(failure, log.resultText?.takeIf(String::isNotBlank)).joinToString("\n")
                             if (result.isNotEmpty()) {
                                 SelectionContainer { Text(result, maxLines = if (expanded) Int.MAX_VALUE else 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium) }
                                 TextButton({ expanded = !expanded }) { Text(if (expanded) "收起" else "展开结果") }

@@ -71,7 +71,8 @@ private fun RichWebView(format: RichFormat, source: String, expressions: Map<Str
     val fontScale = LocalDensity.current.fontScale
     val textSize = MaterialTheme.typography.bodyMedium.fontSize.value * fontScale
     val dark = scheme.surface.toArgb().let { AndroidColor.red(it) + AndroidColor.green(it) + AndroidColor.blue(it) < 384 }
-    val html = remember(format, source, expressions, scheme, fontScale) { richHtml(format, source, expressions, dark, scheme.onSurface, scheme.primary, textSize) }
+    val workspaceLinks = LocalWorkspaceLinkHandler.current != null
+    val html = remember(format, source, expressions, scheme, fontScale, workspaceLinks) { richHtml(format, source, expressions, dark, scheme.onSurface, scheme.primary, textSize, workspaceLinks) }
     var height by remember(html) { mutableIntStateOf(64) }
     var ready by remember(html) { mutableStateOf(false) }
     var failed by remember(html) { mutableStateOf(false) }
@@ -103,7 +104,7 @@ private fun RichWebView(format: RichFormat, source: String, expressions: Map<Str
                 }
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val url = request.url.toString()
-                    if (request.hasGesture() && request.url.scheme in listOf("http", "https", "mailto")) runCatching { uriHandler.openUri(url) }
+                    if (request.hasGesture() && classifyWorkspaceLink(url) != null) runCatching { linkCallback?.invoke(url) ?: uriHandler.openUri(url) }
                     return true
                 }
             }
@@ -112,9 +113,8 @@ private fun RichWebView(format: RichFormat, source: String, expressions: Map<Str
         view.removeJavascriptInterface("MemohRender")
         view.addJavascriptInterface(RenderBridge({ measured -> view.post { height = measured.coerceIn(24, 1600); ready = true } }, { view.post { failed = true; ready = true } }, { url ->
             view.post {
-                val scheme = android.net.Uri.parse(url).scheme
-                if (scheme == null || scheme in listOf("http", "https", "mailto")) runCatching {
-                    linkCallback?.invoke(url) ?: if (scheme != null) uriHandler.openUri(url) else Unit
+                if (classifyWorkspaceLink(url) != null) runCatching {
+                    linkCallback?.invoke(url) ?: uriHandler.openUri(url)
                 }
             }
         }), "MemohRender")
@@ -122,7 +122,7 @@ private fun RichWebView(format: RichFormat, source: String, expressions: Map<Str
     }, onRelease = { view -> view.removeJavascriptInterface("MemohRender"); view.stopLoading(); view.destroy() })
 }
 
-internal fun richHtml(format: RichFormat, source: String, expressions: Map<String, MathExpression>, dark: Boolean, text: Color, primary: Color, textSize: Float): String {
+internal fun richHtml(format: RichFormat, source: String, expressions: Map<String, MathExpression>, dark: Boolean, text: Color, primary: Color, textSize: Float, workspaceLinks: Boolean = false): String {
     fun css(color: Color) = "#%06x".format(color.toArgb() and 0xffffff)
     fun quoted(value: String) = JSONObject.quote(value).replace("<", "\\u003c")
     val math = JSONArray().apply { expressions.forEach { (token, value) -> put(JSONObject().put("token", token).put("source", value.source).put("display", value.display)) } }.toString().replace("<", "\\u003c")
@@ -148,6 +148,20 @@ internal fun richHtml(format: RichFormat, source: String, expressions: Map<Strin
             [...doc.querySelectorAll('*')].forEach(el=>{if(!allowed.has(el.localName)){el.remove();return;}[...el.attributes].forEach(a=>{const external=[...a.value.matchAll(/url\s*\(([^)]*)\)/gi)].some(m=>!m[1].trim().replace(/^['"]|['"]$/g,'').startsWith('#'));if(a.name.toLowerCase().startsWith('on')||(a.localName==='href'&&!a.value.startsWith('#'))||external)el.removeAttributeNode(a);});});
             node.appendChild(document.importNode(doc.documentElement,true));
           }else{node.innerHTML=source;math.forEach((item,index)=>{const walker=document.createTreeWalker(node,NodeFilter.SHOW_TEXT);let current;const texts=[];while(current=walker.nextNode())texts.push(current);texts.forEach(t=>{if(!t.textContent.includes(item.token))return;const parts=t.textContent.split(item.token);const fragment=document.createDocumentFragment();parts.forEach((part,i)=>{fragment.appendChild(document.createTextNode(part));if(i<parts.length-1){const span=document.createElement('span');fragment.appendChild(span);katex.render(item.source,span,{displayMode:item.display,throwOnError:true,trust:false,maxExpand:1000});}});t.replaceWith(fragment);});});}
+          node.querySelectorAll('a').forEach(a=>{
+            const href=(a.getAttribute('href')||'').trim();
+            let valid=false;
+            if(/^(mailto:|tel:)/i.test(href)) valid=true;
+            else if($workspaceLinks && href.startsWith('/')&&!href.startsWith('//')&&!href.includes('\\')){
+              try{valid=!/[\x00-\x1f\x7f]/.test(decodeURIComponent(href.split(/[?#]/)[0]));}catch{}
+            }else{
+              try{const u=new URL(href.startsWith('//')?'https:'+href:href);
+                valid=['http:','https:'].includes(u.protocol)&&!!u.hostname&&!u.username&&!u.password;
+                if(['localhost','127.0.0.1','[::1]'].includes(u.hostname)){const port=href.match(/^(?:https?:\/\/)(?:\[[^\]]+\]|[^/:?#]+):([0-9]+)/i)?.[1];valid=valid&&$workspaceLinks&&Number(port)>0&&Number(port)<=65535;}
+              }catch{}
+            }
+            if(!valid) a.replaceWith(...a.childNodes);
+          });
           await document.fonts.ready;finished=true;report();
         }catch(error){node.textContent=source;MemohRender.failed();}}render();
         </script></body></html>""".trimIndent()

@@ -54,10 +54,13 @@ data class BotFeatureState(
     val usageFrom: String = LocalDate.now(ZoneOffset.UTC).minusDays(29).toString(),
     val usageTo: String = LocalDate.now(ZoneOffset.UTC).plusDays(1).toString(),
     val recordsError: String? = null,
+    val usageType: String = "",
     val records: List<TokenUsageRecord> = emptyList(),
     val recordCount: Long = 0,
     val metrics: ContainerMetrics? = null,
     val apps: List<InstalledApp> = emptyList(),
+    val appsChecksIncomplete: Boolean = false,
+    val dependencyCatalogStale: Boolean = false,
     val marketApps: List<MarketApp> = emptyList(),
     val marketSkills: List<MarketSkill> = emptyList(),
     val marketPage: Int = 1,
@@ -84,6 +87,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     private val _state = MutableStateFlow(BotFeatureState())
     val state = _state.asStateFlow()
     private var loadJob: Job? = null
+    private var fileLinkJob: Job? = null
     private var scheduleOptionsJob: Job? = null
     private var logsJob: Job? = null
     private var subscription: Job? = null
@@ -95,6 +99,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
         pages.get(botId, feature, repository.generation)
 
     fun open(botId: String, feature: BotFeature) {
+        fileLinkJob?.cancel()
         val generation = repository.generation
         if (pageGeneration == generation) {
             if (_state.value.botId == botId && _state.value.feature == feature) return
@@ -119,6 +124,11 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
         refresh()
     }
     fun dismiss() { _state.update { it.copy(error = null, notice = null) } }
+    fun usageType(value: String) {
+        if (state.value.busy || value == state.value.usageType) return
+        _state.update { it.copy(usageType = value, records = emptyList(), recordCount = 0, recordsError = null) }
+        refresh()
+    }
     fun browse(value: Boolean) {
         _state.update { it.copy(browsing = value, query = "", marketPage = 1) }
         refresh()
@@ -139,7 +149,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                         loaded = loaded.copy(memories = (if (current.query.isBlank()) api.memories(current.botId)
                             else api.searchMemories(current.botId, current.query)).results.orEmpty())
                         try { loaded = loaded.copy(memoryStatus = api.memoryStatus(current.botId)) }
-                        catch (e: ApiException) { loaded = loaded.copy(notice = "记忆状态：${e.message}") }
+                        catch (e: ApiException) { loaded = loaded.copy(notice = "记忆状态：${e.userMessage()}") }
                     }
                     BotFeature.Schedules -> {
                         val wire = api.managementRead("bots", current.botId, "schedule")
@@ -155,17 +165,21 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                     BotFeature.Usage -> {
                         loaded = loaded.copy(usage = api.tokenUsage(current.botId, current.usageFrom, current.usageTo))
                         try {
-                            val records = api.tokenRecords(current.botId, current.usageFrom, current.usageTo)
+                            val records = api.tokenRecords(current.botId, current.usageFrom, current.usageTo, sessionType = current.usageType)
                             loaded = loaded.copy(records = records.items.orEmpty(), recordCount = records.total ?: 0, recordsError = null)
                         } catch (e: CancellationException) { throw e }
-                        catch (e: Exception) { loaded = loaded.copy(recordsError = e.message ?: "使用记录加载失败") }
+                        catch (e: Exception) { loaded = loaded.copy(recordsError = e.userMessage("使用记录加载失败")) }
                         try { loaded = loaded.copy(metrics = api.containerMetrics(current.botId)) }
-                        catch (e: ApiException) { loaded = loaded.copy(notice = "容器状态：${e.message}") }
+                        catch (e: ApiException) { loaded = loaded.copy(notice = "容器状态：${e.userMessage()}") }
                     }
                     BotFeature.Apps -> if (current.browsing) {
                         val page = api.marketApps(text = current.query)
                         loaded = loaded.copy(marketApps = page.data.orEmpty(), marketPage = 1, marketTotal = page.total ?: 0)
-                    } else loaded = loaded.copy(apps = api.installedApps(current.botId).items.orEmpty())
+                    } else {
+                        val apps = api.installedApps(current.botId)
+                        loaded = loaded.copy(apps = apps.items.orEmpty(), appsChecksIncomplete = current.appsChecksIncomplete || apps.updateChecksIncomplete,
+                            dependencyCatalogStale = apps.dependencyCatalogStale == true)
+                    }
                     BotFeature.Skills -> if (current.browsing) {
                         val page = api.marketSkills(text = current.query)
                         loaded = loaded.copy(marketSkills = page.data.orEmpty(), marketPage = 1, marketTotal = page.total ?: 0)
@@ -190,7 +204,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                         logsLoading = it.logsLoading, logsError = it.logsError)
                 }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(loading = false, error = e.message ?: "加载失败") } }
+            catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(loading = false, error = e.userMessage("加载失败")) } }
         }
     }
 
@@ -226,7 +240,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                     if (refresh && itMatches(current)) refresh()
                 }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(busy = false, error = e.message ?: "操作失败") } }
+            catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(busy = false, error = e.userMessage("操作失败").takeIf(String::isNotBlank)) } }
         }
     }
     private fun itMatches(current: BotFeatureState) = current.botId == state.value.botId && current.feature == state.value.feature
@@ -240,6 +254,18 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
         refresh()
     }
     fun openFolder(path: String) = openFolder(state.value.botId, path)
+    fun openFileLink(botId: String, path: String) {
+        fileLinkJob?.cancel()
+        openFolder(botId, workspaceParent(path))
+        val generation = repository.generation
+        fileLinkJob = viewModelScope.launch {
+            loadJob?.join()
+            if (generation != repository.generation || state.value.botId != botId || state.value.feature != BotFeature.Files) return@launch
+            val entry = state.value.files.firstOrNull { it.path == path }
+            if (entry == null) _state.update { it.copy(error = "当前工作空间中未找到此文件或目录，请刷新后重试。") }
+            else openFile(entry)
+        }
+    }
     fun fileDraft(text: String) { _state.update { it.copy(fileDraft = text) } }
     fun fileEditing(editing: Boolean) { _state.update { it.copy(fileEditing = editing) } }
     fun closeFile() { _state.update { it.copy(selectedFile = null, fileDocument = null, fileDraft = "", fileNew = false, fileEditing = false, error = null) } }
@@ -397,8 +423,8 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     fun closeLogs() { logsJob?.cancel(); _state.update { it.copy(logSchedule = null, logs = null, logsLoading = false, logsError = null) } }
     fun moreRecords() = action(refresh = false) { api, bot ->
         val current = state.value
-        val page = api.tokenRecords(bot, current.usageFrom, current.usageTo, current.records.size)
-        _state.update { if (it.botId == bot && it.feature == BotFeature.Usage && it.usageFrom == current.usageFrom && it.usageTo == current.usageTo)
+        val page = api.tokenRecords(bot, current.usageFrom, current.usageTo, current.records.size, current.usageType)
+        _state.update { if (it.botId == bot && it.feature == BotFeature.Usage && it.usageFrom == current.usageFrom && it.usageTo == current.usageTo && it.usageType == current.usageType)
             it.copy(records = (it.records + page.items.orEmpty()).distinctBy { record -> record.id }, recordCount = page.total ?: it.recordCount, recordsError = null) else it }
     }
     fun moreMarket() = action(refresh = false) { api, _ ->
@@ -428,18 +454,24 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
         cancelRemove()
         installOperation { api, bot -> api.removeApp(bot, requireNotNull(app.installationId)) }
     }
-    fun checkUpdates() = action("已检查更新") { api, bot -> api.checkAppUpdates(bot) }
+    fun checkUpdates() = action(refresh = false) { api, bot ->
+        val apps = Json { ignoreUnknownKeys = true }.decodeFromJsonElement<InstalledApps>(api.checkAppUpdates(bot))
+        _state.update { if (it.botId == bot) it.copy(apps = apps.items.orEmpty(), appsChecksIncomplete = apps.updateChecksIncomplete,
+            dependencyCatalogStale = apps.dependencyCatalogStale == true,
+            notice = if (apps.updateChecksIncomplete) "有些应用尚未完成更新检查，已保留上次结果。可再次检查。" else "更新检查已完成") else it }
+    }
     private fun installOperation(stream: suspend (MemohApi, String) -> Flow<AppInstallEvent>) = action("操作完成") { api, bot ->
         _state.update { it.copy(progress = emptyList()) }
         var terminal: AppInstallEvent? = null
         stream(api, bot).collect { event ->
-            val line = event.message ?: event.data ?: listOfNotNull(event.type, event.kind, event.id, event.status).joinToString(" · ")
+            val line = if (event.type == "error" || !event.code.isNullOrBlank()) MemohError(event.code, event.args, fault = event.fault).text()
+                else event.data ?: listOfNotNull(event.type, event.kind, event.id, event.status).joinToString(" · ")
             _state.update { it.copy(progress = (it.progress + line).takeLast(100)) }
-            if (event.type == "error") error(event.message ?: event.detail ?: "安装失败")
+            if (event.type == "error") throw UserFacingException(line)
             if (event.type == "done") terminal = event
         }
-        val done = terminal ?: error("连接结束，尚未确认操作完成。请刷新应用状态。")
-        if (done.status in listOf("failed", "partial", "error")) error(done.message ?: "操作未完整完成（${done.status}），请查看应用状态并重试。")
+        val done = terminal ?: throw UserFacingException("连接结束，尚未确认操作完成。请刷新应用状态。")
+        if (done.status in listOf("failed", "partial", "error")) throw UserFacingException(MemohError(done.code, done.args, fault = done.fault).text())
         _state.update { it.copy(browsing = false) }
     }
     fun saveSkill(path: String?, raw: String) = action("技能已保存") { api, bot -> api.saveSkill(bot, raw, path) }

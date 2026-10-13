@@ -32,12 +32,24 @@ internal fun LazyListScope.managementExtras(state: ManagementState, vm: Manageme
             val container = state.data["container"].obj()
             val running = container.flag("task_running")
             val exists = container.text("container_id").isNotBlank()
+            val removal = container["removal"].obj()
+            val removing = removal.text("state") == "removing"
+            val removalFailed = removal.text("state") == "failed"
+            val editable = state.canManageBot && !state.busy && !removing && !removalFailed
             item { GroupLabel("云端工作空间") }
-            item { ManagementRow(if (exists) if (running) "运行中" else "已停止" else "尚未创建", container.text("image"), Icons.Filled.Storage,
+            item { ManagementRow(if (removing) "正在删除" else if (removalFailed) "删除失败" else if (exists) if (running) "运行中" else "已停止" else "尚未创建", container.text("image"), Icons.Filled.Storage,
                 onClick = { vm.showResult(container) }) }
+            if (removing || removalFailed) item {
+                ManagementNotice(if (removing) "删除正在后台执行，完成后会更新状态。" else "删除未完成，工作空间仍需处理。服务端不会自动重试，请选择重试或保留工作空间。", removalFailed)
+            }
             sectionError("container")
             item { Actions {
-                if (exists) {
+                if (removalFailed) {
+                    MemohActionButton("重试删除", Icons.Filled.Refresh, {
+                        confirm(ConfirmAction("重试删除工作空间", if (removal.flag("preserve_data")) "将重新尝试保留 /data 并删除。" else "将重新尝试删除工作空间及文件。") { vm.removeWorkspace(removal.flag("preserve_data")) {} })
+                    }, enabled = state.canManageBot && !state.busy, danger = true)
+                    MemohActionButton("保留工作空间", Icons.Filled.Undo, vm::cancelWorkspaceRemoval, enabled = state.canManageBot && !state.busy)
+                } else if (exists && !removing) {
                     MemohActionButton(if (running) "停止" else "启动", if (running) Icons.Filled.Stop else Icons.Filled.PlayArrow, {
                         if (running) confirm(ConfirmAction("停止工作空间", "正在执行的任务和连接会被中断。") { vm.write(base + listOf("container", "stop"), "POST") })
                         else vm.write(base + listOf("container", "start"), "POST")
@@ -48,10 +60,10 @@ internal fun LazyListScope.managementExtras(state: ManagementState, vm: Manageme
                             confirm(ConfirmAction("删除工作空间", if (preserve) "当前工作空间将停止并删除，/data 会先导出保留。" else "当前工作空间及其中的文件会被删除。") { vm.removeWorkspace(preserve, saved) })
                         })
                     }, enabled = editable, danger = true)
-                } else MemohActionButton("创建工作空间", Icons.Filled.Add, {
+                } else if (!removing) MemohActionButton("创建工作空间", Icons.Filled.Add, {
                     edit("创建工作空间", listOf(FormField("image", "镜像（留空使用默认）", omitBlank = true), FormField("restore_data", "恢复保留的 /data", container.flag("has_preserved_data").toString(), FieldKind.Toggle)), base + "container", "POST")
                 }, enabled = editable, primary = true)
-                if (container.flag("has_preserved_data") && running) MemohActionButton("恢复文件", Icons.Filled.Restore, {
+                if (container.flag("has_preserved_data") && running && !removing && !removalFailed) MemohActionButton("恢复文件", Icons.Filled.Restore, {
                     confirm(ConfirmAction("恢复保留文件", "保留的 /data 将恢复到当前工作空间，可能覆盖同名文件。") { vm.write(base + listOf("container", "data", "restore"), "POST") })
                 }, enabled = editable)
             } }

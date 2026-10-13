@@ -73,21 +73,24 @@ fun MemohPopupMenu(
     maxHeight: Dp = 320.dp,
     scrollable: Boolean = true,
     focusable: Boolean = LocalMemohPopupFocusable.current,
+    aboveAnchor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val bounds = LocalMemohPopupBounds.current
-    val maxWidth = with(density) { bounds?.width?.toDp() }?.coerceAtMost(248.dp) ?: 248.dp
+    val preferredWidth = width ?: 248.dp
+    val maxWidth = with(density) { bounds?.width?.toDp() }?.coerceAtMost(preferredWidth) ?: preferredWidth
     val shadowSpace = 12.dp
     var geometry by remember { mutableStateOf<MemohMenuGeometry?>(null) }
     val visibility = remember { MutableTransitionState(false) }
     visibility.targetState = expanded && geometry != null
-    val positionProvider = remember(alignment, bounds, density) {
+    val positionProvider = remember(alignment, bounds, density, aboveAnchor) {
         MemohMenuPositionProvider(
             alignment = alignment, ownerBounds = bounds,
             margin = with(density) { 16.dp.roundToPx() },
-            gap = with(density) { 12.dp.roundToPx() },
+            gap = with(density) { (if (aboveAnchor) 8.dp else 12.dp).roundToPx() },
             shadowPadding = with(density) { shadowSpace.roundToPx() },
+            aboveAnchor = aboveAnchor,
             onPosition = { geometry = it },
         )
     }
@@ -156,6 +159,7 @@ internal class MemohMenuPositionProvider(
     private val margin: Int,
     private val gap: Int,
     private val shadowPadding: Int = 0,
+    private val aboveAnchor: Boolean = false,
     private val onPosition: (MemohMenuGeometry) -> Unit = {},
 ) : PopupPositionProvider {
     var geometry: MemohMenuGeometry? = null
@@ -174,7 +178,7 @@ internal class MemohMenuPositionProvider(
         val aligned = alignment.align(surfaceSize, anchorBounds.size, layoutDirection)
         val x = (anchorBounds.left + aligned.x)
             .coerceIn(left, (right - surfaceSize.width).coerceAtLeast(left))
-        val y = (anchorBounds.top + aligned.y - gap)
+        val y = (if (aboveAnchor) anchorBounds.top - surfaceSize.height - gap else anchorBounds.top + aligned.y - gap)
             .coerceAtLeast(margin)
         val calculated = MemohMenuGeometry(anchorBounds, IntRect(x, y, x + surfaceSize.width, y + surfaceSize.height))
         geometry = calculated
