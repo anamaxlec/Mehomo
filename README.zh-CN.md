@@ -8,7 +8,7 @@
 
 Mehomo 将会话和 Agent 的云端工作空间放进同一个 Android 应用，支持 **Memoh 官方云服务**和**自托管 Memoh**。这是独立开发的非官方客户端。
 
-当前正式版为 **[v0.1.11](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.11)**。本次优化会话与管理页面的返回动效，普通返回采用短渐隐与侧滑，预测性返回随手势连续变化。[查看更新日志](docs/releases/v0.1.11.md) · [v0.1.10 功能更新](docs/releases/v0.1.10.md)
+当前正式版为 **[v0.1.13](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.13)**。本次同步 Memoh 的工具与思考展示、上下文面板和逐轮检查器，并补充模型配置、Codex 额度、远程目录、供应商导入及工作空间管理。[查看更新日志](docs/releases/v0.1.13.md)
 
 ## M3E 贯穿整个界面
 

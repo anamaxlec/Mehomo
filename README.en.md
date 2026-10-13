@@ -8,7 +8,7 @@
 
 Mehomo brings conversations and an agent's cloud workspace into one Android app. It connects to **official Memoh Cloud** and **self-hosted Memoh**. This is an independent, unofficial client.
 
-The current release is **[v0.1.12](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.12)**, expanding schedules and execution history, adding installed-version display and GitHub release checks, and animating navigation from the welcome page to both login forms. [Release notes](docs/releases/v0.1.12.md) · [v0.1.11 back transitions](docs/releases/v0.1.11.md)
+The current release is **[v0.1.13](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.13)**, updating tool and reasoning displays, context usage and inspection, model settings, Codex quota, remote folders, provider imports, and workspace management. [Release notes](docs/releases/v0.1.13.md)
 
 ## Material 3 Expressive, throughout
 
