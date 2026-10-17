@@ -43,6 +43,7 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
     private var terminal: TerminalConnection? = null
     private var runtime: RuntimeDisplayConnection? = null
     private var displaySession: String? = null
+    @Volatile private var browserAccount: Pair<Long, BrowserPreviewClient>? = null
     private var epoch = 0L
     private var terminalAutoConnect = true
     private var active = false
@@ -145,6 +146,7 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
                 if (attempt != epoch || generation != repository.generation || !active) {
                     release(api, current.botId, session.id, null); return@launch
                 }
+                browserAccount = generation to api.browserPreview(session.url)
                 _state.update { it.copy(browser = session, connected = true, connecting = false) }
                 keepAlive = viewModelScope.launch {
                     while (true) {
@@ -158,7 +160,23 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
             catch (e: Exception) { if (attempt == epoch) _state.update { it.copy(connecting = false, error = e.userMessage("预览连接失败")) } }
         }
     }
-    fun browserError(message: String) { _state.update { it.copy(error = message) } }
+    fun browserError(session: BrowserSession, message: String) {
+        _state.update { if (it.browser === session) it.copy(error = message) else it }
+    }
+    fun canNavigateBrowser(session: BrowserSession, url: String): Boolean = browserAccount?.let {
+        it.first == repository.generation && state.value.browser === session && it.second.allows(url)
+    } == true
+    suspend fun browserResource(session: BrowserSession, url: String, method: String, headers: Map<String, String>): okhttp3.Response {
+        val account = browserAccount ?: throw CancellationException("Preview closed")
+        if (account.first != repository.generation || state.value.browser !== session)
+            throw CancellationException("Preview account changed")
+        val response = account.second.load(url, method, headers)
+        if (account !== browserAccount || account.first != repository.generation || state.value.browser !== session) {
+            response.close()
+            throw CancellationException("Preview closed")
+        }
+        return response
+    }
     fun connectDesktop() {
         if (!active || !state.value.rendererReady || state.value.connected || state.value.connecting) return
         disconnect()
@@ -246,6 +264,7 @@ class WorkspaceViewModel @Inject constructor(private val repository: SessionRepo
         }
     }
     fun disconnect() {
+        browserAccount = null
         epoch++
         job?.cancel(); job = null; keepAlive?.cancel(); keepAlive = null
         terminal?.close(); terminal = null

@@ -36,10 +36,14 @@ import dev.memoh.core.designsystem.component.MemohStatusDot
 import dev.memoh.core.designsystem.component.MemohTextSkeleton
 import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.model.DisplayAnswer
+import dev.memoh.core.model.BrowserSession
 import dev.memoh.core.model.WorkspaceSurface
+import dev.memoh.core.network.userMessage
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.ByteArrayInputStream
+import java.io.FilterInputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
@@ -60,7 +64,7 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
         onDispose { lifecycle.removeObserver(observer); viewModel.stop(botId, surface) }
     }
     var input by remember(botId, surface) { mutableStateOf("") }
-    var webProgress by remember { mutableIntStateOf(0) }
+    var webProgress by remember(state.browser?.id) { mutableIntStateOf(0) }
     var prepareConfirm by remember { mutableStateOf(false) }
     val workspaceTheme = WorkspaceWebTheme(MaterialTheme.colorScheme)
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -117,7 +121,8 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
                     if (webProgress in 1..99) LinearProgressIndicator(progress = { webProgress / 100f }, modifier = Modifier.fillMaxWidth())
                     Surface(Modifier.fillMaxWidth().weight(1f), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLowest) {
                         Box {
-                        BrowserPreview(state.browser!!.url, viewModel::browserError, { webProgress = it })
+                        BrowserPreview(state.browser!!, viewModel::browserResource, viewModel::canNavigateBrowser,
+                            viewModel::browserError, { webProgress = it })
                         androidx.compose.animation.AnimatedVisibility(visible = webProgress < 100 && state.error == null,
                             enter = androidx.compose.animation.fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
                             exit = androidx.compose.animation.fadeOut(MaterialTheme.motionScheme.fastEffectsSpec())) {
@@ -254,16 +259,22 @@ private fun LocalWorkspaceView(surface: WorkspaceSurface, viewModel: WorkspaceVi
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun BrowserPreview(url: String, onError: (String) -> Unit, onProgress: (Int) -> Unit) {
-    val callbacks by rememberUpdatedState(onError to onProgress)
+private fun BrowserPreview(session: BrowserSession,
+    loadResource: suspend (BrowserSession, String, String, Map<String, String>) -> okhttp3.Response,
+    canNavigate: (BrowserSession, String) -> Boolean,
+    onError: (BrowserSession, String) -> Unit, onProgress: (Int) -> Unit) {
+    val url = session.url
     val theme = WorkspaceWebTheme(MaterialTheme.colorScheme)
     val parsed = Uri.parse(url)
     if (parsed.scheme !in listOf("https", "http") || parsed.host.isNullOrBlank()) {
-        LaunchedEffect(url) { onError("服务端返回的预览地址无效") }; return
+        LaunchedEffect(url) { onError(session, "服务端返回的预览地址无效") }; return
     }
     // A Compose-only theme override must reach WebView's isLightTheme as well,
     // so websites' prefers-color-scheme follows the user's in-app choice.
-    key(url, theme.dark) {
+    key(session.id, url, theme.dark) {
+        val callbacks by rememberUpdatedState(onError to onProgress)
+        val loader by rememberUpdatedState(loadResource)
+        val allows by rememberUpdatedState(canNavigate)
         AndroidView(factory = { context -> WebView(ContextThemeWrapper(context,
             if (theme.dark) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar)).apply {
             layoutParams = android.view.ViewGroup.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT,
@@ -279,12 +290,42 @@ private fun BrowserPreview(url: String, onError: (String) -> Unit, onProgress: (
             webChromeClient = object : WebChromeClient() { override fun onProgressChanged(view: WebView, newProgress: Int) { callbacks.second(newProgress) } }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-                    request.url.scheme !in listOf("http", "https") || request.url.host != parsed.host
+                    !allows(session, request.url.toString())
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    if (!allows(session, request.url.toString()) || request.method !in listOf("GET", "HEAD")) return null
+                    // WebView invokes this on its resource thread, never the UI thread.
+                    return try {
+                        val response = runBlocking { loader(session, request.url.toString(), request.method, request.requestHeaders) }
+                        if (request.isForMainFrame && response.request.url.toString() != request.url.toString()) {
+                            // Let the browser resolve relative links against the redirected document URL.
+                            val redirected = response.request.url.toString()
+                            response.close()
+                            view.post { view.loadUrl(redirected) }
+                            WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
+                        } else {
+                            val type = response.body.contentType()
+                            val stream = object : FilterInputStream(response.body.byteStream()) {
+                                override fun close() { try { super.close() } finally { response.close() } }
+                            }
+                            // Login cookies stay in the native jar, inaccessible to preview scripts.
+                            val headers = response.headers.toMultimap().filterKeys { !it.equals("Set-Cookie", true) }
+                                .mapValues { it.value.joinToString(", ") }
+                            WebResourceResponse(type?.let { "${it.type}/${it.subtype}" } ?: "application/octet-stream",
+                                type?.charset()?.name() ?: "UTF-8", response.code, response.message.ifBlank { "Response" }, headers, stream)
+                        }
+                    } catch (e: Exception) {
+                        if (request.isForMainFrame) view.post { callbacks.first(session, e.userMessage("预览页面加载失败，请重新打开")) }
+                        WebResourceResponse("text/plain", "UTF-8", 502, "Preview unavailable", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+                    }
+                }
                 override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                    if (request.isForMainFrame) callbacks.first("无法访问预览页面，请检查云端端口是否正在运行")
+                    if (request.isForMainFrame) callbacks.first(session, "无法访问预览页面，请检查云端端口是否正在运行")
                 }
                 override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
-                    if (request.isForMainFrame) callbacks.first("预览页面返回 HTTP ${errorResponse.statusCode}，请检查云端端口")
+                    if (request.isForMainFrame) callbacks.first(session, when (errorResponse.statusCode) {
+                        401, 403 -> "预览身份验证失败，请重新打开预览；若仍失败，请重新登录"
+                        else -> "预览页面返回 HTTP ${errorResponse.statusCode}，请检查云端端口"
+                    })
                 }
             }
             loadUrl(url)

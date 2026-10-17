@@ -8,7 +8,7 @@
 
 Mehomo brings conversations and an agent's cloud workspace into one Android app. It connects to **official Memoh Cloud** and **self-hosted Memoh**. This is an independent, unofficial client.
 
-The current release is **[v0.1.15](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.15)**, improving conversation reentry, background recovery, message queues and long reasoning. It adds starter suggestions, usage examples and schedule run conversations, and refines Material 3 Expressive layouts and action hierarchy. [Release notes](docs/releases/v0.1.15.md)
+The current release is **[v0.1.16](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.16)**, fixing clipped reasoning choices, the loading transition for new conversations, and authentication for HTML artifact previews. [Release notes](docs/releases/v0.1.16.md)
 
 ## Material 3 Expressive, throughout
 

@@ -5,6 +5,7 @@ import kotlinx.serialization.serializer
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.Response
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.net.URI
@@ -21,6 +22,14 @@ suspend fun MemohApi.keepBrowserSession(botId: String, id: String): Unit =
     workspaceCall("${workspacePath(botId)}/browser/sessions/$id/keepalive", "POST", "{}")
 suspend fun MemohApi.closeBrowserSession(botId: String, id: String): Unit =
     workspaceCall("${workspacePath(botId)}/browser/sessions/$id", "DELETE")
+
+/** A preview may navigate within its own origin, never another port or a downgraded scheme. */
+fun isBrowserPreviewUrl(sessionUrl: String, location: String): Boolean {
+    val origin = sessionUrl.toHttpUrlOrNull() ?: return false
+    val target = location.toHttpUrlOrNull() ?: return false
+    return target.username.isEmpty() && target.password.isEmpty() &&
+        origin.scheme == target.scheme && origin.host == target.host && origin.port == target.port
+}
 suspend fun MemohApi.displayInfo(botId: String): DisplayInfo = workspaceCall("${workspacePath(botId)}/display")
 suspend fun MemohApi.displayAnswer(botId: String, sdp: String): DisplayAnswer =
     workspaceCall("${workspacePath(botId)}/display/webrtc/offer", "POST",

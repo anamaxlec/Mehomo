@@ -241,11 +241,15 @@ fun ChatScreen(
         androidx.compose.runtime.snapshotFlow { Triple(latestState, listState.layoutInfo, loadingHistoryImages) }.conflate().collect {
             androidx.compose.runtime.withFrameNanos { }
             if (latestState.historyLoading) return@collect
-            if (!initiallyPositioned && latestState.awaitingSnapshot && latestState.runtime.sessionId == null &&
-                latestState.socketStatus != SocketStatus.Reconnecting && latestState.socketStatus != SocketStatus.Closed) return@collect
+            if (!initiallyPositioned && latestState.awaitingSnapshot && latestState.runtime.sessionId == null) {
+                val offlineHistory = latestState.settledHistory.isNotEmpty() &&
+                    latestState.socketStatus in listOf(SocketStatus.Reconnecting, SocketStatus.Closed)
+                if (!offlineHistory) return@collect
+            }
             if (jumpingToLatest) return@collect
             if (latestState.settledHistory.isEmpty() && latestState.liveMessages.isEmpty() &&
                 latestState.liveUserTurns.isEmpty() && latestState.pending.isEmpty() && !latestState.isRunning) {
+                if (!initiallyPositioned && latestState.suggestionsLoading && latestState.starterPrompts.items.isEmpty()) return@collect
                 initiallyPositioned = true
                 return@collect
             }
@@ -363,7 +367,7 @@ fun ChatScreen(
                         }
                     }
 
-                    !state.historyLoading && settled.isEmpty() && liveMessages.isEmpty() && liveUsers.isEmpty() && state.pending.isEmpty() && !state.isRunning -> {
+                    initiallyPositioned && !state.historyLoading && settled.isEmpty() && liveMessages.isEmpty() && liveUsers.isEmpty() && state.pending.isEmpty() && !state.isRunning -> {
                         EmptyConversation(
                             state = state, onPick = onDraftChange, onRefresh = onRefreshSuggestions, onConfigure = onConfigureExample,
                             modifier = Modifier.align(Alignment.Center)

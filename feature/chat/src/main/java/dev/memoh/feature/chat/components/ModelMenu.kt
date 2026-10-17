@@ -5,14 +5,13 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
@@ -29,7 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material3.ButtonGroup
+import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -214,21 +213,24 @@ fun ModelMenu(
                     val labelWidth = efforts.maxOf {
                         measurer.measure(reasoningEffortLabel(it), style = MaterialTheme.typography.labelLarge, maxLines = 1).size.width
                     }
-                    val preferredWidth = (with(density) { labelWidth.toDp() } + 48.dp) * efforts.size +
-                        4.dp * (efforts.size - 1)
-                    ButtonGroup(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()).width(maxOf(maxWidth, preferredWidth)),
-                        overflowIndicator = {},
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        efforts.forEach { effort ->
-                            toggleableItem(
-                                checked = effort == selectedEffort,
-                                label = reasoningEffortLabel(effort),
-                                onCheckedChange = { onSelectEffort(effort) },
-                                weight = 1f,
-                                enabled = enabled,
-                            )
+                    // Keep every choice visible, including at larger font sizes.
+                    // ButtonGroup's intrinsic item padding otherwise overflows this narrow menu.
+                    val minimumWidth = maxOf(64.dp, with(density) { labelWidth.toDp() } + 32.dp)
+                    val columns = ((maxWidth + 4.dp) / (minimumWidth + 4.dp)).toInt().coerceIn(1, efforts.size)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        efforts.chunked(columns).forEach { row ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                row.forEach { effort ->
+                                    ToggleButton(
+                                        checked = effort == selectedEffort,
+                                        onCheckedChange = { onSelectEffort(effort) },
+                                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                        enabled = enabled,
+                                    ) { Text(reasoningEffortLabel(effort), style = MaterialTheme.typography.labelLarge) }
+                                }
+                                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+                            }
                         }
                     }
                 }

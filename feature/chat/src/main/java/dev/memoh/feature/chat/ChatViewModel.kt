@@ -990,6 +990,8 @@ class ChatViewModel @Inject constructor(
                                 offlineSyncedAt = null,
                                 history = merged.distinctBy { it.listKey },
                                 historyLoading = false,
+                                // The empty page is not ready until its initial suggestions settle.
+                                suggestionsLoading = current.suggestionsLoading || before == null && merged.isEmpty() && session.isLocal,
                                 historyError = if (before == null) null else current.historyError,
                                 olderHistoryError = null,
                                 loadingMore = false,

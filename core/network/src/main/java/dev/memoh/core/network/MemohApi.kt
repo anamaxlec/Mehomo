@@ -297,6 +297,55 @@ class MemohApi(
 
     // -- plumbing -----------------------------------------------------------
 
+    /**
+     * WebView has a separate cookie store. Fetch preview documents and their resources
+     * with the existing account client, without putting login cookies or tokens in WebView.
+     * The self-hosted browser subdomain remains public; only the API origin receives auth.
+     */
+    fun browserPreview(sessionUrl: String): BrowserPreviewClient {
+        val url = sessionUrl.toHttpUrl()
+        val launch = endpoint.isCloud && isBrowserPreviewUrl(endpoint.origin, sessionUrl) &&
+            Regex("/api/v1/browser-sessions/[a-f0-9]{32}/launch").matches(url.encodedPath)
+        return BrowserPreviewClient(sessionUrl, launch, ::browserResourceRequest)
+    }
+
+    suspend fun browserResource(
+        sessionUrl: String, location: String, method: String = "GET", headers: Map<String, String> = emptyMap(),
+    ): Response = browserPreview(sessionUrl).load(location, method, headers)
+
+    private suspend fun browserResourceRequest(
+        url: okhttp3.HttpUrl, method: String, headers: Map<String, String>, websiteCookies: okhttp3.CookieJar, includeAccount: Boolean,
+    ): Response = withContext(Dispatchers.IO) {
+        val origin = endpoint.origin.toHttpUrl()
+        val authenticated = includeAccount && url.scheme == origin.scheme && url.host == origin.host && url.port == origin.port
+        if (authenticated && endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
+        val lease = if (authenticated && !endpoint.isCloud) freshLease() else null
+        val http = (if (authenticated && endpoint.isCloud) networkClient.newBuilder() else client.newBuilder().cookieJar(websiteCookies))
+            .followRedirects(false).followSslRedirects(false).cache(null).build()
+        fun sendResource(token: AuthLease?): Response {
+            val builder = Request.Builder().url(url).method(method, null)
+            // WebView owns these request preferences; account and transport headers stay native.
+            headers.filterKeys { it.lowercase() in setOf("accept", "accept-language", "user-agent", "range") }
+                .forEach { (name, value) -> builder.header(name, value) }
+            if (authenticated) {
+                if (endpoint.isCloud) cloudAuth?.authorize(builder)
+                else token?.let { builder.header("Authorization", "Bearer ${it.token}") }
+            }
+            return http.newCall(builder.build()).execute()
+        }
+        var response = sendResource(lease)
+        if (authenticated && !endpoint.isCloud && response.code == 401) {
+            val refreshed = try { refreshMutex.withLock {
+                val current = auth?.currentLease()
+                if (current != null && current.token != lease?.token) current else current?.let { auth?.refresh(it) }
+            } } catch (e: Exception) { response.close(); throw e }
+            // A workspace website can return its own 401. Failed preview auth must
+            // not invalidate an otherwise usable application login.
+            if (refreshed != null) { response.close(); response = sendResource(refreshed) }
+        }
+        response
+    }
+
     /** Multipart uploads share the same refresh and account headers as JSON. */
     internal suspend fun multipart(path: String, body: okhttp3.RequestBody): JsonElement = withContext(Dispatchers.IO) {
         if (endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
