@@ -25,6 +25,23 @@ import java.io.File
 class ChatPaginationIndicatorTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
+    @Test fun firstConnectionWaitsForRuntimeWithASkeletonInsteadOfSayingReconnecting() {
+        var state by mutableStateOf(ChatUiState(session = Session("initial-snapshot"), historyLoading = false,
+            hasMoreHistory = false, modelCatalogLoading = false, socketStatus = SocketStatus.Connecting))
+        compose.setContent { MemohTheme { ChatScreen(state, {}, {}, {}, {}, {},
+            onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+            onCancelUserInput = { _, _ -> }, onDismissError = {}) } }
+        compose.onNodeWithText("重连中…").assertDoesNotExist()
+        compose.onNodeWithContentDescription("正在连接会话").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载会话").assertIsDisplayed()
+        compose.runOnIdle {
+            state = state.copy(awaitingSnapshot = false, socketStatus = SocketStatus.Connected,
+                runtime = dev.memoh.core.model.RuntimeState(sessionId = "initial-snapshot"))
+        }
+        compose.onNodeWithText("已连接").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+    }
+
     @Test fun initialSkeletonAndPaginationIndicatorNeverOverlapIncludingTheFade() {
         var state by mutableStateOf(ChatUiState(session = Session("loading", title = "会话加载检查"),
             modelCatalogLoading = false, hasMoreHistory = false, awaitingSnapshot = false,

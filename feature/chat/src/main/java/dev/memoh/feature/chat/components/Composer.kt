@@ -8,13 +8,14 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.memoh.core.designsystem.component.LocalMemohPopupFocusable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -64,6 +65,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.Role
 import dev.memoh.core.designsystem.component.MemohComposerSurface
 import dev.memoh.core.designsystem.component.MemohComposerTextField
 import dev.memoh.core.designsystem.component.MemohComposerIconButton
@@ -132,21 +134,29 @@ fun Composer(
     plusMenu: (@Composable (expanded: Boolean, dismiss: () -> Unit) -> Unit)? = null,
     /** Menu content for the model selector; same anchoring rule. */
     modelMenu: (@Composable (expanded: Boolean, dismiss: () -> Unit) -> Unit)? = null,
+    sendDescription: String = "发送",
+    textEnabled: Boolean = enabled,
 ) {
     var popupBounds by remember { mutableStateOf<IntRect?>(null) }
     var editorFocused by remember { mutableStateOf(false) }
     var plusOpen by remember { mutableStateOf(false) }
     var modelOpen by remember { mutableStateOf(false) }
     val imeVisible = WindowInsets.isImeVisible
+    val focusManager = LocalFocusManager.current
+    // A hidden keyboard must not reopen just because the window regains focus.
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
+        if (!imeVisible) focusManager.clearFocus(force = true)
+    }
     var imeWasVisible by remember { mutableStateOf(false) }
     LaunchedEffect(imeVisible, editorFocused) {
         if (!editorFocused) imeWasVisible = false
         else if (imeVisible) imeWasVisible = true
     }
     val hasAttachmentArea = hasAttachments || attachmentLoading
-    val editorExpanded = hasAttachmentArea || editorFocused && (imeVisible || !imeWasVisible)
-    val expansion by animateFloatAsState(if (editorExpanded) 1f else 0f,
-        tween(240, easing = FastOutSlowInEasing), label = "composerExpansion")
+    val editorExpanded = hasAttachmentArea || text.isNotBlank() || editorFocused && (imeVisible || !imeWasVisible)
+    val animatedExpansion by animateFloatAsState(if (editorExpanded) 1f else 0f,
+        MaterialTheme.motionScheme.defaultSpatialSpec(), label = "composerExpansion")
+    val expansion = animatedExpansion.coerceIn(0f, 1f)
     BackHandler(plusOpen) { plusOpen = false }
     BackHandler(modelOpen) { modelOpen = false }
     CompositionLocalProvider(
@@ -178,19 +188,19 @@ fun Composer(
                 // One editor stays composed in both layouts, preserving text,
                 // selection and IME focus while controls move to the bottom row.
                 Box(Modifier.fillMaxWidth()) {
-                    val compactStart = if (onAttachClick != null) 44.dp else 0.dp
-                    val compactEnd = if (onModelClick != null) 88.dp else 44.dp
+                    val compactStart = if (onAttachClick != null) 48.dp else 0.dp
+                    val compactEnd = if (onModelClick != null) 102.dp else 48.dp
                     MemohComposerTextField(
-                        value = text, onValueChange = onTextChange, enabled = enabled,
-                        placeholder = if (isRunning) "补充到当前回复…" else "问点什么",
+                        value = text, onValueChange = onTextChange, enabled = textEnabled,
+                        placeholder = if (isRunning) "追加到后续队列…" else "问点什么",
                         modifier = Modifier.fillMaxWidth()
                             .padding(start = compactStart * (1f - expansion), end = compactEnd * (1f - expansion),
-                                bottom = 44.dp * expansion)
-                            .heightIn(min = if (hasAttachmentArea) 80.dp else 44.dp,
-                                max = if (hasAttachmentArea) 220.dp else 44.dp + 176.dp * expansion)
+                                bottom = 48.dp * expansion)
+                            .heightIn(min = if (hasAttachmentArea) 80.dp else 48.dp,
+                                max = if (hasAttachmentArea) 220.dp else 48.dp + 172.dp * expansion)
                             .onFocusChanged { editorFocused = it.isFocused },
                     )
-                    Row(Modifier.fillMaxWidth().height(44.dp).align(Alignment.BottomCenter),
+                    Row(Modifier.fillMaxWidth().height(48.dp).align(Alignment.BottomCenter),
                         verticalAlignment = Alignment.CenterVertically) {
                         if (onAttachClick != null) Box {
                             MemohComposerIconButton(
@@ -202,7 +212,7 @@ fun Composer(
                             plusMenu?.invoke(plusOpen) { plusOpen = false }
                         }
                         if (onModelClick != null) {
-                            Box(Modifier.weight(1f).heightIn(min = 40.dp), contentAlignment = Alignment.CenterEnd) {
+                            Box(Modifier.weight(1f).heightIn(min = 48.dp), contentAlignment = Alignment.CenterEnd) {
                                 Box {
                                 Crossfade(modelLoading, animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(), label = "model loaded") { loading ->
                                     if (loading) MemohSkeleton(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), "正在加载模型") {
@@ -224,7 +234,7 @@ fun Composer(
                         val canPressSend = sendEnabled && (showStop || text.isNotBlank() || hasAttachments)
                         MemohComposerIconButton(
                             icon = if (showStop) Icons.Filled.Stop else Icons.Filled.ArrowUpward,
-                            contentDescription = if (showStop) "停止生成" else "发送",
+                            contentDescription = if (showStop) "停止生成" else sendDescription,
                             enabled = canPressSend,
                             filled = true,
                             danger = showStop,
@@ -254,6 +264,7 @@ private fun ModelSelector(
 ) {
     Row(
         modifier = Modifier
+            .heightIn(min = 48.dp).widthIn(min = 48.dp)
             .clip(MaterialTheme.shapes.large)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -326,8 +337,10 @@ private fun CapabilityChip(capability: ComposerCapability) {
     Box {
         Row(
             modifier = Modifier
-                .clip(MaterialTheme.shapes.medium)
-                .clickable(enabled = capability.enabled) { open = true }
+                .heightIn(min = 48.dp)
+                .clip(MaterialTheme.shapes.large)
+                .clickable(enabled = capability.enabled, role = Role.Button,
+                    onClickLabel = "选择${capability.label}") { open = true }
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -345,12 +358,6 @@ private fun CapabilityChip(capability: ComposerCapability) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-            )
-            Icon(
-                imageVector = Icons.Filled.ArrowDropDown,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp),
             )
         }
 

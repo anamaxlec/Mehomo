@@ -18,12 +18,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import dev.memoh.core.model.StarterPromptsResponse
+import kotlinx.serialization.json.Json
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "memoh_settings")
 
 /**
- * User-visible preferences. Deliberately small: the server is the source of
- * truth for conversation data, so nothing here is a cache of it.
+ * User-visible preferences, drafts and server-issued starter suggestions.
+ * Conversation history is kept separately in ChatHistoryStore.
  */
 class SettingsStore(private val context: Context) {
     private data class DraftWrite(val accountId: String, val botId: String, val sessionId: String, val text: String)
@@ -142,6 +144,18 @@ class SettingsStore(private val context: Context) {
             if (text.isBlank()) prefs.remove(key) else prefs[key] = text
         }
     }
+
+    suspend fun starterPrompts(accountId: String, teamId: String, botId: String, locale: String): StarterPromptsResponse? {
+        val raw = context.dataStore.data.first()[starterPromptsKey(accountId, teamId, botId, locale)] ?: return null
+        return runCatching { Json.decodeFromString<StarterPromptsResponse>(raw) }.getOrNull()
+    }
+
+    suspend fun saveStarterPrompts(accountId: String, teamId: String, botId: String, locale: String, value: StarterPromptsResponse) {
+        context.dataStore.edit { it[starterPromptsKey(accountId, teamId, botId, locale)] = Json.encodeToString(value) }
+    }
+
+    private fun starterPromptsKey(accountId: String, teamId: String, botId: String, locale: String) =
+        stringPreferencesKey("starter_prompts_" + listOf(accountId, teamId, botId, locale).joinToString("_") { android.net.Uri.encode(it) })
 
     private fun draftKey(accountId: String, botId: String, sessionId: String) =
         stringPreferencesKey("draft_${android.net.Uri.encode(accountId)}_${android.net.Uri.encode(botId)}_${android.net.Uri.encode(sessionId)}")

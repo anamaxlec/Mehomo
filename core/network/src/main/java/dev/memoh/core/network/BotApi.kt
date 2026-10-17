@@ -73,6 +73,12 @@ suspend fun MemohApi.saveSchedule(botId: String, id: String?, body: JsonObject):
 suspend fun MemohApi.deleteSchedule(botId: String, id: String): Unit = change("${botPath(botId)}/schedule/${segment(id)}", "DELETE")
 suspend fun MemohApi.scheduleLogs(botId: String, id: String, offset: Int = 0): ScheduleLogs =
     get("${botPath(botId)}/schedule/${segment(id)}/logs${query("limit" to "50", "offset" to offset.toString())}")
+suspend fun MemohApi.scheduleRunSessions(botId: String, id: String, cursor: String? = null, limit: Int = 20): ListResponse<ScheduleRunSession> =
+    get("${botPath(botId)}/schedule/${segment(id)}/sessions${query("limit" to limit.toString(), "cursor" to cursor)}")
+suspend fun MemohApi.starterPrompts(botId: String, locale: String, knownHash: String? = null): StarterPromptsResponse =
+    get("${botPath(botId)}/starter-prompts${query("locale" to locale, "known_hash" to knownHash?.takeIf(String::isNotBlank))}")
+suspend fun MemohApi.refreshStarterPrompts(botId: String, locale: String, avoid: List<String>): StarterPromptsResponse =
+    change("${botPath(botId)}/starter-prompts/refresh", "POST", apiBody("locale" to locale, "avoid" to avoid))
 suspend fun MemohApi.tokenUsage(botId: String, from: String, to: String): TokenUsageSummary =
     get("${botPath(botId)}/token-usage${query("from" to from, "to" to to)}")
 suspend fun MemohApi.tokenRecords(botId: String, from: String, to: String, offset: Int = 0, sessionType: String? = null): TokenUsageRecords =

@@ -26,6 +26,14 @@ enum class BotFeature(val title: String) {
 data class McpAuthorization(val id: String, val name: String, val status: JsonObject = JsonObject(emptyMap()), val discovered: Boolean = false,
     val needsClientId: Boolean = false, val url: String? = null, val oauthState: String? = null)
 
+data class ScheduleRunsState(
+    val items: List<ScheduleRunSession> = emptyList(),
+    val nextCursor: String? = null,
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val error: String? = null,
+)
+
 data class BotFeatureState(
     val botId: String = "",
     val feature: BotFeature = BotFeature.Memory,
@@ -49,6 +57,7 @@ data class BotFeatureState(
     val logs: ScheduleLogs? = null,
     val logsLoading: Boolean = false,
     val logsError: String? = null,
+    val scheduleRuns: Map<String, ScheduleRunsState> = emptyMap(),
     val usage: TokenUsageSummary? = null,
     val usageDays: Int = 30,
     val usageFrom: String = LocalDate.now(ZoneOffset.UTC).minusDays(29).toString(),
@@ -58,8 +67,10 @@ data class BotFeatureState(
     val records: List<TokenUsageRecord> = emptyList(),
     val recordCount: Long = 0,
     val metrics: ContainerMetrics? = null,
+    val containerStatus: String? = null,
     val apps: List<InstalledApp> = emptyList(),
     val appsChecksIncomplete: Boolean = false,
+    val appsWorkspaceState: String? = null,
     val dependencyCatalogStale: Boolean = false,
     val marketApps: List<MarketApp> = emptyList(),
     val marketSkills: List<MarketSkill> = emptyList(),
@@ -90,6 +101,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
     private var fileLinkJob: Job? = null
     private var scheduleOptionsJob: Job? = null
     private var logsJob: Job? = null
+    private val scheduleRunJobs = mutableMapOf<String, Job>()
     private var subscription: Job? = null
     private var mcpAuthJob: Job? = null
     private val pages = BotFeaturePages()
@@ -108,6 +120,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
         closeMcpAuthorization()
         scheduleOptionsJob?.cancel()
         logsJob?.cancel()
+        scheduleRunJobs.values.forEach { it.cancel() }; scheduleRunJobs.clear()
         pageGeneration = generation
         loadJob?.cancel()
         _state.value = cachedState(botId, feature)
@@ -171,13 +184,16 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                         catch (e: Exception) { loaded = loaded.copy(recordsError = e.userMessage("使用记录加载失败")) }
                         try { loaded = loaded.copy(metrics = api.containerMetrics(current.botId)) }
                         catch (e: ApiException) { loaded = loaded.copy(notice = "容器状态：${e.userMessage()}") }
+                        try { loaded = loaded.copy(containerStatus = api.managementRead("bots", current.botId, "container").jsonObject["status"]?.jsonPrimitive?.contentOrNull) }
+                        catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { }
                     }
                     BotFeature.Apps -> if (current.browsing) {
                         val page = api.marketApps(text = current.query)
                         loaded = loaded.copy(marketApps = page.data.orEmpty(), marketPage = 1, marketTotal = page.total ?: 0)
                     } else {
                         val apps = api.installedApps(current.botId)
-                        loaded = loaded.copy(apps = apps.items.orEmpty(), appsChecksIncomplete = current.appsChecksIncomplete || apps.updateChecksIncomplete,
+                        loaded = loaded.copy(apps = apps.items.orEmpty(), appsWorkspaceState = apps.workspaceState, appsChecksIncomplete = current.appsChecksIncomplete || apps.updateChecksIncomplete,
                             dependencyCatalogStale = apps.dependencyCatalogStale == true)
                     }
                     BotFeature.Skills -> if (current.browsing) {
@@ -201,7 +217,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                         scheduleOptions = it.scheduleOptions.copy(timezone = loaded.scheduleOptions.timezone ?: it.scheduleOptions.timezone),
                         scheduleOptionsLoading = it.scheduleOptionsLoading, scheduleOptionsError = it.scheduleOptionsError,
                         scheduleAgentModels = it.scheduleAgentModels, logSchedule = it.logSchedule, logs = it.logs,
-                        logsLoading = it.logsLoading, logsError = it.logsError)
+                        logsLoading = it.logsLoading, logsError = it.logsError, scheduleRuns = it.scheduleRuns.filterKeys { id -> loaded.schedules.any { schedule -> schedule.id == id } })
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(loading = false, error = e.userMessage("加载失败")) } }
@@ -243,6 +259,21 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
             catch (e: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(busy = false, error = e.userMessage("操作失败").takeIf(String::isNotBlank)) } }
         }
     }
+    suspend fun refreshUsageResources() {
+        val current = state.value
+        if (current.feature != BotFeature.Usage || current.busy || current.loading || !current.hasLoaded) return
+        val generation = repository.generation
+        val api = repository.api() ?: return
+        try {
+            val metrics = api.containerMetrics(current.botId)
+            val status = try { api.managementRead("bots", current.botId, "container").jsonObject["status"]?.jsonPrimitive?.contentOrNull }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { current.containerStatus }
+            if (generation == repository.generation && itMatches(current)) _state.update { it.copy(metrics = metrics, containerStatus = status) }
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { /* Preserve the last sample during a temporary outage. */ }
+    }
+
     private fun itMatches(current: BotFeatureState) = current.botId == state.value.botId && current.feature == state.value.feature
 
     fun openFolder(botId: String, path: String) {
@@ -420,6 +451,45 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
             catch (_: Exception) { if (generation == repository.generation && itMatches(current)) _state.update { it.copy(logsLoading = false, logsError = "执行记录加载失败，请重试") } }
         }
     }
+    fun loadScheduleRuns(id: String, more: Boolean = false) {
+        val current = state.value
+        if (current.feature != BotFeature.Schedules) return
+        val held = current.scheduleRuns[id] ?: ScheduleRunsState()
+        if (held.loading || (more && held.nextCursor.isNullOrBlank())) return
+        val generation = repository.generation
+        val cursor = if (more) held.nextCursor else null
+        scheduleRunJobs[id]?.cancel()
+        _state.update { it.copy(scheduleRuns = it.scheduleRuns + (id to held.copy(loading = true, error = null))) }
+        scheduleRunJobs[id] = viewModelScope.launch {
+            try {
+                val api = repository.api() ?: error("请先登录")
+                var page = api.scheduleRunSessions(current.botId, id, cursor)
+                var items = page.items
+                // Refresh all loaded rows without dropping an older page the user is reading.
+                val seen = mutableSetOf<String>()
+                while (!more && items.size < held.items.size && !page.nextCursor.isNullOrBlank()) {
+                    val next = requireNotNull(page.nextCursor)
+                    check(seen.add(next)) { "服务端返回了重复分页游标" }
+                    page = api.scheduleRunSessions(current.botId, id, next)
+                    items = (items + page.items).distinctBy { it.logId }
+                }
+                check(cursor == null || page.nextCursor != cursor) { "服务端返回了重复分页游标" }
+                if (generation == repository.generation && itMatches(current)) _state.update {
+                    it.copy(scheduleRuns = it.scheduleRuns + (id to ScheduleRunsState(
+                        items = if (more) (held.items + items).distinctBy { run -> run.logId } else items,
+                        nextCursor = page.nextCursor?.takeIf(String::isNotBlank), loaded = true)))
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (generation == repository.generation && itMatches(current)) _state.update {
+                    val latest = it.scheduleRuns[id] ?: held
+                    it.copy(scheduleRuns = it.scheduleRuns + (id to latest.copy(loading = false,
+                        error = if (e is ApiException && e.status == 404) "当前服务暂不支持运行会话，仍可查看执行记录。" else e.userMessage("运行会话加载失败，请重试"))))
+                }
+            }
+        }
+    }
+
     fun closeLogs() { logsJob?.cancel(); _state.update { it.copy(logSchedule = null, logs = null, logsLoading = false, logsError = null) } }
     fun moreRecords() = action(refresh = false) { api, bot ->
         val current = state.value
@@ -437,6 +507,17 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
             _state.update { it.copy(marketSkills = it.marketSkills + page.data.orEmpty(), marketPage = current.marketPage + 1, marketTotal = page.total ?: it.marketTotal) }
         }
     }
+    fun startAppDemo(name: String, onCreated: (Session, String) -> Unit) {
+        val current = state.value
+        val generation = repository.generation
+        if (current.appsWorkspaceState != null && current.appsWorkspaceState != "running") return
+        action(refresh = false) { api, bot ->
+            val prompt = "演示一下 $name 这个应用能做什么。先介绍它的用途，再给我一个可以尝试的例子。"
+            val session = api.createSession(bot, null)
+            if (generation == repository.generation && itMatches(current)) onCreated(session, prompt)
+        }
+    }
+
     fun install(registryId: String, appId: String) = installOperation { api, bot ->
         val descriptor = api.marketApp(registryId, appId)
         val revision = descriptor["revision"]?.jsonPrimitive?.contentOrNull ?: error("应用没有可安装版本")

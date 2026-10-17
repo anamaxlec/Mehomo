@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,6 +37,8 @@ import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.model.*
 import dev.memoh.core.network.apiBody
@@ -67,6 +70,7 @@ fun BotFeatureScreen(
     onBack: (() -> Unit)? = null,
     onOpenSession: (String) -> Unit = {},
     onOpenConnectors: (() -> Unit)? = null,
+    onTryApp: ((String) -> Unit)? = null,
     showTitle: Boolean = true,
 ) {
     if (state.feature == BotFeature.Files) {
@@ -81,6 +85,12 @@ fun BotFeatureScreen(
     var scheduleSort by remember { mutableStateOf("name") }
     var focusedMemory by remember { mutableStateOf<MemoryEntry?>(null) }
     val context = LocalContext.current
+    val runtimeLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(runtimeLifecycle, state.botId, state.feature) {
+        if (state.feature == BotFeature.Usage) runtimeLifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+            while (true) { kotlinx.coroutines.delay(10_000); viewModel.refreshUsageResources() }
+        }
+    }
     val scope = rememberCoroutineScope()
     var exportError by remember { mutableStateOf<String?>(null) }
     val mcpSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -203,13 +213,19 @@ fun BotFeatureScreen(
                     if (!state.loading && state.memories.isEmpty()) item { EmptyNote("暂无记忆", "添加一条，或让 Bot 在对话中记录需要长期保留的信息。") }
                 }
                 BotFeature.Schedules -> {
-                    item { Box(Modifier.padding(bottom = 14.dp)) { FeatureAction("新建日程", Icons.Filled.Add,
-                        { scheduleEditor() }, enabled = !state.busy && state.botId.isNotBlank(), primary = true) } }
+                    item {
+                        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("${state.schedules.size} 个日程", style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            FeatureAction("新建日程", Icons.Filled.Add, { scheduleEditor() },
+                                enabled = !state.busy && state.botId.isNotBlank(), primary = true)
+                        }
+                    }
                     if (initialLoading) item(key = "initial-feature-loading") {
                         MemohListSkeleton(description = "正在加载${state.feature.title}", detailed = true, rows = 4)
                     }
                     if (state.schedules.isNotEmpty()) item {
-                        Text("${state.schedules.size} 个日程", style = MaterialTheme.typography.labelLarge)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf("name" to "名称", "active" to "启用状态").forEach { (id, label) ->
                                 ScheduleFilterChip(scheduleSort == id, label) { scheduleSort = id }
@@ -219,21 +235,36 @@ fun BotFeatureScreen(
                     val schedules = if (scheduleSort == "active") state.schedules.sortedWith(compareByDescending<BotSchedule> { it.enabled == true }.thenBy { it.name.orEmpty() })
                         else state.schedules.sortedBy { it.name.orEmpty() }
                     itemsIndexed(schedules, key = { index, schedule -> schedule.id ?: index }) { index, schedule ->
-                        FeatureCard(schedule.name ?: "未命名日程", scheduleDescription(schedule.pattern.orEmpty()), index, schedules.size) {
-                            Column {
+                        var menuOpen by remember(schedule.id) { mutableStateOf(false) }
+                        FeatureCard(schedule.name ?: "未命名日程",
+                            scheduleDescription(schedule.pattern.orEmpty()) + if (schedule.enabled == true) " · 已启用" else " · 已暂停",
+                            index, schedules.size, trailing = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Switch(checked = schedule.enabled == true, onCheckedChange = { viewModel.toggleSchedule(schedule) }, enabled = !state.busy,
+                                        modifier = Modifier.semantics { contentDescription = "${schedule.name ?: "日程"}，启用日程" })
+                                    Box {
+                                        IconButton({ menuOpen = true }, enabled = !state.busy) {
+                                            Icon(Icons.Filled.MoreVert, "${schedule.name ?: "日程"}操作")
+                                        }
+                                        MemohPopupMenu(menuOpen, { menuOpen = false }, Alignment.TopEnd) {
+                                            MemohMenuGroup {
+                                                MemohMenuRow("编辑", Icons.Filled.Edit, { menuOpen = false; scheduleEditor(schedule) }, index = 0, count = 3)
+                                                MemohMenuRow("执行记录", Icons.Filled.History, { menuOpen = false; viewModel.logs(schedule) }, index = 1, count = 3)
+                                                MemohMenuRow("删除", Icons.Filled.DeleteOutline, {
+                                                    menuOpen = false
+                                                    confirmation = Confirmation("删除日程", "停止并删除 ${schedule.name.orEmpty()}。已产生的执行会话会保留，并重新出现在最近会话中。", { schedule.id?.let(viewModel::deleteSchedule) })
+                                                }, index = 2, count = 3, accent = MaterialTheme.colorScheme.errorContainer)
+                                            }
+                                        }
+                                    }
+                                }
+                            }) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(schedule.command.orEmpty(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
                                 schedule.description?.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 ScheduleSummary(schedule, state.scheduleOptions.timezone)
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(if (schedule.enabled == true) "已启用" else "已暂停", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                                    Switch(checked = schedule.enabled == true, onCheckedChange = { viewModel.toggleSchedule(schedule) }, enabled = !state.busy)
-                                }
-                                FeatureActions {
-                                    FeatureAction("编辑", Icons.Filled.Edit, { scheduleEditor(schedule) }, enabled = !state.busy)
-                                    FeatureAction("执行记录", Icons.Filled.History, { viewModel.logs(schedule) }, enabled = !state.busy)
-                                    FeatureAction("删除", Icons.Filled.DeleteOutline,
-                                        { confirmation = Confirmation("删除日程", "停止并删除 ${schedule.name.orEmpty()}。", { schedule.id?.let(viewModel::deleteSchedule) }) }, enabled = !state.busy, danger = true)
-                                }
+                                ScheduleRunSessions(schedule.id, state.scheduleRuns[schedule.id],
+                                    onLoad = { more -> schedule.id?.let { viewModel.loadScheduleRuns(it, more) } }, onSession = onOpenSession)
                             }
                         }
                     }
@@ -286,7 +317,7 @@ fun BotFeatureScreen(
                     }
                     state.metrics?.let { metrics -> item {
                         FeatureCard("云端电脑", "资源监控", if (state.usage != null) 1 else 0, if (state.usage != null) 2 else 1) {
-                            UsageResources(metrics)
+                            UsageResources(metrics, state.containerStatus)
                         }
                     } }
                     if (!state.usage?.byModel.isNullOrEmpty()) item { FeatureSectionLabel("模型用量") }
@@ -360,6 +391,9 @@ fun BotFeatureScreen(
                             if (app.lastErrorCode.isNullOrBlank() && !app.lastError.isNullOrBlank()) Text("上次应用操作失败，请继续安装或重试。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                             Text(app.description.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 3)
                             FeatureActions {
+                                if (app.status in listOf("installed", "discovered") && state.appsWorkspaceState in listOf(null, "running")) onTryApp?.let { tryApp ->
+                                    FeatureAction("试一试", Icons.Filled.AutoAwesome, { tryApp(app.name ?: app.appId ?: "这个应用") }, enabled = !state.busy)
+                                }
                                 FeatureAction("更新", Icons.Filled.Update, { viewModel.update(app) }, enabled = !state.busy && app.registryId != null && app.appId != null)
                                 if (app.status == "needs_auth" || app.connectors.orEmpty().any { it.status !in listOf("linked", "active", "connected") }) onOpenConnectors?.let { open ->
                                     FeatureAction("连接外部服务", Icons.Filled.Link, open, enabled = !state.busy)
@@ -371,6 +405,9 @@ fun BotFeatureScreen(
                                 Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Icon(Icons.Filled.Link, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
                                     Text("${connector.type.orEmpty()} · ${featureStatus(connector.status).orEmpty()}", style = MaterialTheme.typography.labelSmall)
+                                }
+                                connector.connector?.toolDiscoveryError?.takeIf(String::isNotBlank)?.let { error ->
+                                    Text("工具加载失败：$error", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                                 }
                             }
                         }
@@ -574,15 +611,21 @@ fun BotFeatureScreen(
 }
 
 @Composable private fun FeatureCard(title: String, subtitle: String?, index: Int = 0, count: Int = 1,
-    titleIsBody: Boolean = false, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    titleIsBody: Boolean = false, modifier: Modifier = Modifier, trailing: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit) {
     Card(shape = ListItemDefaults.segmentedShapes(index, count).shape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
         modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = if (titleIsBody) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleMedium)
-            subtitle?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
-            Column(Modifier.fillMaxWidth().padding(top = 4.dp), content = content)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(title, style = if (titleIsBody) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleMedium)
+                    subtitle?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3, overflow = TextOverflow.Ellipsis) }
+                }
+                trailing?.invoke()
+            }
+            Column(Modifier.fillMaxWidth().padding(top = 8.dp), content = content)
         }
     }
 }
@@ -699,20 +742,21 @@ fun BotFeatureScreen(
 }
 
 @OptIn(ExperimentalLayoutApi::class)
-@Composable private fun UsageResources(metrics: ContainerMetrics) {
+@Composable private fun UsageResources(metrics: ContainerMetrics, status: String?) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (metrics.supported == false) {
             UsageResourceRow("暂不提供资源监控", "当前云端电脑不提供 CPU、内存与存储指标。", Icons.Filled.Info)
         } else {
             FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                metrics.status?.taskRunning?.let { running -> UsageInfo(if (running) "任务进行中" else "空闲",
-                    if (running) Icons.Filled.HourglassTop else Icons.Filled.CheckCircle, emphasized = true) }
+                val running = metrics.status?.taskRunning
+                if (status != null || running != null) UsageInfo(status?.let(::runtimeStatusLabel) ?: if (running == true) "运行环境已启动" else "运行环境未运行",
+                    if (status == "paused") Icons.Filled.PauseCircle else if (running == true) Icons.Filled.Cloud else Icons.Filled.Info, emphasized = true)
                 featureTime(metrics.sampledAt)?.let { UsageInfo("更新于 $it", Icons.Filled.Schedule) }
             }
-            UsageResourceRow("CPU", metrics.metrics?.cpu?.usagePercent?.let { "%.1f%%".format(it) } ?: "—", Icons.Filled.Speed)
-            UsageResourceRow("内存", "${resourceBytes(metrics.metrics?.memory?.usageBytes)} / ${resourceBytes(metrics.metrics?.memory?.limitBytes)}", Icons.Filled.Memory)
-            UsageResourceRow("存储", resourceBytes(metrics.metrics?.storage?.usedBytes), Icons.Filled.Storage)
+            metrics.resourceMetrics().forEachIndexed { index, metric ->
+                UsageResourceRow(metric.label, metric.value, listOf(Icons.Filled.Speed, Icons.Filled.Memory, Icons.Filled.Storage)[index])
+            }
         }
     }
 }

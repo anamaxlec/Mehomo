@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -34,6 +35,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +49,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.SpanStyle
@@ -165,10 +168,7 @@ private fun ProcessStep(message: UIMessage, isStreaming: Boolean, isRunActive: B
         }
     }
     ProcessDetails(expanded && expandable) {
-        if (reasoning) SelectionContainer {
-            Text(message.content.trim(), style = if (inGroup) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
-        } else {
+        if (reasoning) ReasoningDetails(message.content, inGroup) else {
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
                 .background(if (inGroup) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceContainerLow)
                 .padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -178,10 +178,28 @@ private fun ProcessStep(message: UIMessage, isStreaming: Boolean, isRunActive: B
     }
 }
 
+/** Long thoughts stay fully readable without laying out one transcript-sized Text. */
+@Composable
+private fun ReasoningDetails(content: String, inGroup: Boolean) {
+    val chunks = remember(content) { reasoningTextChunks(content.trim()) }
+    val style = if (inGroup) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    SelectionContainer {
+        if (chunks.size <= 1) Text(chunks.firstOrNull().orEmpty(), style = style, color = color,
+            modifier = Modifier.padding(bottom = 6.dp))
+        else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 320.dp)
+            .semantics { contentDescription = "思考详情" }) {
+            items(chunks.size, key = { it }) { index ->
+                Text(chunks[index], style = style, color = color)
+            }
+        }
+    }
+}
+
 @Composable
 private fun DisclosureRow(expanded: Boolean, onToggle: () -> Unit, enabled: Boolean = true, compact: Boolean = false,
     content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
-    val rotation by animateFloatAsState(if (expanded) 90f else 0f, tween(200), label = "processChevron")
+    val rotation by animateFloatAsState(if (expanded) 90f else 0f, tween(300), label = "processChevron")
     Row(Modifier.fillMaxWidth().heightIn(min = if (compact) 36.dp else 40.dp)
         .then(if (enabled) Modifier.semantics { stateDescription = if (expanded) "已展开" else "已收起" }
             .clickable(role = Role.Button, onClickLabel = if (expanded) "收起" else "展开", onClick = onToggle) else Modifier),
@@ -200,7 +218,7 @@ private fun ProcessLabel(text: String, active: Boolean, modifier: Modifier = Mod
     val style = if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium
     val textStyle: TextStyle = if (shimmer) {
         val position by rememberInfiniteTransition(label = "processShimmer").animateFloat(-200f, 800f,
-            infiniteRepeatable(tween(1800), RepeatMode.Restart), label = "processHighlight")
+            infiniteRepeatable(tween(3200), RepeatMode.Restart), label = "processHighlight")
         style.copy(brush = Brush.linearGradient(listOf(colors.onSurfaceVariant, colors.onSurface, colors.onSurfaceVariant),
             start = Offset(position, 0f), end = Offset(position + 160f, 0f)))
     } else style.copy(color = colors.onSurfaceVariant)
@@ -210,14 +228,15 @@ private fun ProcessLabel(text: String, active: Boolean, modifier: Modifier = Mod
 /** Keep a single body through rapid reversals, without spring overshoot or duplicate content. */
 @Composable
 private fun ProcessDetails(expanded: Boolean, content: @Composable ColumnScope.() -> Unit) {
+    val bodyState = rememberSaveableStateHolder()
     val reveal by animateFloatAsState(if (expanded) 1f else 0f,
-        tween(220, easing = FastOutSlowInEasing), label = "processDetails")
-    if (expanded || reveal > 0f) Column(Modifier.fillMaxWidth().clipToBounds()
+        tween(320, easing = FastOutSlowInEasing), label = "processDetails")
+    if (expanded || reveal > 0f) bodyState.SaveableStateProvider("details") { Column(Modifier.fillMaxWidth().clipToBounds()
         .then(if (expanded) Modifier else Modifier.clearAndSetSemantics { })
         .layout { measurable, constraints ->
             val placeable = measurable.measure(constraints.copy(minHeight = 0))
             layout(placeable.width, (placeable.height * reveal.coerceIn(0f, 1f)).roundToInt()) { placeable.placeRelative(0, 0) }
-        }.padding(top = 2.dp, bottom = 4.dp), content = content)
+        }.padding(top = 2.dp, bottom = 4.dp), content = content) }
 }
 
 @Composable

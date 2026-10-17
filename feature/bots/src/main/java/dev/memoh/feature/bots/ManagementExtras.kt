@@ -10,7 +10,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.network.apiBody
+import dev.memoh.core.model.ContainerMetrics
+import dev.memoh.core.model.resourceMetrics
+import dev.memoh.core.model.runtimeStatusLabel
 import kotlinx.serialization.json.*
+
+private val resourceJson = Json { ignoreUnknownKeys = true }
 
 private val permissions = listOf("chat" to "对话", "workspace_read" to "读取文件", "workspace_write" to "修改文件", "workspace_exec" to "执行命令", "manage" to "管理 Bot")
 
@@ -37,7 +42,7 @@ internal fun LazyListScope.managementExtras(state: ManagementState, vm: Manageme
             val removalFailed = removal.text("state") == "failed"
             val editable = state.canManageBot && !state.busy && !removing && !removalFailed
             item { GroupLabel("云端工作空间") }
-            item { ManagementRow(if (removing) "正在删除" else if (removalFailed) "删除失败" else if (exists) if (running) "运行中" else "已停止" else "尚未创建", container.text("image"), Icons.Filled.Storage,
+            item { ManagementRow(if (removing) "正在删除" else if (removalFailed) "删除失败" else if (exists) runtimeStatusLabel(container.text("status")) else "尚未创建", container.text("image"), Icons.Filled.Storage,
                 onClick = { vm.showResult(container) }) }
             if (removing || removalFailed) item {
                 ManagementNotice(if (removing) "删除正在后台执行，完成后会更新状态。" else "删除未完成，工作空间仍需处理。服务端不会自动重试，请选择重试或保留工作空间。", removalFailed)
@@ -70,9 +75,10 @@ internal fun LazyListScope.managementExtras(state: ManagementState, vm: Manageme
             val metrics = state.data["metrics"].obj()
             if (metrics.flag("supported")) {
                 item { GroupLabel("资源使用") }
-                val values = metrics["metrics"].obj()
-                val usage = listOf("CPU" to "${values["cpu"].obj().text("usage_percent")}%", "内存" to sizeText(values["memory"].obj().text("usage_bytes")), "存储" to sizeText(values["storage"].obj().text("used_bytes")))
-                itemsIndexed(usage) { index, entry -> ManagementRow(entry.first, entry.second, Icons.Filled.Speed, index, usage.size) }
+                val usage = runCatching { resourceJson.decodeFromJsonElement<ContainerMetrics>(metrics) }
+                    .getOrDefault(ContainerMetrics()).resourceMetrics()
+                itemsIndexed(usage) { index, entry -> ManagementRow(entry.label, entry.value,
+                    when (index) { 0 -> Icons.Filled.Speed; 1 -> Icons.Filled.Memory; else -> Icons.Filled.Storage }, index, usage.size) }
                 val limits = metrics["resource_limits"].obj()
                 val desired = limits["desired"].obj()
                 val capabilities = limits["capabilities"].obj()

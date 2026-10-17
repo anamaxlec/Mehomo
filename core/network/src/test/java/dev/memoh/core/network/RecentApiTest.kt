@@ -20,6 +20,13 @@ class RecentApiTest {
     @Before fun start() { server = MockWebServer(); server.start() }
     @After fun stop() { server.shutdown() }
     private fun api() = MemohApi(OkHttpClient(), ServerEndpoint(ServerKind.SelfHosted, server.url("/").toString().trimEnd('/'), "", ""), json, auth)
+    @Test fun runtimeControlsDecodeTheServersStringCommandKinds() = runTest {
+        server.enqueue(MockResponse().setBody("""{"session_id":"s","commands":[{"name":"status","kind":"read"},{"name":"compact","kind":"operation"},{"name":"review","kind":"turn"}]}"""))
+        val controls = api().runtimeControls("b", "s")
+        assertEquals(listOf("read", "operation", "turn"), controls.commands!!.map { it.kind })
+        assertEquals(listOf("status", "compact", "review"), controls.commands!!.map { it.name })
+        assertEquals("/bots/b/sessions/s/runtime-controls", server.takeRequest().path)
+    }
     @Test fun deletionAccepts202AndFailedRemovalCanBeWithdrawn() = runTest {
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"status":"accepted"}"""))
         api().deleteWorkspace("b", true)

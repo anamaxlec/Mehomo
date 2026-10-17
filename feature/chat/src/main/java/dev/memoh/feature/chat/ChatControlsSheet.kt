@@ -62,8 +62,14 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
                     MemohComposerTextField(text, { text = it }, "追加内容", !state.busy, Modifier.fillMaxWidth())
                 }
                 ControlActions {
-                    MemohActionButton("加入后续", Icons.Filled.PlaylistAdd, { viewModel.enqueue(text, false); text = "" }, enabled = !state.busy && text.isNotBlank(), primary = true)
-                    if (state.queue.steerSupported) MemohActionButton("插话", Icons.Filled.Forum, { viewModel.enqueue(text, true); text = "" }, enabled = !state.busy && text.isNotBlank() && state.isRunning)
+                    MemohActionButton("加入后续", Icons.Filled.PlaylistAdd, {
+                        val submitted = text
+                        viewModel.enqueue(submitted, false) { if (text == submitted) text = "" }
+                    }, enabled = !state.busy && text.isNotBlank(), primary = true)
+                    if (state.queue.steerSupported) MemohActionButton("插话", Icons.Filled.Forum, {
+                        val submitted = text
+                        viewModel.enqueue(submitted, true) { if (text == submitted) text = "" }
+                    }, enabled = !state.busy && text.isNotBlank() && state.isRunning)
                 }
             listOf(false to state.queue.followUp, true to state.queue.steer).forEach { (steer, queue) ->
                 if (queue.isNotEmpty()) Text(if (steer) "插话" else "后续", style = MaterialTheme.typography.labelLarge)

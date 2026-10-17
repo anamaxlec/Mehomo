@@ -14,9 +14,9 @@ import dev.memoh.core.model.UIStreamEvent
 import dev.memoh.core.model.SessionActivityEvent
 import dev.memoh.core.network.ChatSocket
 import dev.memoh.core.network.MemohApi
-import dev.memoh.core.network.SocketStatus
 import dev.memoh.core.network.SessionRunStatusReducer
 import dev.memoh.core.network.sessionStatusSocket
+import dev.memoh.core.network.managementRead
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -40,6 +40,7 @@ data class SessionsUiState(
      * called.
      */
     val loading: Boolean = false,
+    val refreshing: Boolean = false,
     val initialized: Boolean = false,
     val sessions: List<Session> = emptyList(),
     val nextCursor: String? = null,
@@ -61,11 +62,16 @@ data class SessionsUiState(
     /** Session pending a delete confirmation. */
     val deleting: Session? = null,
     val creating: Boolean = false,
+    val selecting: Boolean = false,
+    val selectedSessions: Set<String> = emptySet(),
+    val exampleCapabilities: Map<String, Boolean> = emptyMap(),
+    val examplesLoading: Boolean = false,
+    val deletingSelected: Boolean = false,
     val runStates: Map<String, RuntimeState> = emptyMap(),
     val compactingSessions: Set<String> = emptySet(),
 ) {
     /** Sessions matching [query], if one is set. */
-    private val visible: List<Session>
+    val visibleSessions: List<Session>
         get() = if (query.isBlank()) {
             sessions
         } else {
@@ -73,8 +79,8 @@ data class SessionsUiState(
         }
 
     /** Today's sessions sort above older ones, matching the web client. */
-    val today: List<Session> get() = visible.filter { it.isFromToday() }
-    val earlier: List<Session> get() = visible.filterNot { it.isFromToday() }
+    val today: List<Session> get() = visibleSessions.filter { it.isFromToday() }
+    val earlier: List<Session> get() = visibleSessions.filterNot { it.isFromToday() }
 
     /** Folders matching [query]; a folder match keeps its sessions reachable. */
     val visibleFolders: List<Workdir>
@@ -118,6 +124,7 @@ class SessionsViewModel @Inject constructor(
     private var botId: String? = null
     private var loadJob: Job? = null
     private var pageJob: Job? = null
+    private var examplesJob: Job? = null
     private var statusSocket: ChatSocket? = null
     private var observation = 0L
     private val runCursors = mutableMapOf<String, RuntimeState>()
@@ -144,45 +151,43 @@ class SessionsViewModel @Inject constructor(
                     next.run?.configurationOnly != previous.run?.configurationOnly)
                     _state.update { it.copy(runStates = it.runStates + (sessionId to next)) }
             }
-        }, onStatus = { status ->
-            if (attempt == observation && generation == repository.generation && status != SocketStatus.Connected) {
-                runCursors.clear()
-                _state.update { it.copy(runStates = emptyMap()) }
-            }
-        }).also { socket ->
+        }, onStatus = {}).also { socket ->
             socket.observeSessions(state.value.sessions.map { it.id }.toSet())
             socket.connect()
         }
     }
 
-    fun stopObservingRuns() {
+    fun stopObservingRuns(clearStates: Boolean = false) {
         observation++
         statusSocket?.close(); statusSocket = null
-        runCursors.clear()
-        _state.update { it.copy(runStates = emptyMap(), compactingSessions = emptySet()) }
+        // Navigation and transport loss do not mean that a server task stopped.
+        if (clearStates) runCursors.clear()
+        _state.update { it.copy(runStates = if (clearStates) emptyMap() else it.runStates, compactingSessions = emptySet()) }
     }
 
-    /** Reloads the bot list on return so management changes appear in the main screen. */
+    /** Initial load; returning to an initialized screen syncs without a refresh gesture. */
     fun start() {
-        if (!state.value.loading) loadBots()
+        if (!state.value.initialized && !state.value.loading) loadBots()
     }
 
-    fun selectTab(tab: BotTab) = _state.update { it.copy(tab = tab) }
+    fun sync() { if (!state.value.deletingSelected && state.value.initialized && !state.value.loading) loadBots() }
+
+    fun selectTab(tab: BotTab) { if (!state.value.deletingSelected) _state.update { it.copy(tab = tab, selecting = false, selectedSessions = emptySet()) } }
 
     fun setQuery(query: String) { if (query.isBlank() && state.value.searchingAllTitles) stopTitleSearch(); _state.update { it.copy(query = query) } }
     fun stopTitleSearch() { pageJob?.cancel(); _state.update { it.copy(loadingMore = false, searchingAllTitles = false) } }
     fun searchAllTitles() = loadPages(all = true)
 
-    private fun loadBots() {
+    private fun loadBots(refreshing: Boolean = false) {
         loadJob?.cancel()
         pageJob?.cancel()
         val generation = repository.generation
         _state.update { it.copy(loadingMore = false, searchingAllTitles = false) }
         loadJob = viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null) }
+            _state.update { it.copy(loading = true, refreshing = refreshing, error = null) }
             val api = repository.api()
             if (api == null) {
-                _state.update { it.copy(loading = false, initialized = true, error = "未登录") }
+                _state.update { it.copy(loading = false, refreshing = false, initialized = true, error = "未登录") }
                 return@launch
             }
             runCatching { api.bots() }.fold(
@@ -191,12 +196,12 @@ class SessionsViewModel @Inject constructor(
                     currentCoroutineContext().ensureActive()
                     if (generation != repository.generation) return@launch
                     if (bots.isEmpty()) {
-                        stopObservingRuns(); botId = null
+                        stopObservingRuns(clearStates = true); botId = null
                         // Signed in, but the account has no bot yet. Not an
                         // error: the empty state explains it better than a
                         // spinner or a red bar would.
                         _state.update {
-                            it.copy(loading = false, initialized = true, bots = emptyList(), bot = null, sessions = emptyList(), folders = emptyList(), nextCursor = null)
+                            it.copy(loading = false, refreshing = false, initialized = true, bots = emptyList(), bot = null, sessions = emptyList(), folders = emptyList(), nextCursor = null)
                         }
                         return@launch
                     }
@@ -205,9 +210,11 @@ class SessionsViewModel @Inject constructor(
                     if (generation != repository.generation) return@launch
                     val selected = preferredBot(bots, botId ?: lastBot) ?: return@launch
                     val changed = botId != selected.id
-                    if (changed) stopObservingRuns()
+                    if (changed) { stopObservingRuns(clearStates = true); examplesJob?.cancel() }
                     _state.update { it.copy(initialized = true, bots = bots, bot = selected,
                         sessions = if (changed) emptyList() else it.sessions, folders = if (changed) emptyList() else it.folders,
+                        selecting = if (changed) false else it.selecting, selectedSessions = if (changed) emptySet() else it.selectedSessions,
+                        exampleCapabilities = if (changed) emptyMap() else it.exampleCapabilities, examplesLoading = if (changed) false else it.examplesLoading,
                         nextCursor = if (changed) null else it.nextCursor, creating = if (changed) false else it.creating) }
                     botId = selected.id
                     settings.setLastBotId(selected.id)
@@ -217,7 +224,7 @@ class SessionsViewModel @Inject constructor(
                     if (error is CancellationException) throw error
                     if (generation != repository.generation) return@launch
                     _state.update {
-                        it.copy(loading = false, initialized = true, error = describeFailure("加载 Bot 失败", error))
+                        it.copy(loading = false, refreshing = false, initialized = true, error = describeFailure("加载 Bot 失败", error))
                     }
                 },
             )
@@ -226,26 +233,27 @@ class SessionsViewModel @Inject constructor(
 
     /** Switches the list to another bot. */
     fun selectBot(bot: Bot) {
-        if (bot.status == "deleting") return
+        if (bot.status == "deleting" || state.value.deletingSelected) return
         if (botId == bot.id) return
-        stopObservingRuns()
+        stopObservingRuns(clearStates = true)
+        examplesJob?.cancel()
         botId = bot.id
-        _state.update { it.copy(bot = bot, sessions = emptyList(), folders = emptyList(), nextCursor = null, loadingMore = false, searchingAllTitles = false, loadMoreError = null) }
+        _state.update { it.copy(bot = bot, sessions = emptyList(), folders = emptyList(), selecting = false, selectedSessions = emptySet(), exampleCapabilities = emptyMap(), examplesLoading = false, nextCursor = null, loadingMore = false, searchingAllTitles = false, loadMoreError = null) }
         viewModelScope.launch { settings.setLastBotId(bot.id) }
         loadSessions(bot.id)
     }
 
-    fun refresh() { loadBots() }
+    fun refresh() { if (!state.value.deletingSelected) loadBots(refreshing = true) }
 
     private fun loadSessions(id: String) {
         loadJob?.cancel()
         pageJob?.cancel()
         val generation = repository.generation
         loadJob = viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null, loadingMore = false, searchingAllTitles = false, loadMoreError = null) }
+            _state.update { it.copy(loading = true, refreshing = false, error = null, loadingMore = false, searchingAllTitles = false, loadMoreError = null) }
             val api = repository.api()
             if (api == null) {
-                _state.update { it.copy(loading = false, error = "未登录") }
+                _state.update { it.copy(loading = false, refreshing = false, error = "未登录") }
                 return@launch
             }
             readSessions(id, api, generation)
@@ -261,12 +269,12 @@ class SessionsViewModel @Inject constructor(
             catch (e: CancellationException) { throw e }
             catch (_: Exception) { emptyList() }
         val sessions = runCatching {
-            var page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50)
+            var page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, hideScheduleRuns = true)
             var items = page.items
             // Refresh every loaded page so returning from a chat retains older rows.
             while (items.size < count && !page.nextCursor.isNullOrBlank()) {
                 val cursor = page.nextCursor
-                page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor)
+                page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor, hideScheduleRuns = true)
                 items = appendSessions(items, page.items)
                 if (page.nextCursor == cursor) break
             }
@@ -280,7 +288,9 @@ class SessionsViewModel @Inject constructor(
                 _state.update {
                     it.copy(
                         loading = false,
+                        refreshing = false,
                         sessions = page.items,
+                        selectedSessions = it.selectedSessions.intersect(page.items.map { session -> session.id }.toSet()),
                         nextCursor = page.nextCursor,
                         folders = folders.filter(Workdir::isActive),
                         error = null,
@@ -293,6 +303,7 @@ class SessionsViewModel @Inject constructor(
                 _state.update {
                     it.copy(
                         loading = false,
+                        refreshing = false,
                         folders = folders.filter(Workdir::isActive),
                         error = describeFailure("加载会话失败", error),
                     )
@@ -316,7 +327,7 @@ class SessionsViewModel @Inject constructor(
                 val seen = mutableSetOf<String>()
                 do {
                     check(seen.add(cursor)) { "服务端返回了重复分页游标，请刷新后重试" }
-                    val page = api.sessions(id, types = Session.CHAT_TYPES, limit = if (all) 200 else 50, cursor = cursor)
+                    val page = api.sessions(id, types = Session.CHAT_TYPES, limit = if (all) 200 else 50, cursor = cursor, hideScheduleRuns = true)
                     if (botId != id || generation != repository.generation) return@launch
                     check(page.nextCursor != cursor) { "服务端返回了重复分页游标，请刷新后重试" }
                     _state.update { it.copy(sessions = appendSessions(it.sessions, page.items), nextCursor = page.nextCursor) }
@@ -335,7 +346,7 @@ class SessionsViewModel @Inject constructor(
     fun createSession(workdirId: String? = null, onCreated: (Session) -> Unit) {
         val id = botId ?: return
         val generation = repository.generation
-        if (_state.value.creating) return
+        if (_state.value.creating || state.value.deletingSelected) return
         _state.update { it.copy(creating = true) }
         viewModelScope.launch {
             val api = repository.api()
@@ -408,7 +419,7 @@ class SessionsViewModel @Inject constructor(
                     pageJob?.cancel()
                     _state.update { current ->
                         current.copy(sessions = current.sessions.filterNot { it.id == session.id },
-                            loading = false, loadingMore = false)
+                            loading = false, refreshing = false, loadingMore = false)
                     }
                     statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
                 },
@@ -421,6 +432,75 @@ class SessionsViewModel @Inject constructor(
         }
     }
 
+    fun loadExampleCapabilities() {
+        val id = botId ?: return
+        val generation = repository.generation
+        examplesJob?.cancel()
+        _state.update { it.copy(examplesLoading = true) }
+        examplesJob = viewModelScope.launch {
+            val result = try {
+                val settings = repository.api()?.managementRead("bots", id, "settings") as? kotlinx.serialization.json.JsonObject
+                dev.memoh.core.model.exampleCapabilities(settings)
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { emptyMap() }
+            if (generation == repository.generation && botId == id) _state.update { it.copy(exampleCapabilities = result, examplesLoading = false) }
+        }
+    }
+
+    fun beginSelection(session: Session? = null) = _state.update {
+        it.copy(selecting = true, selectedSessions = session?.let { selected -> setOf(selected.id) } ?: emptySet())
+    }
+
+    fun cancelSelection() { if (!state.value.deletingSelected) _state.update { it.copy(selecting = false, selectedSessions = emptySet()) } }
+
+    fun toggleSelection(id: String) { if (!state.value.deletingSelected) _state.update {
+        it.copy(selectedSessions = if (id in it.selectedSessions) it.selectedSessions - id else it.selectedSessions + id)
+    } }
+
+    fun selectVisible() { if (!state.value.deletingSelected) _state.update {
+        val visible = it.visibleSessions.map { session -> session.id }.toSet()
+        it.copy(selectedSessions = if (visible.all(it.selectedSessions::contains)) it.selectedSessions - visible else it.selectedSessions + visible)
+    } }
+
+    fun deleteSelected() {
+        val id = botId ?: return
+        val selected = state.value.selectedSessions
+        if (selected.isEmpty() || state.value.deletingSelected) return
+        val generation = repository.generation
+        _state.update { it.copy(deletingSelected = true, error = null) }
+        loadJob?.cancel(); pageJob?.cancel()
+        viewModelScope.launch {
+            val failed = mutableSetOf<String>()
+            var failure: String? = null
+            try {
+                val api = repository.api() ?: error("未登录")
+                for (sessionId in selected) {
+                    currentCoroutineContext().ensureActive()
+                    if (generation != repository.generation || botId != id) return@launch
+                    try {
+                        api.deleteSession(id, sessionId)
+                        if (generation != repository.generation || botId != id) return@launch
+                        // A refresh started by an activity event must not restore this row.
+                        loadJob?.cancel(); pageJob?.cancel()
+                        _state.update { it.copy(sessions = it.sessions.filterNot { session -> session.id == sessionId },
+                            selectedSessions = it.selectedSessions - sessionId, runStates = it.runStates - sessionId) }
+                        runCursors.remove(sessionId)
+                    } catch (e: CancellationException) { throw e }
+                    catch (e: Exception) { failed += sessionId; failure = e.userMessage("删除失败，请重试") }
+                }
+                statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { failed += state.value.selectedSessions; failure = e.userMessage("删除失败，请重试") }
+            finally {
+                if (generation == repository.generation && botId == id) _state.update {
+                    it.copy(deletingSelected = false, selecting = failed.isNotEmpty(), selectedSessions = failed,
+                        loading = false, refreshing = false, loadingMore = false, searchingAllTitles = false,
+                        error = if (failed.isEmpty()) null else "${failed.size} 个会话未删除：$failure")
+                }
+            }
+        }
+    }
+
     fun dismissError() = _state.update { it.copy(error = null) }
 
     fun onActivity(event: SessionActivityEvent) {
@@ -430,7 +510,7 @@ class SessionsViewModel @Inject constructor(
             }
             SessionActivityEvent.SESSION_TOUCHED -> event.sessionId?.let { id -> touch(id, event.updatedAt) }
             SessionActivityEvent.SESSION_COMPACTION -> _state.update { it.copy(compactingSessions = event.sessionIds.orEmpty().toSet()) }
-            SessionActivityEvent.SESSION_CREATED, SessionActivityEvent.DROPPED -> refresh()
+            SessionActivityEvent.SESSION_CREATED, SessionActivityEvent.DROPPED -> sync()
         }
     }
 

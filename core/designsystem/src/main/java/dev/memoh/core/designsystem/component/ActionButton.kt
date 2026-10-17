@@ -33,11 +33,14 @@ fun MemohActionButton(
         colors = if (danger) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error,
             contentColor = MaterialTheme.colorScheme.onError) else ButtonDefaults.buttonColors(),
         content = content)
+    else if (danger) TextButton(onClick = onClick, modifier = modifier, enabled = enabled,
+        contentPadding = padding,
+        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        content = content)
     else FilledTonalButton(onClick = onClick, modifier = modifier, enabled = enabled,
         shapes = ButtonDefaults.shapes(), contentPadding = padding,
-        colors = if (danger) ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.errorContainer,
-            contentColor = MaterialTheme.colorScheme.onErrorContainer) else ButtonDefaults.filledTonalButtonColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer),
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer),
         content = content)
 }

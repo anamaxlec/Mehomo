@@ -27,6 +27,7 @@ import dev.memoh.feature.chat.components.ProcessBlock
 import kotlinx.serialization.json.Json
 import org.junit.Rule
 import org.junit.Test
+import org.junit.Assert.assertTrue
 import org.junit.runner.RunWith
 import java.io.File
 
@@ -120,6 +121,74 @@ class ProcessBlockRenderingTest {
         compose.runOnIdle { active = false }
         compose.onNodeWithText("已思考 4 秒").assertIsDisplayed()
         compose.onNodeWithText(reasoning.content).assertIsDisplayed()
+    }
+
+    @Test fun veryLongThoughtsOnlyLayOutVisibleChunksAndCanStillBeClosed() {
+        val thought = reasoning.copy(content = (1..8_000).joinToString("\n") {
+            "检查条目 $it：检查运行状态、保留工具输出，并逐步验证会话恢复。"
+        } + "\n全文末尾")
+        compose.setContent { MemohTheme { Surface {
+            Column(Modifier.fillMaxSize().padding(20.dp)) { ProcessBlock(listOf(thought), false, false) }
+        } } }
+        val started = android.os.SystemClock.elapsedRealtime()
+        compose.onNodeWithText("已思考 4 秒").performClick()
+        compose.onNodeWithContentDescription("思考详情").assertIsDisplayed()
+        val bounds = compose.onNodeWithContentDescription("思考详情").getUnclippedBoundsInRoot()
+        assertTrue(bounds.bottom - bounds.top <= 320.dp)
+        val elapsed = android.os.SystemClock.elapsedRealtime() - started
+        val chunks = compose.onAllNodes(hasText("检查条目", substring = true), useUnmergedTree = true).fetchSemanticsNodes()
+        android.util.Log.i("ChatRegression", "reasoning_chars=${thought.content.length}, opening_ms=$elapsed, composed_chunks=${chunks.size}")
+        assertTrue("Long reasoning must stay virtualized; composed ${chunks.size} chunks", chunks.size < 8)
+        assertTrue("Opening must not block for seconds: ${elapsed}ms", elapsed < 4_000)
+        compose.onNodeWithContentDescription("思考详情").performScrollToNode(hasText("全文末尾", substring = true))
+        compose.onNodeWithContentDescription("思考详情").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.ScrollBy) { it(0f, 10_000f) }
+        compose.onNodeWithText("全文末尾", substring = true).assertIsDisplayed()
+        screenshot("long-reasoning-virtualized")
+        compose.onNodeWithText("已思考 4 秒").performClick()
+        compose.onNodeWithContentDescription("思考详情").assertDoesNotExist()
+        compose.onNodeWithText("已思考 4 秒").performClick()
+        compose.onNodeWithText("全文末尾", substring = true).assertIsDisplayed()
+    }
+
+    @Test fun longThoughtReadingPositionSurvivesClosingItsWholeProcessGroup() {
+        val thought = reasoning.copy(content = (1..400).joinToString("\n") { "阅读位置 $it：继续阅读这一段详细推演。" } + "\n阅读终点")
+        val restoration = StateRestorationTester(compose)
+        restoration.setContent { MemohTheme { Surface {
+            Column(Modifier.fillMaxSize().padding(20.dp)) { ProcessBlock(listOf(thought, read, exec.copy(running = false)), false, false) }
+        } } }
+        compose.onNodeWithText("已探索").performClick()
+        compose.onNodeWithText("已思考 4 秒").performClick()
+        compose.onNodeWithContentDescription("思考详情").performScrollToNode(hasText("阅读终点", substring = true))
+        compose.onNodeWithContentDescription("思考详情").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.ScrollBy) { it(0f, 10_000f) }
+        compose.onNodeWithText("阅读终点", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("已探索").performClick()
+        compose.onNodeWithContentDescription("思考详情").assertDoesNotExist()
+        compose.onNodeWithText("已探索").performClick()
+        compose.onNodeWithText("阅读终点", substring = true).assertIsDisplayed()
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("阅读终点", substring = true).assertIsDisplayed()
+    }
+
+    @Test fun restoringAnActiveConversationDoesNotReplayItsLoadingCover() {
+        val state = ChatUiState(session = Session("resume-session"), historyLoading = false,
+            awaitingSnapshot = false, hasMoreHistory = false, modelCatalogLoading = false,
+            socketStatus = SocketStatus.Connected, runtime = RuntimeState(sessionId = "resume-session",
+                run = RuntimeCurrentRunView(runId = "run", turnId = "turn", messages = listOf(read, exec))))
+        val restoration = StateRestorationTester(compose)
+        restoration.setContent { MemohTheme { ChatScreen(state, {}, {}, {}, {}, {},
+            onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+            onCancelUserInput = { _, _ -> }, onDismissError = {}) } }
+        compose.onNodeWithText("探索中").performClick()
+        compose.onNodeWithText("读取 Main.kt").performClick()
+        compose.onNodeWithText("fun main() = println(\"Hello\")").assertIsDisplayed()
+        compose.onNodeWithText("正在处理…").assertDoesNotExist()
+        compose.mainClock.autoAdvance = false
+        restoration.emulateSavedInstanceStateRestore()
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        compose.onNodeWithText("运行中").assertIsDisplayed()
+        compose.onNodeWithText("fun main() = println(\"Hello\")").assertIsDisplayed()
+        compose.mainClock.autoAdvance = true
     }
 
     private fun screenshot(name: String) {

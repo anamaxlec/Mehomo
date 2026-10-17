@@ -12,8 +12,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
@@ -79,6 +81,12 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
         if (uri != null && model != null) vm.transcribe(context, model, uri)
     }
     val base = listOf("bots", state.botId)
+    val runtimeLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(runtimeLifecycle, state.page, state.botId) {
+        if (state.page == ManagementPage.Workspace) runtimeLifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+            while (true) { kotlinx.coroutines.delay(10_000); vm.refreshWorkspaceState() }
+        }
+    }
     val settings = state.data["settings"].obj()
     val models = state.data["models"].objects()
     val agents = state.data["agents"].objects("items")
@@ -314,10 +322,18 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         item { Actions { MemohActionButton("应用商店", Icons.Filled.Apps, onOpenApps) } }
                         val catalog = state.data["catalog"].objects()
                         val connections = state.data["connections"].objects("items")
+                        val discovery = state.data["connections"].obj()["tool_discovery"].obj()
+                        discovery.text("error").takeIf(String::isNotBlank)?.let { error -> item {
+                            ManagementNotice("连接器工具加载失败：$error", true)
+                        } }
+                        discovery["failed_connections"].objects().forEach { failure -> item {
+                            ManagementNotice("${failure.text("alias").ifBlank { failure.text("connection_id") }}：${failure.text("error")}", true)
+                        } }
                         item { GroupLabel("已连接") }
                         itemsIndexed(connections, key = { _, it -> it.text("connection_id") }) { index, connection ->
                             val path = base + listOf("connectors", connection.text("connection_id"))
-                            ManagementRow(connection.text("alias").ifBlank { connection.text("connector_type") }, connection.text("status"), Icons.Filled.Link,
+                            ManagementRow(connection.text("alias").ifBlank { connection.text("connector_type") },
+                                listOf(connection.text("status"), connection.text("tool_discovery_error").takeIf(String::isNotBlank)?.let { "工具加载失败：$it" }).filterNotNull().joinToString("\n"), Icons.Filled.Link,
                                 index, connections.size, state.canManage && !state.busy, onClick = { vm.write(path, "GET", result = true) }, checked = connection.flag("enabled", true),
                                 onChecked = { vm.write(path, "PATCH", apiBody("enabled" to it)) }, actions = listOf(
                                     MenuAction("重新授权", Icons.Filled.Login) { vm.write(path + "reauth", "POST", result = true) },
@@ -557,6 +573,14 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
 @Composable
 internal fun ManagementRow(title: String, subtitle: String, icon: ImageVector, index: Int = 0, count: Int = 1, enabled: Boolean = true,
     onClick: (() -> Unit)? = null, actions: List<MenuAction> = emptyList(), checked: Boolean? = null, onChecked: (Boolean) -> Unit = {}) {
+    if (onClick == null && checked == null && actions.isEmpty()) {
+        ListItem(headlineContent = { Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium) },
+            supportingContent = { if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodyMedium) },
+            leadingContent = { MemohListIcon(icon, ListIconTone.Secondary) },
+            modifier = Modifier.fillMaxWidth().clip(ListItemDefaults.segmentedShapes(index, count).shape),
+            colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest))
+        return
+    }
     var menuOpen by remember { mutableStateOf(false) }
     SegmentedListItem(onClick ?: { if (checked != null) onChecked(!checked) }, shapes = ListItemDefaults.segmentedShapes(index, count), modifier = Modifier.fillMaxWidth(), enabled = enabled,
         colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
@@ -579,7 +603,8 @@ internal fun GroupLabel(title: String) { Text(title, Modifier.padding(start = 12
 @Composable
 internal fun ManagementNotice(text: String, error: Boolean = false) {
     Surface(Modifier.fillMaxWidth().padding(bottom = 12.dp), shape = MaterialTheme.shapes.large,
-        color = if (error) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer) {
+        color = if (error) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = if (error) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer) {
         Text(text, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
     }
 }

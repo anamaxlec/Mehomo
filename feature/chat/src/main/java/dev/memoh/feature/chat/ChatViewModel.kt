@@ -99,6 +99,10 @@ data class ChatUiState(
     /** Agents (runtime hosts) this session may run on. */
     val agents: List<dev.memoh.core.model.BotAgent> = emptyList(),
     val selectedAgentId: String? = null,
+    val starterPrompts: StarterPromptsResponse = StarterPromptsResponse(),
+    val suggestionsLoading: Boolean = false,
+    val suggestionsError: String? = null,
+    val exampleCapabilities: Map<String, Boolean> = emptyMap(),
     val attachments: List<ChatAttachment> = emptyList(),
     val commandOutput: String? = null,
     val attachmentLoading: Boolean = false,
@@ -230,7 +234,8 @@ data class ChatUiState(
      * on the socket made the whole composer inert while it reconnected, which
      * reads as the app being broken rather than as the network being down.
      */
-    val canCompose: Boolean get() = !busy && session?.isLocal != false
+    val canEditDraft: Boolean get() = !draftRestoring && session != null && session.isLocal
+    val canCompose: Boolean get() = !busy && canEditDraft
 
     /** An idle ledger snapshot may have no blocks; it must never erase persisted output. */
     val liveMessages: List<UIMessage>
@@ -341,11 +346,16 @@ class ChatViewModel @Inject constructor(
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
-    private var socket: ChatSocket? = null
+    @Volatile private var socket: ChatSocket? = null
     private var historyJob: kotlinx.coroutines.Job? = null
     private var sessionInfoJob: kotlinx.coroutines.Job? = null
     private var contextLifecycleJob: Job? = null
     private var openJob: Job? = null
+    private var capabilitiesJob: Job? = null
+    private var operationJob: Job? = null
+    private var controlsJob: Job? = null
+    private var queueJob: Job? = null
+    private var suggestionsJob: Job? = null
     private var attachmentJob: Job? = null
     private var draftAddress: Triple<String, String, String>? = null
     private var draftRevision = 0L
@@ -363,8 +373,14 @@ class ChatViewModel @Inject constructor(
      * and a stale copy in the back stack would show the wrong controls.
      */
     fun open(botId: String, sessionId: String) {
-        if (_state.value.session?.id == sessionId && socket != null) return
+        if (_state.value.botId == botId && _state.value.session?.id == sessionId && socket != null) return
         openJob?.cancel()
+        historyJob?.cancel()
+        capabilitiesJob?.cancel()
+        operationJob?.cancel()
+        controlsJob?.cancel()
+        queueJob?.cancel()
+        suggestionsJob?.cancel()
         contextLifecycleJob?.cancel()
         sessionInfoJob?.cancel()
         attachmentJob?.cancel()
@@ -414,6 +430,7 @@ class ChatViewModel @Inject constructor(
             connectSocket(botId, resolved)
             loadHistory(botId, resolved)
             loadCapabilities(botId, resolved)
+            refreshControls()
             refreshSessionInfo()
         }
     }
@@ -421,20 +438,27 @@ class ChatViewModel @Inject constructor(
     // -- socket -------------------------------------------------------------
 
     private fun connectSocket(botId: String, session: Session) {
-        socket?.close()
+        val previous = socket
+        socket = null
+        previous?.close()
         val generation = repository.generation
         val endpoint = repository.state.value.endpoint
         val api = repository.api()
-        val socket = socketFactory.create(
+        lateinit var connection: ChatSocket
+        connection = socketFactory.create(
             botId = botId,
             endpoint = endpoint,
             api = api,
             scope = viewModelScope,
-            onEvent = ::onStreamEvent,
+            onEvent = { event ->
+                if (socket === connection && generation == repository.generation &&
+                    state.value.botId == botId && state.value.session?.id == session.id) onStreamEvent(event)
+            },
             onStatus = { status ->
                 val current = _state.value
-                if (generation == repository.generation && current.botId == botId && current.session?.id == session.id) {
-                    _state.update { it.copy(socketStatus = status) }
+                if (socket === connection && generation == repository.generation && current.botId == botId && current.session?.id == session.id) {
+                    _state.update { it.copy(socketStatus = status,
+                        awaitingSnapshot = it.awaitingSnapshot || status != SocketStatus.Connected) }
                     if (status == SocketStatus.Connected && current.socketStatus != SocketStatus.Connected) {
                         if (current.historyError != null) loadHistory(botId, session)
                         if (!current.modelCatalogLoading && current.models.isEmpty()) {
@@ -444,10 +468,12 @@ class ChatViewModel @Inject constructor(
                     }
                 }
             },
-            onResubscribeNeeded = { resubscribe() },
+            onResubscribeNeeded = {
+                if (socket === connection && generation == repository.generation) resubscribe()
+            },
         )
-        this.socket = socket
-        socket.connect(session.id)
+        socket = connection
+        connection.connect(session.id)
     }
 
     /**
@@ -462,12 +488,14 @@ class ChatViewModel @Inject constructor(
 
     private fun onStreamEvent(event: UIStreamEvent) {
         val previousRun = _state.value.runtime.run
+        var historyInvalidated = false
         when (event.type) {
             UIStreamEvent.RUNTIME_SNAPSHOT -> {
                 val snapshot = event.snapshot ?: return
                 val sessionId = event.sessionId ?: return
                 val epoch = event.epoch ?: return
                 val seq = event.seq ?: return
+                val previousEpoch = _state.value.runtime.epoch
                 _state.update { current ->
                     // Ignore frames for a session we are no longer showing.
                     if (sessionId != current.session?.id) return@update current
@@ -478,9 +506,18 @@ class ChatViewModel @Inject constructor(
                         eventSeq = seq,
                         snapshot = snapshot,
                     )
-                    current.withRuntime(next, awaitingSnapshot = false)
+                    current.withRuntime(next, awaitingSnapshot = next.needsSnapshot)
                 }
-                if (_state.value.runtime.needsSnapshot) resubscribe()
+                val current = _state.value
+                if (current.runtime.needsSnapshot) resubscribe()
+                else if (current.session?.id == sessionId && current.runtime.epoch == epoch &&
+                    previousEpoch != null && previousEpoch != epoch && current.runtime.run == null) {
+                    // History reset rotates the server epoch and removes the run projection.
+                    // Reconcile with REST before replacing the visible transcript.
+                    historyInvalidated = true
+                    loadHistory(current.botId, requireNotNull(current.session), replace = true)
+                    refreshSessionInfo()
+                }
             }
 
             UIStreamEvent.RUNTIME_DELTA -> {
@@ -576,7 +613,7 @@ class ChatViewModel @Inject constructor(
             draftInvocationId = null
             persistDraft()
         }
-        if (event.type in setOf(UIStreamEvent.RUNTIME_SNAPSHOT, UIStreamEvent.RUNTIME_DELTA) &&
+        if (!historyInvalidated && event.type in setOf(UIStreamEvent.RUNTIME_SNAPSHOT, UIStreamEvent.RUNTIME_DELTA) &&
             previousRun != null && !previousRun.isTerminal && previousRun.configurationOnly != true) {
             val current = _state.value
             if (current.runtime.run == null || current.runtime.run?.isTerminal == true) {
@@ -597,7 +634,8 @@ class ChatViewModel @Inject constructor(
      * A failed request leaves only its own control unavailable.
      */
     private fun loadCapabilities(botId: String, session: Session) {
-        viewModelScope.launch {
+        capabilitiesJob?.cancel()
+        capabilitiesJob = viewModelScope.launch {
             val api = repository.api() ?: return@launch
 
             launch {
@@ -686,7 +724,7 @@ class ChatViewModel @Inject constructor(
         val current = state.value
         val session = current.session ?: return
         if (current.busy) return
-        viewModelScope.launch {
+        operationJob = viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null, errorProblem = null, notice = null) }
             try { work(repository.api() ?: error("未登录"), current, session) }
             catch (e: CancellationException) { throw e }
@@ -743,14 +781,38 @@ class ChatViewModel @Inject constructor(
         loadCapabilities(current.botId, updated)
     }
 
-    fun refreshControls() {
+    fun refreshQueue(force: Boolean = false) {
+        if (queueJob?.isActive == true && !force) return
+        queueJob?.cancel()
         val current = state.value
         val session = current.session ?: return
-        viewModelScope.launch {
+        val generation = repository.generation
+        queueJob = viewModelScope.launch {
             val api = repository.api() ?: return@launch
-            try { val queue = api.queue(current.botId, session.id); _state.update { it.copy(queue = queue) } }
-            catch (e: CancellationException) { throw e }
-            catch (e: Exception) { _state.update { it.copy(controlsError = "队列：${e.userMessage()}") } }
+            try {
+                val queue = api.queue(current.botId, session.id)
+                _state.update {
+                    if (generation == repository.generation && it.botId == current.botId && it.session?.id == session.id)
+                        it.copy(queue = queue, controlsError = it.controlsError?.takeUnless { error -> error.startsWith("队列：") })
+                    else it
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                _state.update {
+                    if (generation == repository.generation && it.botId == current.botId && it.session?.id == session.id)
+                        it.copy(controlsError = "队列：${e.userMessage()}") else it
+                }
+            }
+        }
+    }
+
+    fun refreshControls() {
+        refreshQueue()
+        val current = state.value
+        val session = current.session ?: return
+        controlsJob?.cancel()
+        controlsJob = viewModelScope.launch {
+            val api = repository.api() ?: return@launch
             try {
                 val controls = api.runtimeControls(current.botId, session.id)
                 val goal = if (controls.capabilities?.goal == true) api.runtimeGoal(current.botId, session.id)["goal"]?.takeIf { it !is JsonNull }?.let { json.decodeFromJsonElement(RuntimeGoal.serializer(), it) } else null
@@ -759,22 +821,31 @@ class ChatViewModel @Inject constructor(
             catch (e: Exception) { _state.update { it.copy(controlsError = "运行控制：${e.userMessage()}") } }
         }
     }
-    fun enqueue(text: String, steer: Boolean) = operation { api, current, session ->
-        require(text.isNotBlank()) { "请输入内容" }
-        api.enqueue(current.botId, session.id, text, steer, UUID.randomUUID().toString())
-        _state.update { it.copy(draft = "", notice = "已加入${if (steer) "插话" else "后续"}队列") }; refreshControls()
+    fun enqueue(text: String, steer: Boolean, onSuccess: () -> Unit = {}) {
+        val revision = draftRevision
+        operation { api, current, session ->
+            require(text.isNotBlank()) { "请输入内容" }
+            api.enqueue(current.botId, session.id, text.trim(), steer, UUID.randomUUID().toString())
+            currentCoroutineContext().ensureActive()
+            // Clear the submitted draft on disk as well, without erasing any
+            // newer text entered while the request was in flight.
+            if (draftRevision == revision) setDraft("")
+            _state.update { it.copy(notice = "已加入${if (steer) "插话" else "后续"}队列") }
+            onSuccess()
+            refreshQueue(force = true)
+        }
     }
     fun editQueue(item: QueueItem, text: String, steer: Boolean) = operation { api, current, session ->
-        api.editQueueItem(current.botId, session.id, item.itemId, text, steer); refreshControls()
+        api.editQueueItem(current.botId, session.id, item.itemId, text, steer); refreshQueue(force = true)
     }
     fun deleteQueue(item: QueueItem, steer: Boolean) = operation { api, current, session ->
-        api.removeQueueItem(current.botId, session.id, item.itemId, steer); refreshControls()
+        api.removeQueueItem(current.botId, session.id, item.itemId, steer); refreshQueue(force = true)
     }
     fun moveQueueUp(item: QueueItem, before: QueueItem, steer: Boolean) = operation { api, current, session ->
-        api.reorderQueue(current.botId, session.id, item.itemId, before.itemId, steer); refreshControls()
+        api.reorderQueue(current.botId, session.id, item.itemId, before.itemId, steer); refreshQueue(force = true)
     }
     fun promoteQueue(item: QueueItem) = operation { api, current, session ->
-        api.promoteQueueItem(current.botId, session.id, item.itemId); refreshControls()
+        api.promoteQueueItem(current.botId, session.id, item.itemId); refreshQueue(force = true)
     }
     fun setMode(id: String, kind: String) = operation { api, current, session ->
         api.setRuntimeMode(current.botId, session.id, id, kind); refreshControls()
@@ -807,6 +878,17 @@ class ChatViewModel @Inject constructor(
         _state.update { it.copy(commandOutput = output.takeIf(String::isNotBlank), notice = "快捷操作已完成") }
     }
 
+    /** Resync on resume without clearing content; slow context requests finish before the next poll. */
+    suspend fun observeSession() {
+        if (state.value.runtime.sessionId != null && state.value.socketStatus == SocketStatus.Connected) resubscribe()
+        while (true) {
+            refreshQueue()
+            refreshSessionInfo()
+            sessionInfoJob?.join()
+            delay(if (state.value.isRunning) 5_000 else 30_000)
+        }
+    }
+
     fun refreshSessionInfo() {
         sessionInfoJob?.cancel()
         val current = state.value
@@ -822,7 +904,8 @@ class ChatViewModel @Inject constructor(
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
-                _state.update { if (it.session?.id == session.id) it.copy(sessionInfoLoading = false, sessionInfoError = e.userMessage("上下文信息加载失败")) else it }
+                _state.update { if (repository.generation == generation && it.botId == current.botId && it.session?.id == session.id)
+                    it.copy(sessionInfoLoading = false, sessionInfoError = e.userMessage("上下文信息加载失败")) else it }
             }
         }
     }
@@ -915,6 +998,7 @@ class ChatViewModel @Inject constructor(
                                 } && page.items.any { !it.id.isNullOrBlank() },
                             )
                         }
+                        if (before == null && _state.value.history.isEmpty() && session.isLocal) loadStarterPrompts()
                         if (before == null && _state.value.session?.title.isNullOrBlank()) {
                             val refreshed = try { api.session(botId, session.id) }
                                 catch (e: CancellationException) { throw e }
@@ -1002,6 +1086,23 @@ class ChatViewModel @Inject constructor(
         }
         if (!session.isLocal) {
             _state.update { it.copy(error = "此会话来自外部渠道，只能查看") }
+            return
+        }
+
+        val queueCommand = parseQueueCommand(trimmed, current.controls?.commands.orEmpty().mapNotNull { it.name })
+        if (current.isRunning || queueCommand != null) {
+            val selector = trimmed.takeIf { it.startsWith('/') }?.drop(1)?.takeWhile { !it.isWhitespace() }
+            val runtimeCommand = selector != null && current.controls?.commands.orEmpty().any { it.name == selector }
+            if (queueCommand == null && (runtimeCommand || selector != null &&
+                    session.runtimeType !in listOf(null, "model") && current.controls == null)) {
+                _state.update { it.copy(error = "请在会话控制中执行运行命令") }
+                return
+            }
+            if (current.attachments.isNotEmpty()) {
+                _state.update { it.copy(error = "排队和插话仅支持文字，请在当前任务结束后发送附件") }
+                return
+            }
+            enqueue(queueCommand?.text ?: trimmed, queueCommand?.steer == true)
             return
         }
 
@@ -1129,6 +1230,49 @@ class ChatViewModel @Inject constructor(
             } } finally {
                 if (address == draftAddress && readId == attachmentReadId) _state.update { it.copy(attachmentLoading = false) }
                 onConsumed()
+            }
+        }
+    }
+
+    fun loadStarterPrompts(refresh: Boolean = false) {
+        if (suggestionsJob?.isActive == true) return
+        val current = state.value
+        val account = repository.state.value.account ?: return
+        val address = draftAddress ?: return
+        val generation = repository.generation
+        val locale = "zh-CN"
+        _state.update { it.copy(suggestionsLoading = true, suggestionsError = null) }
+        suggestionsJob = viewModelScope.launch {
+            fun matches() = generation == repository.generation && address == draftAddress
+            try {
+                val cached = try { settings.starterPrompts(account.accountId, account.teamId.orEmpty(), current.botId, locale) }
+                    catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { null }
+                if (!matches()) return@launch
+                val held = current.starterPrompts.takeIf { it.items.isNotEmpty() } ?: cached
+                if (held != null) _state.update { it.copy(starterPrompts = held) }
+                val api = repository.api() ?: error("请先登录")
+                // Capability probes are optional; lack of permission does not prove a missing capability.
+                val capabilities = try { exampleCapabilities(api.managementRead("bots", current.botId, "settings").jsonObject,
+                    state.value.workspaceTargets.isNotEmpty()) }
+                    catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { emptyMap() }
+                if (!matches()) return@launch
+                _state.update { it.copy(exampleCapabilities = capabilities) }
+                val response = if (refresh) api.refreshStarterPrompts(current.botId, locale, held?.items.orEmpty().map { it.prompt })
+                    else api.starterPrompts(current.botId, locale, held?.hash)
+                if (!matches()) return@launch
+                val resolved = resolveStarterPrompts(held, response)
+                _state.update { it.copy(starterPrompts = resolved, suggestionsLoading = false,
+                    suggestionsError = if (refresh && (response.unchanged || response.items.isEmpty())) "暂时没有新的推荐，可以稍后再试。" else null) }
+                if (resolved.hash.isNotBlank()) try {
+                    settings.saveStarterPrompts(account.accountId, account.teamId.orEmpty(), current.botId, locale, resolved)
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { /* A cache write must not discard visible suggestions. */ }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (matches()) _state.update { it.copy(suggestionsLoading = false,
+                    suggestionsError = if (refresh) e.userMessage("推荐暂时不可用，请稍后重试") else null) }
             }
         }
     }

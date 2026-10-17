@@ -144,6 +144,27 @@ data class ScheduleLogs(
 )
 
 @Serializable
+data class ScheduleRunSession(
+    @SerialName("log_id") val logId: String = "",
+    @SerialName("session_id") val sessionId: String = "",
+    val title: String = "",
+    val status: String = "running",
+    @SerialName("started_at") val startedAt: String? = null,
+    @SerialName("completed_at") val completedAt: String? = null,
+    @SerialName("error_code") val errorCode: String? = null,
+)
+
+@Serializable
+data class StarterPrompt(val title: String, val prompt: String)
+
+@Serializable
+data class StarterPromptsResponse(
+    val hash: String = "",
+    val items: List<StarterPrompt> = emptyList(),
+    val unchanged: Boolean = false,
+)
+
+@Serializable
 data class TokenUsageSummary(
     @SerialName("acp_agent") val acpAgent: List<DailyTokenUsage>? = null,
     @SerialName("by_model") val byModel: List<ModelTokenUsage>? = null,
@@ -220,6 +241,7 @@ data class ContainerMetricsPayloadResponse(
 
 @Serializable
 data class ContainerCPUMetricsResponse(
+    val cores: Long? = null,
     @SerialName("kernel_nanoseconds") val kernelNanoseconds: Long? = null,
     @SerialName("usage_nanocores") val usageNanocores: Long? = null,
     @SerialName("usage_nanoseconds") val usageNanoseconds: Long? = null,
@@ -238,6 +260,7 @@ data class ContainerMemoryMetricsResponse(
 data class ContainerStorageMetricsResponse(
     val path: String? = null,
     @SerialName("used_bytes") val usedBytes: Long? = null,
+    @SerialName("limit_bytes") val limitBytes: Long? = null,
 )
 
 @Serializable
@@ -381,6 +404,7 @@ data class Connector(
     @SerialName("connector_type") val connectorType: String? = null,
     val enabled: Boolean? = null,
     val status: String? = null,
+    @SerialName("tool_discovery_error") val toolDiscoveryError: String? = null,
 )
 
 @Serializable
@@ -622,7 +646,7 @@ data class RuntimeCommand(
     @SerialName("running_text") val runningText: String? = null,
 )
 
-typealias RuntimeCommandKind = JsonObject
+typealias RuntimeCommandKind = String
 
 @Serializable
 data class RuntimeModeState(

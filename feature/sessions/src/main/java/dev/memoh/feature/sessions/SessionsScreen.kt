@@ -30,6 +30,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material3.Checkbox
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -142,8 +147,26 @@ fun SessionsScreen(
     onNewFolderSession: (Workdir) -> Unit = {},
     modifier: Modifier = Modifier,
     onBarExpandedChange: (Boolean) -> Unit = {},
+    onBeginSelection: (Session?) -> Unit = {},
+    onToggleSelection: (String) -> Unit = {},
+    onSelectVisible: () -> Unit = {},
+    onCancelSelection: () -> Unit = {},
+    onDeleteSelected: () -> Unit = {},
+    onOpenExamples: () -> Unit = {},
 ) {
     var searching by remember { mutableStateOf(false) }
+    BackHandler(searching) { searching = false; onQueryChange("") }
+    var actionsOpen by remember(state.bot?.id, state.tab) { mutableStateOf(false) }
+    BackHandler(actionsOpen) { actionsOpen = false }
+    var confirmBatchDelete by rememberSaveable(state.bot?.id) { mutableStateOf(false) }
+    BackHandler(state.selecting) { if (!state.deletingSelected) onCancelSelection() }
+    if (confirmBatchDelete) AlertDialog(
+        onDismissRequest = { confirmBatchDelete = false },
+        title = { Text("删除 ${state.selectedSessions.size} 个会话") },
+        text = { Text("所选会话及其历史将被删除，此操作不可撤销。") },
+        confirmButton = { MemohActionButton("删除", Icons.Filled.DeleteOutline, { confirmBatchDelete = false; onDeleteSelected() }, danger = true) },
+        dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { confirmBatchDelete = false }) },
+    )
     var folderDetails by remember(state.bot?.id) { mutableStateOf<Workdir?>(null) }
     folderDetails?.let { folder ->
         AlertDialog(onDismissRequest = { folderDetails = null }, title = { Text(folder.name) },
@@ -159,6 +182,10 @@ fun SessionsScreen(
     // navigation bar visible before the new pane starts scrolling.
     androidx.compose.runtime.LaunchedEffect(state.tab) {
         onBarExpandedChange(true)
+        if (state.tab != BotTab.Chats && searching) {
+            searching = false
+            onQueryChange("")
+        }
     }
 
     Scaffold(
@@ -182,7 +209,9 @@ fun SessionsScreen(
                         label = "searchSwitch",
                     ) { isSearching ->
                         Box(modifier = Modifier.fillMaxWidth()) {
-                            if (isSearching) {
+                            if (state.selecting) {
+                                Text("选择会话", style = MaterialTheme.typography.titleLarge)
+                            } else if (isSearching) {
                                 SearchField(
                                     query = state.query,
                                     onQueryChange = onQueryChange,
@@ -210,16 +239,26 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
-                    if (!searching && state.bot?.can("manage") == true) IconButton(onCreateFolder) {
-                        Icon(Icons.Filled.CreateNewFolder, "新建文件夹")
-                    }
                     AnimatedVisibility(
-                        visible = !searching,
+                        visible = !searching && !state.selecting && state.tab == BotTab.Chats,
                         enter = MemohMotion.controlEnter(),
                         exit = MemohMotion.controlExit(),
                     ) {
-                        IconButton(onClick = { searching = true }) {
-                            Icon(Icons.Filled.Search, contentDescription = "搜索")
+                        Row {
+                            IconButton(onClick = { searching = true }) {
+                                Icon(Icons.Filled.Search, contentDescription = "搜索")
+                            }
+                            Box {
+                                IconButton({ actionsOpen = true }) { Icon(Icons.Filled.MoreVert, "会话列表操作") }
+                                MemohPopupMenu(actionsOpen, { actionsOpen = false }, Alignment.TopEnd) {
+                                    if (state.bot?.can("chat") == true) MemohMenuRow("使用示例", Icons.Filled.Lightbulb,
+                                        { actionsOpen = false; onOpenExamples() })
+                                    if (state.bot?.can("manage") == true) MemohMenuRow("新建文件夹", Icons.Filled.CreateNewFolder,
+                                        { actionsOpen = false; onCreateFolder() })
+                                    MemohMenuRow("选择会话", Icons.Filled.Checklist,
+                                        { actionsOpen = false; onBeginSelection(null) }, enabled = state.sessions.isNotEmpty())
+                                }
+                            }
                         }
                     }
                 },
@@ -227,14 +266,24 @@ fun SessionsScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (state.selecting) Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.large,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onCancelSelection, enabled = !state.deletingSelected) { Icon(Icons.Filled.Close, "退出多选") }
+                    Text("已选 ${state.selectedSessions.size} 个", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                    TextButton(onSelectVisible, enabled = !state.deletingSelected) { Text("全选当前列表") }
+                    if (state.deletingSelected) LoadingIndicator(Modifier.size(32.dp))
+                    else IconButton({ confirmBatchDelete = true }, enabled = state.selectedSessions.isNotEmpty()) { Icon(Icons.Filled.DeleteOutline, "删除所选会话") }
+                }
+            }
             TabSwitcher(
                 selected = state.tab,
                 onSelect = onSelectTab,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
             )
 
-        MemohRefreshBox(refreshing = state.loading && state.sessions.isNotEmpty() && state.tab == BotTab.Chats,
-            onRefresh = onRetry, enabled = state.tab == BotTab.Chats && state.initialized,
+        MemohRefreshBox(refreshing = state.refreshing && state.sessions.isNotEmpty() && state.tab == BotTab.Chats,
+            onRefresh = onRetry, enabled = !state.deletingSelected && state.tab == BotTab.Chats && state.initialized,
             modifier = Modifier.fillMaxSize()) {
             // Tab switches get a shared-axis style transition: the incoming pane
             // slides in from the direction of the tapped segment while fading up,
@@ -321,6 +370,8 @@ fun SessionsScreen(
                             onLoadMore = onLoadMore,
                             onSearchAllTitles = onSearchAllTitles,
                             onStopTitleSearch = onStopTitleSearch,
+                            onBeginSelection = { onBeginSelection(it) },
+                            onToggleSelection = onToggleSelection,
                         )
                     }
                 }
@@ -550,6 +601,8 @@ private fun SessionList(
     onLoadMore: () -> Unit,
     onSearchAllTitles: () -> Unit,
     onStopTitleSearch: () -> Unit,
+    onBeginSelection: (Session) -> Unit,
+    onToggleSelection: (String) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -584,6 +637,8 @@ private fun SessionList(
                     onClick = { onOpenSession(session) },
                     onRename = { onBeginRename(session) },
                     onDelete = { onBeginDelete(session) },
+                    selecting = state.selecting, selected = session.id in state.selectedSessions, enabled = !state.deletingSelected,
+                    onSelect = { onBeginSelection(session) }, onToggle = { onToggleSelection(session.id) },
                 )
             }
         }
@@ -600,6 +655,8 @@ private fun SessionList(
                     onClick = { onOpenSession(session) },
                     onRename = { onBeginRename(session) },
                     onDelete = { onBeginDelete(session) },
+                    selecting = state.selecting, selected = session.id in state.selectedSessions, enabled = !state.deletingSelected,
+                    onSelect = { onBeginSelection(session) }, onToggle = { onToggleSelection(session.id) },
                 )
             }
         }
@@ -681,14 +738,21 @@ private fun SessionRow(
     onClick: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    selecting: Boolean = false,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    onSelect: () -> Unit = {},
+    onToggle: () -> Unit = {},
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     SegmentedListItem(
-        onClick = onClick,
+        onClick = if (selecting) onToggle else onClick,
+        enabled = enabled,
         shapes = ListItemDefaults.segmentedShapes(index, count),
         modifier = Modifier.fillMaxWidth(),
         colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
         contentPadding = PaddingValues(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+        leadingContent = if (selecting) ({ Checkbox(selected, { onToggle() }, enabled = enabled) }) else null,
         supportingContent = if (!session.isLocal) ({
                 Text(text = session.channelType?.takeIf(String::isNotBlank) ?: "外部渠道",
                     style = MaterialTheme.typography.bodySmall,
@@ -702,7 +766,7 @@ private fun SessionRow(
                 else CircularProgressIndicator(Modifier.size(18.dp).semantics { contentDescription = if (compacting) "正在整理上下文" else "任务进行中" },
                     color = MaterialTheme.colorScheme.primary, strokeWidth = 2.dp)
             }
-            Box {
+            if (!selecting) Box {
             IconButton(onClick = { menuOpen = true }) {
                 Icon(Icons.Filled.MoreVert, contentDescription = "更多操作")
             }
@@ -711,6 +775,8 @@ private fun SessionRow(
                 onDismiss = { menuOpen = false },
                 alignment = Alignment.BottomEnd,
             ) {
+                MemohMenuRow(title = "多选", icon = Icons.Filled.Checklist,
+                    onClick = { menuOpen = false; onSelect() })
                 MemohMenuRow(
                     title = "重命名",
                     icon = Icons.Filled.Edit,

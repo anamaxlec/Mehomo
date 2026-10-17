@@ -42,7 +42,7 @@ fun MemohComposerTextField(value: String, onValueChange: (String) -> Unit, place
         keyboardOptions = KeyboardOptions(imeAction = if (singleLine) ImeAction.Send else ImeAction.Default),
         keyboardActions = KeyboardActions(onSend = { onSend() }),
         maxLines = maxLines,
-        modifier = modifier.heightIn(min = 44.dp, max = if (singleLine) 64.dp else 220.dp),
+        modifier = modifier.heightIn(min = 48.dp, max = if (singleLine) 64.dp else 220.dp),
         decorationBox = { input ->
             OutlinedTextFieldDefaults.DecorationBox(value = value, innerTextField = input,
                 enabled = enabled, singleLine = singleLine, visualTransformation = VisualTransformation.None,
@@ -58,13 +58,13 @@ fun MemohComposerIconButton(icon: ImageVector, contentDescription: String, enabl
     onClick: () -> Unit, filled: Boolean = false, danger: Boolean = false) {
     val scheme = MaterialTheme.colorScheme
     val content: @Composable () -> Unit = { Icon(icon, contentDescription, Modifier.size(22.dp)) }
-    if (filled) FilledIconButton(onClick, shapes = IconButtonDefaults.shapes(), enabled = enabled,
+    if (filled) FilledIconButton(onClick, modifier = Modifier.size(48.dp), shapes = IconButtonDefaults.shapes(), enabled = enabled,
         colors = IconButtonDefaults.filledIconButtonColors(
             containerColor = if (danger) scheme.errorContainer else scheme.primary,
             contentColor = if (danger) scheme.onErrorContainer else scheme.onPrimary,
             disabledContainerColor = scheme.surfaceContainerHighest,
             disabledContentColor = scheme.onSurfaceVariant), content = content)
-    else IconButton(onClick, shapes = IconButtonDefaults.shapes(), enabled = enabled,
+    else IconButton(onClick, modifier = Modifier.size(48.dp), shapes = IconButtonDefaults.shapes(), enabled = enabled,
         colors = IconButtonDefaults.iconButtonColors(contentColor = scheme.onSurfaceVariant), content = content)
 }
 

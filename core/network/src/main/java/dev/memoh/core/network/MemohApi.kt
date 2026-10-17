@@ -171,11 +171,13 @@ class MemohApi(
         types: String? = Session.CHAT_TYPES,
         limit: Int = 50,
         cursor: String? = null,
+        hideScheduleRuns: Boolean = false,
     ): ListResponse<Session> {
         val query = buildString {
             append("?limit=").append(limit)
             if (types != null) append("&types=").append(types)
             if (cursor != null) append("&cursor=").append(java.net.URLEncoder.encode(cursor, "UTF-8"))
+            if (hideScheduleRuns) append("&hide_schedule_runs=true")
         }
         return request("/bots/$botId/sessions$query")
     }

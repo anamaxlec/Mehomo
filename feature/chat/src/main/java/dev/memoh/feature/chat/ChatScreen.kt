@@ -1,10 +1,8 @@
 package dev.memoh.feature.chat
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
@@ -74,12 +72,16 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.memoh.core.designsystem.component.MemohPopupMenu
 import dev.memoh.core.designsystem.component.MemohMenuRow
 import dev.memoh.core.designsystem.component.MemohMenuDivider
@@ -93,6 +95,7 @@ import dev.memoh.feature.chat.components.ApprovalPanel
 import androidx.compose.material.icons.filled.Image
 import dev.memoh.feature.chat.components.Composer
 import dev.memoh.feature.chat.components.ComposerAttachments
+import dev.memoh.feature.chat.components.ComposerQueue
 import dev.memoh.feature.chat.components.ChatHistoryPlaceholder
 import dev.memoh.feature.chat.components.MessageActions
 import dev.memoh.feature.chat.components.MessageActionsHeight
@@ -123,7 +126,6 @@ private fun LazyListScope.assistantMessages(
         }
     }
 }
-
 /**
  * The conversation screen.
  *
@@ -157,10 +159,14 @@ fun ChatScreen(
     /** Opens one of the bot's other surfaces (terminal, browser, desktop). */
     onOpenSurface: (BotSurface) -> Unit = {},
     onOpenControls: () -> Unit = {},
+    onPromoteQueue: (dev.memoh.core.model.QueueItem) -> Unit = {},
+    onRemoveQueued: (dev.memoh.core.model.QueueItem, Boolean) -> Unit = { _, _ -> },
     onNewSession: () -> Unit = {},
     onRefreshContext: () -> Unit = {},
     onInspectContext: () -> Unit = {},
     onOpenFeature: (String) -> Unit = {},
+    onRefreshSuggestions: () -> Unit = {},
+    onConfigureExample: (String) -> Unit = {},
     onPickAttachment: (Boolean) -> Unit = {},
     onTakePhoto: () -> Unit = {},
     onRemoveAttachment: (Int) -> Unit = {},
@@ -177,12 +183,26 @@ fun ChatScreen(
     val liveMessages = state.liveMessages
     val liveUsers = state.liveUserTurns
     val run = state.runtime.run
-    var initiallyPositioned by remember(state.session?.id) { mutableStateOf(false) }
-    val historyPlaceholder = remember(state.session?.id) {
-        MutableTransitionState(!initiallyPositioned && state.historyError == null)
+    val queueCommand = remember(state.draft, state.controls?.commands) {
+        parseQueueCommand(state.draft, state.controls?.commands.orEmpty().mapNotNull { it.name })
     }
-    historyPlaceholder.targetState = !initiallyPositioned && state.historyError == null
-    var followingLatest by remember(state.session?.id) { mutableStateOf(true) }
+    var initiallyPositioned by rememberSaveable(state.session?.id) { mutableStateOf(false) }
+    val showHistoryPlaceholder = (!initiallyPositioned || state.historyLoading && settled.isEmpty() && liveMessages.isEmpty()) && state.historyError == null
+    val historyPlaceholder = remember(state.session?.id) {
+        MutableTransitionState(showHistoryPlaceholder)
+    }
+    historyPlaceholder.targetState = showHistoryPlaceholder
+    var followingLatest by rememberSaveable(state.session?.id) { mutableStateOf(true) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    var resumeScrollPending by remember(state.session?.id) { mutableStateOf(false) }
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { resumed = false }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        resumeScrollPending = true
+        resumed = true
+    }
     var jumpingToLatest by remember(state.session?.id) { mutableStateOf(false) }
     var loadingHistoryImages by remember(state.session?.id) { mutableIntStateOf(0) }
     val onHistoryImageLoading = remember(state.session?.id) {
@@ -214,12 +234,15 @@ fun ChatScreen(
             followingLatest = atBottom
         }
     }
-    LaunchedEffect(state.session?.id) {
+    LaunchedEffect(state.session?.id, resumed) {
+        if (!resumed) return@LaunchedEffect
         // Layout also changes while a reasoning/phase panel is folding, after
         // the last socket frame. Follow those frames as well as text appends.
         androidx.compose.runtime.snapshotFlow { Triple(latestState, listState.layoutInfo, loadingHistoryImages) }.conflate().collect {
             androidx.compose.runtime.withFrameNanos { }
             if (latestState.historyLoading) return@collect
+            if (!initiallyPositioned && latestState.awaitingSnapshot && latestState.runtime.sessionId == null &&
+                latestState.socketStatus != SocketStatus.Reconnecting && latestState.socketStatus != SocketStatus.Closed) return@collect
             if (jumpingToLatest) return@collect
             if (latestState.settledHistory.isEmpty() && latestState.liveMessages.isEmpty() &&
                 latestState.liveUserTurns.isEmpty() && latestState.pending.isEmpty() && !latestState.isRunning) {
@@ -229,14 +252,17 @@ fun ChatScreen(
             if ((!initiallyPositioned || followingLatest) && listState.layoutInfo.totalItemsCount > 0) {
                 // A drag can cancel this scroll without cancelling the follower.
                 coroutineScope {
-                    launch { listState.scrollToLatest(scrollSpec.takeIf { initiallyPositioned }) }
+                    launch { listState.scrollToLatest(scrollSpec.takeIf { initiallyPositioned && !resumeScrollPending }) }
                 }
                 // The first scroll may need another measurement, especially
                 // when the last Markdown block is taller than the viewport.
                 androidx.compose.runtime.withFrameNanos { }
                 // A decoded image can grow beyond its loading placeholder.
                 // Keep the first reveal covered until that height is measured.
-                if (atBottom && loadingHistoryImages == 0) initiallyPositioned = true
+                if (atBottom && loadingHistoryImages == 0) {
+                    initiallyPositioned = true
+                    resumeScrollPending = false
+                }
             }
         }
     }
@@ -272,6 +298,7 @@ fun ChatScreen(
                         ConnectionLine(
                             status = state.socketStatus,
                             isRunning = state.isRunning,
+                            initialLoading = state.awaitingSnapshot && state.runtime.sessionId == null,
                         )
                     }
                 },
@@ -338,7 +365,7 @@ fun ChatScreen(
 
                     !state.historyLoading && settled.isEmpty() && liveMessages.isEmpty() && liveUsers.isEmpty() && state.pending.isEmpty() && !state.isRunning -> {
                         EmptyConversation(
-                            onPick = onSend,
+                            state = state, onPick = onDraftChange, onRefresh = onRefreshSuggestions, onConfigure = onConfigureExample,
                             modifier = Modifier.align(Alignment.Center)
                                 .graphicsLayer { alpha = transcriptAlpha },
                         )
@@ -490,11 +517,17 @@ fun ChatScreen(
                             text = state.draft,
                             onTextChange = onDraftChange,
                             onSend = { onSend(state.draft) },
+                            sendDescription = when {
+                                queueCommand?.steer == true -> "插话"
+                                state.isRunning || queueCommand != null -> "加入后续队列"
+                                else -> "发送"
+                            },
                             onStop = onStop,
                             isRunning = state.isRunning,
                             // Controls stay usable while the socket reconnects;
                             // only the send action itself needs a connection.
                             enabled = state.canCompose,
+                            textEnabled = state.canEditDraft,
                             sendEnabled = state.canSend,
                             hasAttachments = state.attachments.isNotEmpty(),
                             attachmentLoading = state.attachmentLoading,
@@ -567,15 +600,11 @@ fun ChatScreen(
                             },
                             above = {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    ComposerQueue(state.queue, state.isRunning, state.busy,
+                                        onOpenControls, onPromoteQueue, onRemoveQueued)
                                     run?.let { current ->
-                                        AnimatedVisibility(
-                                            visible = !current.isTerminal,
-                                            enter = expandVertically(MaterialTheme.motionScheme.fastSpatialSpec()) +
-                                                fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
-                                            exit = shrinkVertically(MaterialTheme.motionScheme.fastSpatialSpec()) +
-                                                fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
-                                        ) {
-                                            RunPhaseLine(phase = current.retry?.description() ?: phaseLabel(current.status))
+                                        current.retry?.takeUnless { current.isTerminal }?.let { retry ->
+                                            RunPhaseLine(phase = retry.description())
                                         }
                                         // Pending decisions are handled in order,
                                         // one at a time.
@@ -671,7 +700,7 @@ private suspend fun LazyListState.scrollToLatest(animationSpec: AnimationSpec<Fl
 
 /** Connection and run state, in one line so the two never compete for space. */
 @Composable
-private fun ConnectionLine(status: SocketStatus, isRunning: Boolean) {
+private fun ConnectionLine(status: SocketStatus, isRunning: Boolean, initialLoading: Boolean) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -686,6 +715,12 @@ private fun ConnectionLine(status: SocketStatus, isRunning: Boolean) {
                 )
             }
 
+            initialLoading && status != SocketStatus.Reconnecting && status != SocketStatus.Closed -> {
+                dev.memoh.core.designsystem.component.MemohSkeleton(description = "正在连接会话") {
+                    dev.memoh.core.designsystem.component.MemohSkeletonBlock(Modifier.width(56.dp).height(12.dp))
+                }
+            }
+
             status == SocketStatus.Connected -> {
                 MemohStatusDot(MemohStatus.Online, size = 6.dp)
                 Text(
@@ -698,7 +733,7 @@ private fun ConnectionLine(status: SocketStatus, isRunning: Boolean) {
             status == SocketStatus.Connecting || status == SocketStatus.Reconnecting -> {
                 MemohStatusDot(MemohStatus.Warning, size = 6.dp)
                 Text(
-                    text = "重连中…",
+                    text = if (status == SocketStatus.Reconnecting) "重连中…" else "连接中…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -717,36 +752,7 @@ private fun ConnectionLine(status: SocketStatus, isRunning: Boolean) {
 }
 
 @Composable
-private fun EmptyConversation(
-    onPick: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier.padding(horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        MemohEmptyState(
-            title = "开始对话",
-            description = "Bot 在它的云电脑上执行任务，你可以随时查看进度",
-        )
-        PromptStarters(
-            starters = listOf(
-                "帮我查一下最近的新闻",
-                "总结一个网页的内容",
-                "写一个脚本处理文件",
-            ),
-            onPick = onPick,
-        )
-    }
-}
-
-/** Maps a run status to the short phrase shown above the composer. */
-private fun phaseLabel(status: String): String = when (status) {
-    dev.memoh.core.model.RunStatus.ADMITTING -> "正在受理…"
-    dev.memoh.core.model.RunStatus.RUNNING -> "正在处理…"
-    dev.memoh.core.model.RunStatus.WAITING_DECISION -> "等待你的决定"
-    dev.memoh.core.model.RunStatus.ABORTING -> "正在停止…"
-    dev.memoh.core.model.RunStatus.FINISHING -> "正在收尾…"
-    else -> "处理中…"
+private fun EmptyConversation(state: ChatUiState, onPick: (String) -> Unit, onRefresh: () -> Unit,
+    onConfigure: (String) -> Unit, modifier: Modifier = Modifier) {
+    ConversationSuggestions(state, onPick, onRefresh, onConfigure, modifier)
 }

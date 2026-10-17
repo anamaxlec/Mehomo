@@ -36,8 +36,8 @@ fun MemohPageTopBar(
     val colors = TopAppBarDefaults.topAppBarColors(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        titleContentColor = MaterialTheme.colorScheme.primary,
-        actionIconContentColor = MaterialTheme.colorScheme.primary,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     val titleContent: @Composable () -> Unit = {
         Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -47,8 +47,8 @@ fun MemohPageTopBar(
             FilledTonalIconButton(onClick = back, enabled = backEnabled,
                 shapes = IconButtonDefaults.shapes(),
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                 )) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", Modifier.size(22.dp))
             }
@@ -66,7 +66,7 @@ fun MemohPageTopBar(
             Layout(modifier = Modifier.matchParentSize().windowInsetsPadding(windowInsets),
                 content = {
                     Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = MaterialTheme.colorScheme.onSurface,
                         style = lerp(MaterialTheme.typography.headlineLarge, MaterialTheme.typography.titleLarge, fraction))
                 }) { measurables, constraints ->
                 val start = (16.dp.toPx() + (if (onBack != null) 56.dp.toPx() else 0f) * fraction).roundToInt()

@@ -27,7 +27,7 @@ fun SessionContextIndicator(state: ChatUiState, onRefresh: () -> Unit, onInspect
     var open by remember(state.session?.id) { mutableStateOf(false) }
     BackHandler(open) { open = false }
     val usage = state.sessionInfo?.contextUsage ?: ContextUsage()
-    val window = usage.window(state.modelContextWindow)
+    val window = state.sessionInfo?.contextUsage?.window(state.modelContextWindow)
     val fraction = window?.let { usage.tokens.toDouble() / it }
     val percent = (fraction ?: 0.0) * 100
     val roundedPercent = percent.roundToInt()
@@ -37,17 +37,17 @@ fun SessionContextIndicator(state: ChatUiState, onRefresh: () -> Unit, onInspect
         MaterialTheme.motionScheme.defaultEffectsSpec(), label = "contextUsage")
     Box {
         TextButton(onClick = { open = !open; if (open) onRefresh() }, enabled = state.session != null,
-            shape = RoundedCornerShape(6.dp), contentPadding = PaddingValues(horizontal = 6.dp),
+            shape = MaterialTheme.shapes.large, contentPadding = PaddingValues(horizontal = 8.dp),
             colors = ButtonDefaults.textButtonColors(contentColor = tint,
                 containerColor = if (open) colors.surfaceContainerHighest else Color.Transparent),
-            modifier = Modifier.height(40.dp).widthIn(min = 40.dp).semantics {
+            modifier = Modifier.heightIn(min = 48.dp).widthIn(min = 48.dp).semantics {
                 contentDescription = if (window == null) "会话信息，点击查看上下文"
                     else "会话信息，上下文已用 $roundedPercent%"
             }) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 CircularProgressIndicator(progress = { progress }, modifier = Modifier.size(16.dp),
                     color = tint, trackColor = tint.copy(alpha = .4f), strokeWidth = 2.dp, strokeCap = StrokeCap.Round)
-                if (window != null) Text("$roundedPercent%", style = MaterialTheme.typography.labelLarge)
+                Text(if (window != null) "$roundedPercent%" else "--", style = MaterialTheme.typography.labelLarge)
             }
         }
         MemohPopupMenu(open, { open = false }, Alignment.BottomEnd, width = 320.dp, maxHeight = 320.dp, aboveAnchor = true) {
@@ -55,7 +55,7 @@ fun SessionContextIndicator(state: ChatUiState, onRefresh: () -> Unit, onInspect
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (window != null) Text("$roundedPercent%", style = MaterialTheme.typography.titleMedium, color = contextPressureColor(percent))
                     val estimated = if (usage.estimatedTokens != null) "~" else ""
-                    Text("$estimated${formatTokens(usage.tokens)} / ${window?.let(::formatTokens) ?: "--"}",
+                    Text(if (state.sessionInfo == null) "正在加载上下文" else "$estimated${formatTokens(usage.tokens)} / ${window?.let(::formatTokens) ?: "--"}",
                         Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     IconButton({ open = false; onInspect() }, modifier = Modifier.size(32.dp), enabled = state.session != null) {

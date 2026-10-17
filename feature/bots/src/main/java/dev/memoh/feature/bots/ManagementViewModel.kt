@@ -9,6 +9,8 @@ import dev.memoh.core.network.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
@@ -101,6 +103,23 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(loading = false, error = errorText(e)) } }
         }
+    }
+
+    suspend fun refreshWorkspaceState() {
+        val current = state.value
+        if (current.page != ManagementPage.Workspace || current.busy || current.loading || !current.loaded) return
+        val generation = repository.generation
+        val api = repository.api() ?: return
+        suspend fun read(vararg path: String): JsonElement? = try { api.managementRead(*path) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { null }
+        val updates = coroutineScope {
+            val container = async { read("bots", current.botId, "container") }
+            val metrics = async { read("bots", current.botId, "container", "metrics") }
+            listOfNotNull(container.await()?.let { "container" to it }, metrics.await()?.let { "metrics" to it }).toMap()
+        }
+        if (generation == repository.generation && state.value.botId == current.botId && state.value.page == current.page && !state.value.busy)
+            _state.update { it.copy(data = it.data + updates) }
     }
 
     private suspend fun load(api: MemohApi, current: ManagementState): Pair<Bot?, Map<String, JsonElement>> {

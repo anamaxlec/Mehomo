@@ -83,6 +83,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 
 /**
  * The app's navigation graph.
@@ -125,6 +126,12 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
     val navigation = rememberSectionNavigationState()
     val start = remember { if (session.loggedIn) Routes.MAIN else Routes.LOGIN }
     var selectedShare by rememberSaveable(stateSaver = ShareSelectionSaver) { mutableStateOf<Pair<ChatTarget, SharedContent>?>(null) }
+    val openPrefilledSession: (String, String, String) -> Unit = { bot, id, prompt ->
+        session.account?.let { account ->
+            selectedShare = ChatTarget(account.accountId, bot, id) to SharedContent(java.util.UUID.randomUUID().toString(), prompt, emptyList())
+            navController.navigate(Routes.chat(bot, id))
+        }
+    }
     if (session.loggedIn && sharedContent != null) ShareTargetDialog(onShareConsumed) { bot, id ->
         selectedShare = ChatTarget(session.account!!.accountId, bot, id) to sharedContent
         onShareConsumed()
@@ -209,6 +216,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 },
                 onOpenManagement = { botId, page -> navController.navigate(Routes.management(botId, page.name)) },
                 onOpenHistory = { navController.navigate(Routes.HISTORY) },
+                onPrefillSession = openPrefilledSession,
             )
         }
 
@@ -246,6 +254,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             }
             BotFeatureScreen(state.forScreen(botId, feature, viewModel), viewModel, onBack = { navController.popBackStack() },
                 onOpenConnectors = { navController.navigate(Routes.management(botId, ManagementPage.Connectors.name)) },
+                onTryApp = { name -> viewModel.startAppDemo(name) { created, prompt -> openPrefilledSession(botId, created.id, prompt) } },
                 onOpenSession = { navController.navigate(Routes.chat(botId, it)) })
         }
 
@@ -266,8 +275,20 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
         ) { entry ->
             val botId = entry.arguments?.getString(Routes.ARG_BOT_ID).orEmpty()
             val sessionId = entry.arguments?.getString(Routes.ARG_SESSION_ID).orEmpty()
-            val viewModel: ChatViewModel = hiltViewModel()
-            val state by viewModel.state.collectAsState()
+            // Keep one current chat on the signed-in shell, including while its
+            // destination is popped. Reopening it must not discard a live run.
+            val chatOwner = remember(entry) { navController.getBackStackEntry(Routes.MAIN) }
+            val viewModel: ChatViewModel = hiltViewModel(chatOwner)
+            val observedState by viewModel.state.collectAsState()
+            val state = observedState.takeIf { it.botId == botId && it.session?.id == sessionId }
+                ?: dev.memoh.feature.chat.ChatUiState(botId = botId)
+            val lifecycleOwner = LocalLifecycleOwner.current
+            LaunchedEffect(lifecycleOwner, viewModel, state.session?.id, state.selectedModelId, state.runtime.run?.runId) {
+                if (state.session == null) return@LaunchedEffect
+                lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                    viewModel.observeSession()
+                }
+            }
             val context = LocalContext.current
             var controlsOpen by remember { mutableStateOf(false) }
             var pendingImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
@@ -297,7 +318,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 }
             }
             LaunchedEffect(selectedShare?.second?.id, state.session?.id, state.draftRestoring) {
-                selectedShare?.takeIf { it.first.botId == botId && it.first.sessionId == sessionId &&
+                selectedShare?.takeIf { it.first.accountId == session.account?.accountId && it.first.botId == botId && it.first.sessionId == sessionId &&
                     state.session?.id == sessionId && !state.draftRestoring }?.let {
                     viewModel.importShared(context, it.second.text, it.second.uris)
                     selectedShare = null
@@ -356,10 +377,14 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onSelectAgent = viewModel::selectAgent,
                 onSelectEffort = viewModel::selectReasoningEffort,
                 onOpenControls = { controlsOpen = true },
+                onPromoteQueue = viewModel::promoteQueue,
+                onRemoveQueued = viewModel::deleteQueue,
                 onNewSession = viewModel::newSession,
                 onRefreshContext = viewModel::refreshSessionInfo,
                 onInspectContext = viewModel::openContextInspector,
                 onOpenFeature = { navController.navigate(Routes.feature(botId, it)) },
+                onRefreshSuggestions = { viewModel.loadStarterPrompts(refresh = true) },
+                onConfigureExample = { navController.navigate(Routes.management(botId, exampleSettingsPage(it).name)) },
                 onPickAttachment = { images -> attachmentPicker.launch(if (images) arrayOf("image/*") else arrayOf("*/*")) },
                 onTakePhoto = {
                     val file = java.io.File.createTempFile("photo-", ".jpg", java.io.File(context.cacheDir, "capture").apply { mkdirs() })
@@ -392,6 +417,7 @@ private fun MainShell(
     onOpenSession: (botId: String, sessionId: String) -> Unit,
     onOpenManagement: (botId: String, page: ManagementPage) -> Unit,
     onOpenHistory: () -> Unit,
+    onPrefillSession: (String, String, String) -> Unit,
 ) {
     val rtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
     fun openSection(section: MainSection, motion: SectionMotion) {
@@ -414,7 +440,7 @@ private fun MainShell(
                 Lifecycle.Event.ON_START -> {
                     features.observeActivity(sessionsState.bot?.id.orEmpty(), sessions::onActivity)
                     sessions.observeRuns()
-                    if (!sessions.state.value.loading && sessions.state.value.sessions.isNotEmpty()) sessions.refresh()
+                    sessions.sync()
                 }
                 Lifecycle.Event.ON_STOP -> { features.stopObserving(); sessions.stopObservingRuns() }
                 else -> Unit
@@ -432,7 +458,7 @@ private fun MainShell(
     }
 
     val pageStates = rememberSaveableStateHolder()
-    val showNewSession = section == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Chats && sessionsState.bot != null && LocalFloatingNavigationPadding.current > 0.dp
+    val showNewSession = section == MainSection.Chats && sessionsState.tab == dev.memoh.feature.sessions.BotTab.Chats && sessionsState.bot != null && !sessionsState.selecting && LocalFloatingNavigationPadding.current > 0.dp
 
     Scaffold(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
@@ -451,6 +477,8 @@ private fun MainShell(
                             viewModel = sessions,
                             state = sessionsState,
                             onOpenSession = onOpenSession,
+                            onPrefillSession = onPrefillSession,
+                            onConfigureExample = { onOpenManagement(sessionsState.bot?.id.orEmpty(), exampleSettingsPage(it)) },
                             onBarExpandedChange = { navigation.barExpanded = it },
                             onBotSettings = { openSection(MainSection.Profile, SectionMotion.Push) },
                             scheduleContent = { BotFeatureScreen(featureState.forScreen(sessionsState.bot?.id.orEmpty(), BotFeature.Schedules, features), features, showTitle = false,
@@ -480,6 +508,7 @@ private fun MainShell(
                             featureState.forScreen(sessionsState.bot?.id.orEmpty(), sectionState.feature, features), features,
                             onBack = { openSection(MainSection.Profile, SectionMotion.Pop) },
                             onOpenConnectors = { onOpenManagement(sessionsState.bot?.id.orEmpty(), ManagementPage.Connectors) },
+                            onTryApp = { name -> features.startAppDemo(name) { created, prompt -> onPrefillSession(sessionsState.bot?.id.orEmpty(), created.id, prompt) } },
                             onOpenSession = { onOpenSession(sessionsState.bot?.id.orEmpty(), it) })
                         else PendingSectionScreen(section = sectionState)
                     }
@@ -528,6 +557,8 @@ private fun SessionsSection(
     viewModel: SessionsViewModel,
     state: dev.memoh.feature.sessions.SessionsUiState,
     onOpenSession: (botId: String, sessionId: String) -> Unit,
+    onPrefillSession: (String, String, String) -> Unit,
+    onConfigureExample: (String) -> Unit,
     onBarExpandedChange: (Boolean) -> Unit,
     onBotSettings: () -> Unit,
     scheduleContent: @Composable () -> Unit,
@@ -537,6 +568,13 @@ private fun SessionsSection(
     val folders: dev.memoh.feature.sessions.FolderEditorViewModel = hiltViewModel()
     val folderState by folders.state.collectAsState()
     var folderEditorOpen by remember(state.bot?.id) { mutableStateOf(false) }
+    var examplesOpen by rememberSaveable(state.bot?.id) { mutableStateOf(false) }
+    if (examplesOpen) dev.memoh.core.designsystem.component.ChatExampleGallery(state.exampleCapabilities, loading = state.examplesLoading, onPick = { example ->
+        examplesOpen = false
+        val missing = example.missing(state.exampleCapabilities)
+        if (missing.isNotEmpty()) onConfigureExample(missing.first())
+        else viewModel.createSession { created -> onPrefillSession(state.bot?.id.orEmpty(), created.id, example.prompt) }
+    }, onDismiss = { examplesOpen = false })
     DisposableEffect(folders) { onDispose { folders.stop() } }
     LaunchedEffect(folderState.saved, folderEditorOpen) {
         if (folderEditorOpen && folderState.saved) { folderEditorOpen = false; folders.stop(); viewModel.refresh() }
@@ -554,6 +592,12 @@ private fun SessionsSection(
         onBeginDelete = viewModel::beginDelete,
         onCancelDelete = viewModel::cancelDelete,
         onConfirmDelete = viewModel::delete,
+        onBeginSelection = viewModel::beginSelection,
+        onToggleSelection = viewModel::toggleSelection,
+        onSelectVisible = viewModel::selectVisible,
+        onCancelSelection = viewModel::cancelSelection,
+        onDeleteSelected = viewModel::deleteSelected,
+        onOpenExamples = { viewModel.loadExampleCapabilities(); examplesOpen = true },
         onDismissError = viewModel::dismissError,
         onRetry = viewModel::refresh,
         onLoadMore = viewModel::loadMore,
@@ -570,4 +614,12 @@ private fun SessionsSection(
         onNewFolderSession = { folder -> viewModel.createSession(folder.id) { onOpenSession(state.bot?.id.orEmpty(), it.id) } },
         onBarExpandedChange = onBarExpandedChange,
     )
+}
+
+private fun exampleSettingsPage(capability: String): ManagementPage = when (capability) {
+    "web_search" -> ManagementPage.Services
+    "workspace" -> ManagementPage.Workspace
+    "email" -> ManagementPage.Connectors
+    "channel" -> ManagementPage.Channels
+    else -> ManagementPage.Bot
 }

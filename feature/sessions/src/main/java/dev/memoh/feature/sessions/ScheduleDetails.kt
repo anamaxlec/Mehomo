@@ -47,7 +47,7 @@ internal fun ScheduleSummary(schedule: BotSchedule, timezone: String?) {
 
 internal fun scheduleLogStatus(status: String?): String = when (status) {
     "running", "started" -> "执行中"
-    "success", "succeeded", "completed" -> "已完成"
+    "ok", "success", "succeeded", "completed" -> "已完成"
     "error", "failed" -> "执行失败"
     "cancelled", "canceled", "aborted" -> "已取消"
     "timeout", "timed_out" -> "执行超时"

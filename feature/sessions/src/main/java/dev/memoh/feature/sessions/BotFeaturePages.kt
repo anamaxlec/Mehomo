@@ -25,6 +25,7 @@ internal class BotFeaturePages {
             graph = null, logs = null, logSchedule = null, removal = null,
             logsLoading = false, logsError = null, scheduleOptionsLoading = false, scheduleOptionsError = null,
             mcpAuthorization = null, mcpExport = null,
+            scheduleRuns = state.scheduleRuns.mapValues { (_, runs) -> runs.copy(loading = false) },
         )
     }
 }
