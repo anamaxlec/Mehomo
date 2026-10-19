@@ -9,6 +9,26 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ChatHistoryTest {
+    @Test fun `Grok runtime commands wait for an idle native session`() {
+        val grok = ChatUiState(session = dev.memoh.core.model.Session("s", runtimeType = "grok-build"))
+        assertTrue(grok.runtimeCommandsAvailable)
+        assertFalse(grok.copy(busy = true).runtimeCommandsAvailable)
+        val running = grok.copy(runtime = run("running", emptyList()))
+        assertFalse(running.runtimeCommandsAvailable)
+        assertTrue(running.copy(session = running.session!!.copy(runtimeType = "codex")).runtimeCommandsAvailable)
+    }
+    @Test fun `external forks follow each durable turn flag including Grok latest prompt anchors`() {
+        val turn = UITurn(turnId = "latest", role = "assistant", runtimeForkable = true)
+        for (runtime in listOf("codex", "claude-code", "grok-build", "acp_agent")) {
+            val state = ChatUiState(session = dev.memoh.core.model.Session("s", runtimeType = runtime))
+            assertTrue("$runtime can fork an anchored turn", state.canFork(turn))
+            assertFalse(state.canFork(turn.copy(runtimeForkable = false)))
+            assertFalse(state.canFork(turn.copy(runtimeForkable = null)))
+            assertFalse(state.copy(session = state.session!!.copy(channelType = "telegram")).canFork(turn))
+            assertFalse(state.copy(runtime = run("running", emptyList())).canFork(turn))
+        }
+        assertFalse(ChatUiState(session = dev.memoh.core.model.Session("s", runtimeType = "future-runtime")).canFork(turn))
+    }
     @Test fun `retry admission decodes UUID history anchors and replaces only the assistant tail`() {
         val operation = kotlinx.serialization.json.Json.decodeFromString<dev.memoh.core.model.RuntimeRunOperation>(
             """{"kind":"retry","replace_from_message_id":"550e8400-e29b-41d4-a716-446655440000"}""")

@@ -1,6 +1,9 @@
 package dev.memoh.feature.sessions
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -20,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -64,6 +68,9 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
         onDispose { lifecycle.removeObserver(observer); viewModel.stop(botId, surface) }
     }
     var input by remember(botId, surface) { mutableStateOf("") }
+    var clipboardNotice by remember(botId, surface) { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    LaunchedEffect(state.connected) { clipboardNotice = null }
     var webProgress by remember(state.browser?.id) { mutableIntStateOf(0) }
     var prepareConfirm by remember { mutableStateOf(false) }
     val workspaceTheme = WorkspaceWebTheme(MaterialTheme.colorScheme)
@@ -71,8 +78,14 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
     fun sendInput() {
         if (input.isEmpty() || !state.connected) return
         if (surface == WorkspaceSurface.Terminal && !viewModel.terminalInput((input + "\r").toByteArray())) return
-        if (surface == WorkspaceSurface.Desktop) webView?.evaluateJavascript("desktopText(${JsonPrimitive(input)});", null)
-        input = ""
+        if (surface == WorkspaceSurface.Desktop) {
+            val text = input
+            val view = webView ?: return
+            view.evaluateJavascript("desktopText(${JsonPrimitive(text)});") { sent ->
+                if (webView !== view) return@evaluateJavascript
+                if (sent == "true") { if (input == text) input = "" } else viewModel.desktopInputFailed()
+            }
+        } else input = ""
     }
     LaunchedEffect(webView, botId, surface) {
         val view = webView ?: return@LaunchedEffect
@@ -171,6 +184,24 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
                     Text(state.prepareMessage ?: "正在准备桌面环境…", style = MaterialTheme.typography.bodySmall)
                 }
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (surface == WorkspaceSurface.Desktop) {
+                        MemohActionButton("粘贴到桌面", Icons.Filled.ContentPaste, {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+                            if (text == null) clipboardNotice = "剪贴板中没有文字"
+                            else if (!validDesktopClipboard(text)) viewModel.clipboardError("workspace.display_clipboard_too_large")
+                            else webView?.evaluateJavascript("desktopPaste(${JsonPrimitive(text)});") { sent ->
+                                if (sent == "true") clipboardNotice = "已发送到桌面" else if (sent == "false") viewModel.desktopInputFailed()
+                            }
+                        }, enabled = state.connected)
+                        MemohActionButton("复制桌面内容", Icons.Filled.ContentCopy, {
+                            state.remoteClipboard?.let { text ->
+                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                                    .setPrimaryClip(ClipData.newPlainText("远程桌面", text))
+                                clipboardNotice = "已复制桌面剪贴板"
+                            }
+                        }, enabled = state.connected && state.remoteClipboard != null)
+                    }
                     val keys = if (surface == WorkspaceSurface.Terminal) listOf("Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003", "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "Enter" to "\r")
                         else listOf("Esc" to "Escape", "Tab" to "Tab", "↑" to "ArrowUp", "↓" to "ArrowDown", "←" to "ArrowLeft", "→" to "ArrowRight", "Enter" to "Enter", "删除" to "Backspace")
                     keys.forEach { (label, key) -> FilledTonalButton(onClick = {
@@ -182,6 +213,7 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
                             contentColor = MaterialTheme.colorScheme.onSurface),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) { Text(label, style = MaterialTheme.typography.labelMedium) } }
                 }
+                clipboardNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 MemohCompactComposer(input, { input = it },
                     if (surface == WorkspaceSurface.Terminal) "输入命令" else "向桌面输入文字",
                     enabled = state.connected, onSend = { sendInput() })
@@ -208,6 +240,8 @@ private class WorkspaceBridge(private val post: ((() -> Unit) -> Unit), private 
     @JavascriptInterface fun runtimeBinary(text: String) = deliver { runCatching { viewModel.runtimeInput(Base64.decode(text, Base64.NO_WRAP)) } }
     @JavascriptInterface fun offer(sdp: String) = deliver { viewModel.desktopOffer(sdp) }
     @JavascriptInterface fun status(status: String) = deliver { viewModel.desktopStatus(status) }
+    @JavascriptInterface fun clipboard(text: String) = deliver { viewModel.remoteClipboard(text) }
+    @JavascriptInterface fun clipboardError(code: String) = deliver { viewModel.clipboardError(code) }
     fun close() { active.set(false) }
 }
 

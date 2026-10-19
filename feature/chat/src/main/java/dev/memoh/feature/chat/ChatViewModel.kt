@@ -142,8 +142,9 @@ data class ChatUiState(
 
     fun canFork(turn: UITurn): Boolean = !busy && !isRunning && session?.isLocal != false &&
         turn.turnId.isNotBlank() && (session?.runtimeType in listOf(null, "model") ||
-        session?.runtimeType == "codex" && turn.runtimeForkable == true)
+        (DirectAgentRuntime.fromId(session?.runtimeType) != null || session?.isAcpRuntime == true) && turn.runtimeForkable == true)
     val modelContextWindow: Long? get() = models.firstOrNull { it.id == selectedModelId }?.config?.contextWindow
+    val runtimeCommandsAvailable: Boolean get() = !busy && (session?.runtimeType != "grok-build" || !isRunning)
 
     /**
      * The model line shown in the composer: "模型 · 强度".
@@ -205,7 +206,8 @@ data class ChatUiState(
             label = "Agent",
             icon = ComposerIcons.Agent,
             value = agents.firstOrNull { it.id == selectedAgentId }?.name
-                ?: if (selectedAgentId == null) "Memoh" else session?.runtimeType?.takeUnless { it == "model" } ?: "已选 Agent",
+                ?: if (selectedAgentId == null) "Memoh" else DirectAgentRuntime.fromId(session?.runtimeType)?.label
+                    ?: session?.runtimeType?.takeUnless { it == "model" } ?: "已选 Agent",
             options = listOf(CapabilityOption(null, "Memoh")) + agents.map {
                 CapabilityOption(it.id, it.name.ifBlank { it.runtime ?: it.id })
             },
@@ -652,7 +654,7 @@ class ChatViewModel @Inject constructor(
                         applyAcp(api.acpRuntime(botId, session.id))
                     } else {
                         val agentId = session.botAgentId
-                        val catalog = if (session.runtimeType in listOf("codex", "claude-code") && agentId != null)
+                        val catalog = if (DirectAgentRuntime.fromId(session.runtimeType) != null && agentId != null)
                             api.agentModels(botId, agentId) else null
                         val models = (catalog?.pickerModels ?: api.models()).filter { it.isSelectable }
                         _state.update { current ->
@@ -673,7 +675,7 @@ class ChatViewModel @Inject constructor(
                 finally { _state.update { if (it.session?.id == session.id) it.copy(modelCatalogLoading = false) else it } }
                 refreshSessionInfo()
             }
-            if (!session.isAcpRuntime && session.runtimeType !in listOf("codex", "claude-code")) launch {
+            if (!session.isAcpRuntime && DirectAgentRuntime.fromId(session.runtimeType) == null) launch {
                 val providers = try { api.providers() }
                     catch (e: CancellationException) { throw e }
                     catch (_: Exception) { emptyList() }
@@ -853,10 +855,13 @@ class ChatViewModel @Inject constructor(
     fun goalAction(action: String) = operation { api, current, session ->
         api.controlRuntimeGoal(current.botId, session.id, action); refreshControls()
     }
-    fun command(value: String) = operation { api, current, session ->
-        val result = api.runtimeCommand(current.botId, session.id, apiBody("command" to value))
-        val message = (result as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
-        _state.update { it.copy(commandOutput = message, notice = "命令已执行") }; refreshControls()
+    fun command(value: String) {
+        if (!state.value.runtimeCommandsAvailable) return
+        operation { api, current, session ->
+            val result = api.runtimeCommand(current.botId, session.id, apiBody("command" to value))
+            val message = (result as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
+            _state.update { it.copy(commandOutput = message, notice = "命令已执行") }; refreshControls()
+        }
     }
     fun compact() = operation { api, current, session ->
         api.compactSession(current.botId, session.id)

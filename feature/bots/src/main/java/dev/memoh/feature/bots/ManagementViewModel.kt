@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.memoh.core.data.SessionRepository
 import dev.memoh.core.model.Bot
+import dev.memoh.core.model.DirectAgentRuntime
 import dev.memoh.core.network.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -20,6 +21,11 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 enum class ManagementPage(val title: String, val description: String) {
     Bots("Bot 管理", "创建、查看和管理 Bot"),
@@ -76,11 +82,12 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     val state = _state.asStateFlow()
     private var job: Job? = null
     private var authJob: Job? = null
-    private var authId: String? = null
+    private var authorizationRevision = 0
     private var removalJob: Job? = null
 
     fun open(botId: String, page: ManagementPage) {
         if (state.value.botId == botId && state.value.page == page && state.value.loaded) return
+        cancelAuthorization()
         job?.cancel()
         removalJob?.cancel()
         _state.value = ManagementState(botId, page, cloud = repository.state.value.account?.kind == "cloud")
@@ -309,50 +316,135 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     }
 
     fun authorizeAgent(agent: JsonObject, kind: String, secret: String = "") {
+        val runtime = DirectAgentRuntime.fromId(agent.text("runtime")) ?: return
+        if (kind != runtime.apiKeyKind && !(runtime == DirectAgentRuntime.ClaudeCode && kind == "claude_code_oauth") &&
+            !(runtime == DirectAgentRuntime.Codex && kind == "openai_codex_oauth")) return
+        val mode = when (kind) { "openai_codex_oauth" -> "chatgpt"; "claude_code_oauth" -> "oauth_token"; else -> "api_key" }
+        startAgentAuthorization(agent, mode) { api, checkCurrent -> stagedAgentAuthorization(api, agent, kind, secret, checkCurrent) }
+    }
+
+    fun authorizeDeviceAgent(agent: JsonObject) {
+        val runtime = DirectAgentRuntime.fromId(agent.text("runtime")) ?: return
+        val mode = runtime.deviceAuthMode ?: return
+        startAgentAuthorization(agent, mode) { api, checkCurrent ->
+            val path = listOf("bots", state.value.botId, "agents", agent.text("id"), "login", "device")
+            var loginId = ""
+            var connected = false
+            try {
+                val login = try {
+                    withContext(NonCancellable) {
+                        withTimeout(15_000) { api.managementResult(path + "authorize").obj().also { loginId = it.text("login_id") } }
+                    }
+                } catch (e: ApiException) {
+                    if (e.status != 404 || runtime != DirectAgentRuntime.Codex) throw e
+                    checkCurrent()
+                    stagedAgentAuthorization(api, agent, "openai_codex_oauth", "", checkCurrent)
+                    connected = true
+                    return@startAgentAuthorization
+                }
+                checkCurrent()
+                check(loginId.isNotBlank() && login.text("user_code").isNotBlank()) { "授权服务未返回登录代码" }
+                _state.update { it.copy(busy = false, authorization = JsonObject(login + ("status" to JsonPrimitive("pending")))) }
+                val deadline = System.currentTimeMillis() + 15 * 60 * 1000
+                while (System.currentTimeMillis() < deadline) {
+                    delay(2_000)
+                    checkCurrent()
+                    val result = api.managementResult(path + "poll", body = apiBody("login_id" to loginId)).obj()
+                    checkCurrent()
+                    when (result.text("status")) {
+                        "success" -> { connected = true; return@startAgentAuthorization }
+                        "pending" -> Unit
+                        else -> throw UserFacingException("授权已结束，请重新连接 ${runtime.label}")
+                    }
+                }
+                throw UserFacingException("授权已超时，请重新连接 ${runtime.label}")
+            } finally {
+                if (!connected && loginId.isNotBlank()) cleanupAuthorization {
+                    api.managementWrite(path + "cancel", "POST", apiBody("login_id" to loginId))
+                }
+            }
+        }
+    }
+
+    private fun startAgentAuthorization(agent: JsonObject, mode: String, action: suspend (MemohApi, suspend () -> Unit) -> Unit) {
         if (state.value.busy || !state.value.canManage) return
+        val runtime = DirectAgentRuntime.fromId(agent.text("runtime")) ?: return
+        val currentMode = agent["metadata"].obj().text("auth").ifBlank { runtime.defaultAuthMode }
+        if (agent.text("agent_credential_id").isNotBlank() && mode != currentMode) {
+            _state.update { it.copy(error = "请先断开当前认证，再切换认证方式") }; return
+        }
         cancelAuthorization()
-        val botId = state.value.botId
-        val path = listOf("bots", botId, "agents", agent.text("id"), "credential", "claim")
+        val revision = authorizationRevision
         val generation = repository.generation
+        val botId = state.value.botId
         authJob = viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null) }
+            suspend fun checkCurrent() {
+                currentCoroutineContext().ensureActive()
+                if (revision != authorizationRevision || generation != repository.generation || state.value.botId != botId) throw CancellationException()
+            }
+            _state.update { it.copy(busy = true, error = null, notice = null) }
             try {
                 val api = repository.api() ?: error("请先登录")
-                var auth = api.managementResult(listOf("agent-authorizations"), body = apiBody("runtime" to agent.text("runtime"), "auth_kind" to kind,
-                    "secret" to secret.takeIf(String::isNotBlank)?.let { apiBody((if (kind == "claude_code_oauth") "oauth_token" else "api_key") to it) })).obj()
-                authId = auth.text("id")
-                _state.update { it.copy(busy = false, authorization = auth) }
-                while (generation == repository.generation && auth.text("status") == "pending") {
-                    delay(((auth["interval_seconds"] as? JsonPrimitive)?.longOrNull ?: 5L).coerceAtLeast(5) * 1000)
-                    auth = api.managementResult(listOf("agent-authorizations", auth.text("id"), "poll")).obj()
-                    _state.update { it.copy(authorization = auth) }
-                }
-                if (generation == repository.generation && auth.text("status") == "ready") {
-                    api.managementWrite(path, "POST", apiBody("authorization_id" to auth.text("id")))
-                    val authMode = when (kind) { "openai_codex_oauth" -> "chatgpt"; "claude_code_oauth" -> "oauth_token"; else -> "api_key" }
-                    api.managementWrite(listOf("bots", botId, "agents", agent.text("id")), "PATCH",
-                        apiBody("metadata" to JsonObject(agent["metadata"].obj() + mapOf("auth" to JsonPrimitive(authMode)))))
-                    authId = null
-                    _state.update { it.copy(authorization = null, notice = "Agent 已连接") }
-                    refresh()
-                }
+                if (mode != currentMode) api.managementWrite(listOf("bots", botId, "agents", agent.text("id")), "PATCH",
+                    apiBody("metadata" to JsonObject(agent["metadata"].obj() + ("auth" to JsonPrimitive(mode)))))
+                checkCurrent()
+                action(api, ::checkCurrent)
+                checkCurrent()
+                _state.update { it.copy(busy = false, authorization = null, notice = "Agent 已连接") }
+                refresh()
+            } catch (e: TimeoutCancellationException) {
+                if (generation == repository.generation && revision == authorizationRevision && state.value.botId == botId)
+                    _state.update { it.copy(busy = false, authorization = null, error = "授权服务响应超时，请重新连接") }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error = errorText(e)) } }
+            catch (e: Exception) {
+                if (generation == repository.generation && revision == authorizationRevision && state.value.botId == botId)
+                    _state.update { it.copy(busy = false, authorization = null, error = errorText(e)) }
+            }
         }
+    }
+
+    private suspend fun stagedAgentAuthorization(api: MemohApi, agent: JsonObject, kind: String, secret: String, checkCurrent: suspend () -> Unit) {
+        val path = listOf("bots", state.value.botId, "agents", agent.text("id"), "credential", "claim")
+        var id = ""
+        var claimed = false
+        try {
+            var auth = withContext(NonCancellable) { withTimeout(15_000) {
+                api.managementResult(listOf("agent-authorizations"), body = apiBody("runtime" to agent.text("runtime"), "auth_kind" to kind,
+                    "secret" to secret.takeIf(String::isNotBlank)?.let { apiBody((if (kind == "claude_code_oauth") "oauth_token" else "api_key") to it) }))
+                    .obj().also { id = it.text("id") }
+            } }
+            checkCurrent()
+            check(id.isNotBlank()) { "授权服务未返回授权编号" }
+            val deadline = System.currentTimeMillis() + 15 * 60 * 1000
+            while (auth.text("status") == "pending" && System.currentTimeMillis() < deadline) {
+                _state.update { it.copy(busy = false, authorization = auth) }
+                delay(((auth["interval_seconds"] as? JsonPrimitive)?.longOrNull ?: 5L).coerceAtLeast(5) * 1000)
+                checkCurrent()
+                auth = api.managementResult(listOf("agent-authorizations", id, "poll")).obj()
+                checkCurrent()
+            }
+            if (auth.text("status") != "ready") throw UserFacingException("授权未完成，请重新连接 Agent")
+            api.managementWrite(path, "POST", apiBody("authorization_id" to id))
+            claimed = true
+        } finally {
+            if (!claimed && id.isNotBlank()) cleanupAuthorization { api.managementWrite(listOf("agent-authorizations", id), "DELETE") }
+        }
+    }
+
+    private suspend fun cleanupAuthorization(cleanup: suspend () -> Unit) = withContext(NonCancellable) {
+        runCatching { withTimeout(10_000) { cleanup() } }; Unit
     }
 
     fun cancelAuthorization() {
         val wasAuthorizing = authJob?.isActive == true && state.value.busy
+        authorizationRevision++
         authJob?.cancel()
-        val id = authId
-        authId = null
         _state.update { it.copy(authorization = null, busy = if (wasAuthorizing) false else it.busy) }
-        if (!id.isNullOrBlank()) viewModelScope.launch { runCatching { repository.api()?.managementWrite(listOf("agent-authorizations", id), "DELETE") } }
     }
 
     fun providerAuthorization(id: String) {
         if (state.value.busy) return
-        authJob?.cancel()
+        cancelAuthorization()
         val generation = repository.generation
         authJob = viewModelScope.launch {
             try {

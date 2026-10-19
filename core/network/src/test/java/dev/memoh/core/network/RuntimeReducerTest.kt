@@ -22,6 +22,23 @@ import org.junit.Test
  * so every branch of [RuntimeReducer] is pinned here.
  */
 class RuntimeReducerTest {
+    @Test fun `direct runtime reasoning and tool boundaries survive deltas terminal snapshots and durable history`() {
+        val reasoning = UIMessage(id = 0, type = "reasoning", content = "分析")
+        var current = state(seq = 5, run = run(messages = listOf(reasoning)))
+        current = RuntimeReducer.delta(current, session, epoch, 6, RuntimeDelta(messageAppends = listOf(
+            RuntimeMessageAppend(0, "reasoning", "过程")), messageUpserts = listOf(UIMessage(1, "tool", toolCallId = "tool-1", name = "read_file", running = true))))
+        current = RuntimeReducer.delta(current, session, epoch, 7, RuntimeDelta(messageUpserts = listOf(
+            UIMessage(1, "tool", toolCallId = "tool-1", name = "read_file", running = false),
+            UIMessage(2, "text", content = "结果"))))
+        val blocks = current.run!!.messages!!
+        assertEquals(listOf("reasoning", "tool", "text"), blocks.map { it.type })
+        assertEquals("分析过程", blocks[0].content)
+        val stored = kotlinx.serialization.json.Json.decodeFromString<dev.memoh.core.model.UITurn>(
+            """{"turn_id":"turn-1","role":"assistant","messages":[{"id":0,"type":"reasoning","content":"分析过程"},{"id":1,"type":"tool","tool_call_id":"tool-1","name":"read_file"},{"id":2,"type":"text","content":"结果"}]}""")
+        val done = RuntimeReducer.snapshot(current, session, epoch, 8, snapshot(8, run(status = RunStatus.COMPLETED, messages = stored.messages.orEmpty())))
+        assertEquals(stored.messages, done.run?.messages)
+        assertEquals(3, done.run?.messages?.size)
+    }
 
     private val session = "session-1"
     private val epoch = "epoch-1"

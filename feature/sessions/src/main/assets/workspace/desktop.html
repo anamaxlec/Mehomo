@@ -5,23 +5,40 @@
 <body><div id="runtime" aria-label="云端桌面"></div><video id="desktop" autoplay playsinline muted tabindex="0" aria-label="云端桌面"></video><script type="module">
 'use strict';
 import RFB from './novnc/core/rfb.js';
-const video=document.getElementById('desktop');let peer=null,channel=null,rfb=null,runtime=null,mask=0,last={x:0,y:0},connection=0,timer=null;
-const send=event=>{if(channel?.readyState==='open')channel.send(JSON.stringify(event));};
-window.stopWorkspace=()=>{connection++;clearTimeout(timer);channel?.close();peer?.close();channel=null;peer=null;video.srcObject=null;mask=0;const closing=rfb;rfb=null;closing?.disconnect();runtime=null;document.getElementById("runtime").style.display="none";video.style.display="none";};
+const video=document.getElementById('desktop');let peer=null,channel=null,rfb=null,runtime=null,mask=0,last={x:0,y:0},connection=0,timer=null,disconnectTimer=null,rfbReady=false;
+const pressed=new Set(),encoder=new TextEncoder(),MAX_CLIPBOARD_BYTES=48*1024,MAX_MESSAGE_BYTES=64*1024;
+const send=event=>{if(channel?.readyState!=='open')return false;try{channel.send(JSON.stringify(event));return true;}catch{return false;}};
+const inputReady=()=>rfb?rfbReady:peer?.connectionState==='connected'&&channel?.readyState==='open';
+function releaseKeys(){for(const keysym of pressed)send({type:'key',keysym,down:false});pressed.clear();if(mask)send({type:'pointer',...last,button_mask:0});mask=0;}
+window.addEventListener('blur',releaseKeys);
+window.stopWorkspace=()=>{releaseKeys();connection++;clearTimeout(timer);clearTimeout(disconnectTimer);const closingChannel=channel,closingPeer=peer;channel=null;peer=null;closingChannel?.close();closingPeer?.close();video.srcObject=null;const closing=rfb;rfb=null;rfbReady=false;closing?.disconnect();runtime=null;document.getElementById('runtime').style.display='none';video.style.display='none';};
+function clipboardValid(text){return typeof text==='string'&&!text.includes('\0')&&encoder.encode(text).length<=MAX_CLIPBOARD_BYTES;}
+function remoteClipboard(text){if(clipboardValid(text))NativeWorkspace.clipboard(text);else NativeWorkspace.clipboardError('workspace.display_clipboard_too_large');}
+function clipboardMessage(data){
+  if(typeof data!=='string'){if(!(data instanceof ArrayBuffer)||data.byteLength>MAX_MESSAGE_BYTES)return;data=new TextDecoder().decode(data);}
+  if(encoder.encode(data).length>MAX_MESSAGE_BYTES)return;
+  try{const event=JSON.parse(data);if(event.type==='clipboard')remoteClipboard(event.text);else if(event.type==='clipboard_error')NativeWorkspace.clipboardError(event.code||'workspace.display_clipboard_failed');}catch{}
+}
 window.startDesktop=async()=>{
   stopWorkspace();const attempt=connection;
   try {
     peer=new RTCPeerConnection();const local=peer;
     channel=local.createDataChannel('display-input',{ordered:true});local.addTransceiver('video',{direction:'recvonly'});
+    const localChannel=channel;
+    const ready=()=>{if(attempt===connection&&inputReady()){clearTimeout(timer);NativeWorkspace.status('connected');}};
+    localChannel.onopen=ready;
+    localChannel.onclose=()=>{if(attempt===connection)NativeWorkspace.status('disconnected');};
+    localChannel.onerror=()=>{if(attempt===connection)NativeWorkspace.status('failed');};
+    localChannel.onmessage=event=>{if(attempt===connection)clipboardMessage(event.data);};
     local.ontrack=event=>{if(attempt!==connection)return;video.style.display='block';video.srcObject=event.streams[0]||new MediaStream([event.track]);video.play().catch(()=>{});};
-    local.onconnectionstatechange=()=>{if(attempt!==connection)return;const status=local.connectionState;clearTimeout(timer);if(status==='connected')NativeWorkspace.status(status);else if(status==='failed')NativeWorkspace.status(status);else if(status==='disconnected')timer=setTimeout(()=>{if(attempt===connection&&local.connectionState==='disconnected')NativeWorkspace.status('disconnected');},5000);};
+    local.onconnectionstatechange=()=>{if(attempt!==connection)return;const status=local.connectionState;clearTimeout(disconnectTimer);if(status==='connected')ready();else if(status==='failed')NativeWorkspace.status(status);else if(status==='disconnected')disconnectTimer=setTimeout(()=>{if(attempt===connection&&local.connectionState==='disconnected')NativeWorkspace.status('disconnected');},5000);};
     await local.setLocalDescription(await local.createOffer());
     await new Promise(resolve=>{if(local.iceGatheringState==='complete')return resolve();const timeout=setTimeout(resolve,8000);local.addEventListener('icegatheringstatechange',()=>{if(local.iceGatheringState==='complete'){clearTimeout(timeout);resolve();}});});
     if(attempt!==connection)return;NativeWorkspace.offer(local.localDescription.sdp);
-    timer=setTimeout(()=>{if(attempt===connection&&local.connectionState!=='connected')NativeWorkspace.status('failed');},30000);
+    if(!inputReady())timer=setTimeout(()=>{if(attempt===connection&&!inputReady())NativeWorkspace.status('failed');},30000);
   } catch(error) {if(attempt===connection)NativeWorkspace.status('failed');}
 };
-window.acceptAnswer=async answer=>{try {if(peer)await peer.setRemoteDescription({type:answer.type,sdp:answer.sdp});}catch(error){NativeWorkspace.status('failed');}};
+window.acceptAnswer=async answer=>{const local=peer,attempt=connection;try{if(local)await local.setRemoteDescription({type:answer.type,sdp:answer.sdp});}catch(error){if(attempt===connection&&peer===local)NativeWorkspace.status('failed');}};
 function position(event){const rect=video.getBoundingClientRect(),vw=video.videoWidth,vh=video.videoHeight;if(!vw||!vh)return null;const scale=Math.min(rect.width/vw,rect.height/vh),left=rect.left+(rect.width-vw*scale)/2,top=rect.top+(rect.height-vh*scale)/2;const x=(event.clientX-left)/scale,y=(event.clientY-top)/scale;if(x<0||y<0||x>=vw||y>=vh)return null;return{x:Math.round(x),y:Math.round(y)};}
 const pointer=event=>{const point=position(event);if(point)last=point;send({type:'pointer',...last,button_mask:mask});};
 video.addEventListener('pointerdown',event=>{event.preventDefault();if(!position(event))return;video.focus();video.setPointerCapture(event.pointerId);mask=event.button===2?4:event.button===1?2:1;pointer(event);});
@@ -32,10 +49,18 @@ video.addEventListener('wheel',event=>{event.preventDefault();send({type:'pointe
 const keys={Backspace:0xff08,Tab:0xff09,Enter:0xff0d,Escape:0xff1b,Delete:0xffff,Home:0xff50,ArrowLeft:0xff51,ArrowUp:0xff52,ArrowRight:0xff53,ArrowDown:0xff54,PageUp:0xff55,PageDown:0xff56,End:0xff57,Insert:0xff63,Shift:0xffe1,Control:0xffe3,Alt:0xffe9,Meta:0xffeb};
 for(let n=1;n<=12;n++)keys['F'+n]=0xffbd+n;
 function symbol(text){const code=text.codePointAt(0);return code<256?code:0x01000000|code;}
-function key(event,down){const sym=keys[event.key]??(Array.from(event.key).length===1?symbol(event.key):null);if(sym!=null){event.preventDefault();send({type:'key',keysym:sym,down});}}
+function key(event,down){const sym=keys[event.key]??(Array.from(event.key).length===1?symbol(event.key):null);if(sym!=null){event.preventDefault();if(send({type:'key',keysym:sym,down})){if(down)pressed.add(sym);else pressed.delete(sym);}}}
 video.addEventListener('keydown',event=>key(event,true));video.addEventListener('keyup',event=>key(event,false));
-window.desktopKey=name=>{const sym=keys[name];if(rfb&&sym){rfb.sendKey(sym);return;}if(sym){send({type:'key',keysym:sym,down:true});send({type:'key',keysym:sym,down:false});}};
-window.desktopText=text=>{for(const char of text){const sym=char==='\n'?keys.Enter:symbol(char);if(rfb){rfb.sendKey(sym);continue;}send({type:'key',keysym:sym,down:true});send({type:'key',keysym:sym,down:false});}};
+window.desktopKey=name=>{if(!inputReady())return false;const sym=keys[name];if(!sym)return false;if(rfb){rfb.sendKey(sym);return true;}return send({type:'key',keysym:sym,down:true})&&send({type:'key',keysym:sym,down:false});};
+window.desktopText=text=>{if(!inputReady())return false;try{for(const char of text){const sym=char==='\n'?keys.Enter:symbol(char);if(rfb){rfb.sendKey(sym);continue;}if(!send({type:'key',keysym:sym,down:true})||!send({type:'key',keysym:sym,down:false}))return false;}return true;}catch{return false;}};
+window.desktopPaste=text=>{
+  if(!inputReady())return false;
+  if(!clipboardValid(text)){NativeWorkspace.clipboardError('workspace.display_clipboard_too_large');return null;}
+  try{
+    if(rfb){rfb.clipboardPasteFrom(text);rfb.sendKey(keys.Control,'ControlLeft',true);try{rfb.sendKey(0x76,'KeyV');}finally{rfb.sendKey(keys.Control,'ControlLeft',false);}return true;}
+    releaseKeys();const message={type:'clipboard',text};if(encoder.encode(JSON.stringify(message)).length>MAX_MESSAGE_BYTES){NativeWorkspace.clipboardError('workspace.display_clipboard_too_large');return null;}return send(message);
+  }catch{return false;}
+};
 window.workspaceTheme=theme=>{document.documentElement.style.background=theme.background;document.body.style.background=theme.background;document.documentElement.style.colorScheme=theme.colorScheme??'dark';};
 if(window.initialWorkspaceTheme)workspaceTheme(window.initialWorkspaceTheme);
 // The channel contains bytes only. Runtime tokens and Cloud cookies stay in native networking.
@@ -48,10 +73,13 @@ window.startRuntimeDisplay=()=>{
   stopWorkspace();const target=document.getElementById('runtime');target.style.display='block';video.style.display='none';
   runtime=new NativeChannel();rfb=new RFB(target,runtime,{shared:true});rfb.scaleViewport=true;rfb.background='transparent';
   const viewer=rfb;
-  viewer.addEventListener('connect',()=>{if(rfb===viewer)NativeWorkspace.status('connected');});
+  viewer.addEventListener('connect',()=>{if(rfb===viewer){rfbReady=true;NativeWorkspace.status('connected');}});
+  viewer.addEventListener('clipboard',event=>{if(rfb===viewer)remoteClipboard(event.detail?.text);});
   viewer.addEventListener('disconnect',()=>{if(rfb===viewer)NativeWorkspace.status('disconnected');});
   viewer.addEventListener('securityfailure',()=>{if(rfb===viewer)NativeWorkspace.status('failed');});
   viewer.addEventListener('credentialsrequired',()=>{if(rfb===viewer)NativeWorkspace.status('failed');});
+  const attempt=connection;
+  timer=setTimeout(()=>{if(attempt===connection&&!rfbReady)NativeWorkspace.status('failed');},30000);
   NativeWorkspace.runtimeReady();
 };
 window.runtimeOpened=()=>{if(runtime){runtime.readyState=1;runtime.onopen?.({});}};

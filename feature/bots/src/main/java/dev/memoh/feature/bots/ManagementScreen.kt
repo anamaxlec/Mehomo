@@ -27,6 +27,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import dev.memoh.core.designsystem.component.*
 import dev.memoh.core.network.apiBody
+import dev.memoh.core.model.DirectAgentRuntime
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.serialization.json.*
 
 internal data class MenuAction(val label: String, val icon: ImageVector = Icons.Filled.Edit, val run: () -> Unit)
@@ -140,8 +142,9 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     }
     fun agentEditor(agent: JsonObject? = null) { vm.dismiss(); editor = agentEditor(state, agent, vm) }
     fun authorize(agent: JsonObject, oauth: Boolean) {
-        if (oauth && agent.text("runtime") == "codex") { vm.authorizeAgent(agent, "openai_codex_oauth"); return }
-        val kind = if (oauth) "claude_code_oauth" else if (agent.text("runtime") == "codex") "openai_api_key" else "anthropic_api_key"
+        val runtime = DirectAgentRuntime.fromId(agent.text("runtime")) ?: return
+        if (oauth && runtime.deviceAuthMode != null) { vm.authorizeDeviceAgent(agent); return }
+        val kind = if (oauth) "claude_code_oauth" else runtime.apiKeyKind
         editor = ManagementEditor(if (oauth) "连接 Claude Code" else "连接 API key", listOf(
             FormField("secret", if (oauth) "claude setup-token 生成的 token" else "API key", secret = true, required = true),
         )) { body, saved -> vm.authorizeAgent(agent, kind, body.text("secret")); saved() }
@@ -257,15 +260,19 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         item { Actions { MemohActionButton("添加 Agent", Icons.Filled.Add, { agentEditor() }, enabled = state.canManage && !state.busy, primary = true) } }
                         itemsIndexed(agents, key = { _, it -> it.text("id") }) { index, agent ->
                             val default = settings.text("default_bot_agent_id") == agent.text("id")
-                            val actions = listOf(
+                            val runtime = DirectAgentRuntime.fromId(agent.text("runtime"))
+                            val attached = agent.text("agent_credential_id").isNotBlank()
+                            val authMode = agent["metadata"].obj().text("auth").ifBlank { runtime?.defaultAuthMode.orEmpty() }
+                            val actions = listOfNotNull(
                                 MenuAction("运行配置", Icons.Filled.Tune) { agentEditor(agent) },
                                 MenuAction("设为默认", Icons.Filled.Star) { vm.write(base + "settings", "PUT", apiBody("default_bot_agent_id" to agent.text("id"))) },
-                                MenuAction("账号授权", Icons.Filled.Login) { if (agent.text("runtime") in listOf("codex", "claude-code")) authorize(agent, true) else editor = acpEditor(state, agent, vm) },
-                                MenuAction("API key", Icons.Filled.Key) { if (agent.text("runtime") in listOf("codex", "claude-code")) authorize(agent, false) else editor = acpEditor(state, agent, vm) },
+                                if (runtime == null) MenuAction("认证配置", Icons.Filled.Login) { editor = acpEditor(state, agent, vm) }
+                                    else if (!attached || authMode == runtime.deviceAuthMode || authMode == "oauth_token") MenuAction("账号授权", Icons.Filled.Login) { authorize(agent, true) } else null,
+                                if (runtime != null && (!attached || authMode == "api_key")) MenuAction("API key", Icons.Filled.Key) { authorize(agent, false) } else null,
                                 MenuAction("断开认证", Icons.Filled.LinkOff) { confirmation = ConfirmAction("断开 Agent 认证", "下一次启动此 Agent 时需要重新连接。") { vm.write(base + listOf("agents", agent.text("id"), "credential"), "DELETE") } },
                                 MenuAction("删除 Agent", Icons.Filled.Delete) { confirmation = ConfirmAction("删除 Agent", agent.text("name")) { vm.write(base + listOf("agents", agent.text("id")), "DELETE") } },
                             )
-                            ManagementRow(agent.text("name"), listOfNotNull(agent.text("runtime"), if (default) "默认" else null, if (agent.text("agent_credential_id").isNotBlank()) "已连接" else "待配置").joinToString(" · "),
+                            ManagementRow(agent.text("name"), listOfNotNull(DirectAgentRuntime.fromId(agent.text("runtime"))?.label ?: agent.text("runtime"), if (default) "默认" else null, if (agent.text("agent_credential_id").isNotBlank()) "已连接" else "待配置").joinToString(" · "),
                                 Icons.Filled.Psychology, index, agents.size, state.canManage && !state.busy, onClick = { agentEditor(agent) }, actions = actions,
                                 checked = agent.flag("enabled"), onChecked = { vm.enableAgent(agent, it) })
                             if (agent.text("runtime") == "codex" && agent["metadata"].obj().text("auth") == "chatgpt" && agent.text("agent_credential_id").isNotBlank())
@@ -525,16 +532,23 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     confirmation?.let { action -> AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(action.title) }, text = { Text(action.message) },
         confirmButton = { MemohActionButton("确认", Icons.Filled.Check, { confirmation = null; action.run() }, primary = true) },
         dismissButton = { TextButton({ confirmation = null }) { Text("取消") } }) }
-    state.authorization?.let { auth -> AlertDialog(onDismissRequest = vm::cancelAuthorization, title = { Text("连接 Agent") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("在授权页面输入以下代码，完成后会自动更新。")
-            Text(auth.text("user_code"), style = MaterialTheme.typography.headlineMedium)
-            Text(auth.text("status"), style = MaterialTheme.typography.bodyMedium)
+    state.authorization?.let { auth -> AlertDialog(onDismissRequest = {}, properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+        icon = { Icon(Icons.Filled.Devices, null) }, title = { Text("连接 Agent") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("打开授权页面，确认或输入以下代码，完成后会自动更新。")
+            Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.large) {
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(auth.text("user_code"), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall, fontFamily = FontFamily.Monospace)
+                    IconButton({ (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("Agent 授权代码", auth.text("user_code"))) }) { Icon(Icons.Filled.ContentCopy, "复制授权代码") }
+                }
+            }
+            Text("等待授权 · 可打开页面后返回", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }, confirmButton = { MemohActionButton("打开授权页", Icons.Filled.OpenInNew, {
         val url = auth.text("verification_url").ifBlank { auth.text("authorization_url") }
         if (url.startsWith("https://")) uriHandler.openUri(url)
-    }) }, dismissButton = { TextButton(vm::cancelAuthorization) { Text("取消") } }) }
+    }, primary = true) }, dismissButton = { TextButton(vm::cancelAuthorization) { Text("取消") } }) }
     state.result?.let { result ->
         val data = result.obj()
         val device = data["device"].obj()

@@ -1,6 +1,7 @@
 package dev.memoh.feature.bots
 
 import dev.memoh.core.network.apiBody
+import dev.memoh.core.model.DirectAgentRuntime
 import kotlinx.serialization.json.*
 import java.time.ZoneId
 
@@ -8,18 +9,20 @@ internal fun agentEditor(state: ManagementState, agent: JsonObject?, vm: Managem
     val metadata = agent?.get("metadata").obj()
     val provider = metadata.text("provider").ifBlank { agent?.text("runtime") ?: "codex" }
     val profiles = state.data["profiles"].objects("items")
-    val providers = listOf("codex" to "Codex", "claude-code" to "Claude Code") + profiles
-        .filter { it.text("id") !in listOf("codex", "claude-code") }.map { it.text("id") to it.text("display_name") }
+    val providers = DirectAgentRuntime.entries.map { it.id to it.label } + profiles
+        .filter { DirectAgentRuntime.fromId(it.text("id")) == null }.map { it.text("id") to it.text("display_name") }
     val id = agent?.text("id").orEmpty()
     if (id.isNotBlank()) vm.agentOptions(id)
     fun catalog() = vm.state.value.agentOptions[id]?.get("catalog").obj()
-    fun direct(values: Map<String, String>) = values["provider"] in listOf("codex", "claude-code")
+    fun direct(values: Map<String, String>) = DirectAgentRuntime.fromId(values["provider"]) != null
+    val credentialAttached = agent?.text("agent_credential_id").orEmpty().isNotBlank()
+    val currentAuth = metadata.text("auth").ifBlank { DirectAgentRuntime.fromId(provider)?.defaultAuthMode.orEmpty() }
     val fields = listOf(
         FormField("name", "名称", agent?.text("name").orEmpty(), required = true),
         FormField("provider", "Agent", provider, choices = if (agent == null) providers else listOf(provider to (providers.firstOrNull { it.first == provider }?.second ?: provider))),
-        FormField("auth", "认证方式", metadata.text("auth").ifBlank { if (provider == "codex") "chatgpt" else "workspace" },
-            choicesFor = { values -> if (values["provider"] == "codex") listOf("chatgpt" to "ChatGPT 账号", "api_key" to "API key")
-                else listOf("workspace" to "工作空间已有登录", "oauth_token" to "账号 token", "api_key" to "API key") }, visible = ::direct),
+        FormField("auth", if (credentialAttached) "认证方式（断开认证后可切换）" else "认证方式", currentAuth,
+            choicesFor = { values -> DirectAgentRuntime.fromId(values["provider"])?.authModes.orEmpty()
+                .filter { !credentialAttached || it.first == currentAuth } }, visible = ::direct),
         FormField("base_url", "API 地址（空白使用默认）", metadata.text("base_url"), visible = ::direct),
         FormField("model", "默认模型", metadata.text("model"), choicesFor = {
             listOf("" to "Agent 默认") + catalog()["models"].objects().map { it.text("id") to it.text("name").ifBlank { it.text("id") } }
@@ -30,7 +33,7 @@ internal fun agentEditor(state: ManagementState, agent: JsonObject?, vm: Managem
                 val id = it.text("id")
                 id to dev.memoh.core.model.reasoningEffortLabel(id).let { label -> if (label == id) it.text("name").ifBlank { id } else label }
             }
-        }, visible = { it["provider"] == "codex" }),
+        }, visible = { DirectAgentRuntime.fromId(it["provider"]) in listOf(DirectAgentRuntime.Codex, DirectAgentRuntime.GrokBuild) }),
         FormField("permission_mode", "执行权限", metadata.text("permission_mode"), choicesFor = {
             listOf("" to "Agent 默认") + vm.state.value.agentOptions[id]?.get("controls").obj()["modes"].obj()["available_modes"].objects()
                 .map { it.text("id") to it.text("name").ifBlank { it.text("id") } }
@@ -38,12 +41,13 @@ internal fun agentEditor(state: ManagementState, agent: JsonObject?, vm: Managem
     )
     return ManagementEditor(if (agent == null) "添加 Agent" else "运行配置", fields) { body, saved ->
         val selected = body.text("provider")
-        val direct = selected in listOf("codex", "claude-code")
+        val runtime = DirectAgentRuntime.fromId(selected)
+        val direct = runtime != null
         val next = metadata.toMutableMap().apply {
             put("provider", JsonPrimitive(selected))
             if (direct) {
-                val authChoices = if (selected == "codex") setOf("chatgpt", "api_key") else setOf("workspace", "api_key", "oauth_token")
-                put("auth", JsonPrimitive(body.text("auth").takeIf { it in authChoices } ?: if (selected == "codex") "chatgpt" else "workspace"))
+                val authChoices = runtime.authModes.map { it.first }
+                put("auth", JsonPrimitive(if (credentialAttached) currentAuth else body.text("auth").takeIf { it in authChoices } ?: runtime.defaultAuthMode))
                 listOf("base_url", "model", "permission_mode", "reasoning_effort").forEach { key ->
                     if (body.text(key).isBlank()) remove(key) else put(key, body.getValue(key))
                 }

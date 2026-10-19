@@ -256,13 +256,13 @@ class UpstreamAdaptationTest {
     }
 }
 
-private data class UpstreamReply(val status: Int = 200, val body: String = "{}")
-private data class UpstreamRequest(val method: String, val target: String, val body: String) {
+internal data class UpstreamReply(val status: Int = 200, val body: String = "{}")
+internal data class UpstreamRequest(val method: String, val target: String, val body: String) {
     val path get() = target.substringBefore('?')
     fun query(key: String): String? = target.substringAfter('?', "").split('&').firstOrNull { it.substringBefore('=') == key }
         ?.substringAfter('=')?.let { URLDecoder.decode(it, "UTF-8") }
 }
-private class UpstreamFixture(private val respond: (UpstreamRequest) -> UpstreamReply) : AutoCloseable {
+internal class UpstreamFixture(private val respond: (UpstreamRequest) -> UpstreamReply) : AutoCloseable {
     private val socket = ServerSocket(0, 20, InetAddress.getByName("127.0.0.1"))
     val origin = "http://localhost:${socket.localPort}"
     val requests = CopyOnWriteArrayList<UpstreamRequest>()

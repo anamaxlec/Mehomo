@@ -109,7 +109,7 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
                             SegmentedListItem(onClick = {
                                 if (item.inputHint.isNullOrBlank()) item.name?.let(viewModel::command)
                                 else { command = item.name; commandArgs = "" }
-                            }, enabled = !state.busy && item.name != null,
+                            }, enabled = state.runtimeCommandsAvailable && item.name != null,
                                 shapes = ListItemDefaults.segmentedShapes(index, controls.commands.orEmpty().size),
                                 leadingContent = { Icon(Icons.Filled.Terminal, null, Modifier.size(18.dp)) },
                                 supportingContent = item.description?.takeIf { it.isNotBlank() }?.let { description -> { Text(description, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis) } },
@@ -133,7 +133,7 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
     edit?.let { (item, steer) -> MemohFormDialog(onDismissRequest = { edit = null }, title = "编辑排队消息", text = { OutlinedTextField(editText, { editText = it }, minLines = 3) },
         confirmButton = { MemohActionButton("保存", Icons.Filled.Save, { viewModel.editQueue(item, editText, steer); edit = null }, enabled = editText.isNotBlank() && !state.busy, primary = true) }, dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { edit = null }) }) }
     command?.let { name -> MemohFormDialog(onDismissRequest = { command = null }, title = name, text = { OutlinedTextField(commandArgs, { commandArgs = it }, label = { Text("命令参数") }) },
-        confirmButton = { MemohActionButton("执行", Icons.Filled.PlayArrow, { viewModel.command("$name $commandArgs".trim()); command = null }, enabled = !state.busy, primary = true) }, dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { command = null }) }) }
+        confirmButton = { MemohActionButton("执行", Icons.Filled.PlayArrow, { viewModel.command("$name $commandArgs".trim()); command = null }, enabled = state.runtimeCommandsAvailable, primary = true) }, dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { command = null }) }) }
     confirm?.let { (title, action) -> AlertDialog(onDismissRequest = { confirm = null }, title = { Text(title) }, text = { Text("确认对当前会话执行此操作？") },
         confirmButton = { MemohActionButton("确认", Icons.Filled.Check, { confirm = null; action() }, primary = true) }, dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { confirm = null }) }) }
 }

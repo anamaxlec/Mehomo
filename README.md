@@ -8,7 +8,7 @@
 
 Mehomo 将会话、Agent 与云端工作空间整合进同一个 Android 应用，支持 **Memoh 官方云服务**与**自托管 Memoh**。
 
-当前正式版为 **[v0.1.16](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.16)**。本次修复思考等级菜单的截断、新建会话的加载过渡及 HTML 产物预览的认证问题。[查看更新日志](docs/releases/v0.1.16.md)
+当前正式版为 **[v0.1.17](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.17)**。本次跟进 Memoh v0.22.0，新增 Grok Build 支持，补齐账号授权、桌面文字剪贴板与连接恢复。[查看更新日志](docs/releases/v0.1.17.md)
 
 ## M3E 贯穿整个界面
 
