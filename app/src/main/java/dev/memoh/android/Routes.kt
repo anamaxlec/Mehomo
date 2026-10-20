@@ -23,6 +23,8 @@ object Routes {
      */
     const val MAIN = "main"
     const val HISTORY = "offline-history"
+    const val SETTINGS = "settings/{category}"
+    fun settings(category: SettingsCategory) = "settings/${category.name}"
     const val MANAGEMENT = "manage/{botId}/{page}"
     fun management(botId: String, page: String) = "manage/${android.net.Uri.encode(botId.ifBlank { "account" })}/${android.net.Uri.encode(page)}"
 

@@ -10,6 +10,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -26,15 +27,19 @@ import androidx.navigation.compose.ComposeNavigator
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import dev.memoh.core.designsystem.component.LocalFloatingNavigationPadding
 import dev.memoh.core.designsystem.theme.MemohTheme
 import dev.memoh.core.model.WorkspaceSurface
+import dev.memoh.core.model.Bot
 import dev.memoh.feature.bots.ManagementPage
 import dev.memoh.feature.sessions.BotFeature
+import dev.memoh.feature.sessions.SessionsUiState
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class FloatingNavigationTest {
@@ -43,6 +48,8 @@ class FloatingNavigationTest {
     private var order by mutableStateOf(defaultOrder)
     private var rtl by mutableStateOf(false)
     private var fontScale by mutableFloatStateOf(1f)
+    private var sessions by mutableStateOf(SessionsUiState(initialized = true, bot = Bot("bot")))
+    private var newSessionClicks = 0
     private lateinit var nav: NavHostController
     private lateinit var navigation: SectionNavigationState
     private lateinit var mainCoordinates: LayoutCoordinates
@@ -52,7 +59,7 @@ class FloatingNavigationTest {
         compose.waitForIdle()
     }
 
-    private fun setup() {
+    private fun setup(settle: Boolean = true) {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             val density = LocalDensity.current
@@ -61,7 +68,10 @@ class FloatingNavigationTest {
                 MemohTheme {
                     nav = rememberNavController()
                     navigation = rememberSectionNavigationState()
-                    FloatingNavigationHost(nav, Routes.MAIN, order, navigation) {
+                    FloatingNavigationHost(nav, Routes.MAIN, order, navigation, cornerContent = {
+                        NewSessionCornerAction(sessions, navigation, { newSessionClicks++ },
+                            Modifier.align(androidx.compose.ui.Alignment.CenterEnd))
+                    }) {
                         memohComposable(Routes.MAIN) {
                             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).onGloballyPositioned { mainCoordinates = it }) {
                                 Text("section-${navigation.destination.section.name}")
@@ -71,6 +81,7 @@ class FloatingNavigationTest {
                             MenuContent()
                         }
                         memohComposable(Routes.HISTORY) { MenuContent() }
+                        memohComposable(Routes.SETTINGS, arguments = listOf(navArgument("category") { type = NavType.StringType })) { MenuContent() }
                         memohComposable(Routes.FEATURE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("feature") { type = NavType.StringType })) { MenuContent() }
                         memohComposable(Routes.WORKSPACE, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("surface") { type = NavType.StringType })) { MenuContent() }
                         memohComposable(Routes.CHAT, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("sessionId") { type = NavType.StringType })) { Text("conversation") }
@@ -79,7 +90,7 @@ class FloatingNavigationTest {
                 }
             }
         }
-        advance()
+        if (settle) advance()
     }
 
     @Composable private fun MenuContent() {
@@ -104,9 +115,53 @@ class FloatingNavigationTest {
         compose.onNodeWithText(selected.label).assertIsSelected()
     }
 
+    @Test fun coldStartShowsBothControlsBeforeTheBotArrivesWithoutASecondEntrance() {
+        sessions = SessionsUiState()
+        setup(settle = false)
+        val bar = compose.onNodeWithContentDescription(MainSection.Chats.label)
+        val fab = compose.onNodeWithContentDescription("新建会话")
+        advance(48)
+        bar.assertIsDisplayed()
+        fab.assertIsDisplayed().assertIsNotEnabled().performClick()
+        assertEquals(0, newSessionClicks)
+        val barEntering = bar.fetchSemanticsNode().boundsInRoot.center
+        val fabEntering = fab.fetchSemanticsNode().boundsInRoot.center
+        screenshot("floating-controls-cold-start-entering")
+        advance()
+        val barRest = bar.fetchSemanticsNode().boundsInRoot.center
+        val fabRest = fab.fetchSemanticsNode().boundsInRoot.center
+        assertTrue("Startup includes intermediate entrance frames", barEntering.y > barRest.y + 1)
+        assertEquals("Both controls share the first entrance", barEntering.y - barRest.y, fabEntering.y - fabRest.y, 1f)
+        val boundsBeforeReady = fab.fetchSemanticsNode().boundsInRoot
+        compose.runOnIdle { sessions = SessionsUiState(initialized = true, bot = Bot("bot")) }
+        advance(16)
+        fab.assertIsEnabled()
+        assertEquals("Bot arrival must not start a separate action animation", boundsBeforeReady, fab.fetchSemanticsNode().boundsInRoot)
+        assertEquals(barRest, bar.fetchSemanticsNode().boundsInRoot.center)
+        screenshot("floating-controls-cold-start-ready")
+        fab.performClick()
+        assertEquals(1, newSessionClicks)
+        compose.runOnIdle { sessions = sessions.copy(creating = true) }
+        advance(16)
+        fab.assertIsNotEnabled().performClick()
+        assertEquals("Repeated taps during creation are ignored", 1, newSessionClicks)
+        compose.runOnIdle { sessions = SessionsUiState(initialized = true) }
+        advance()
+        fab.assertDoesNotExist()
+        bar.assertIsDisplayed()
+    }
+
+    private fun screenshot(name: String) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        File(context.getExternalFilesDir(null), "$name.png").outputStream().use {
+            compose.onRoot().captureToImage().asAndroidBitmap().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
+    }
+
     @Test fun allRootMenusHaveOneSwitcherAndSelectingATabClearsTheNestedStack() {
         setup()
         val routes = ManagementPage.entries.map { Routes.management("bot", it.name) } + Routes.HISTORY +
+            SettingsCategory.entries.map { Routes.settings(it) } +
             BotFeature.entries.map { Routes.feature("bot", it.name) }
         for (route in routes) {
             open(route)
@@ -173,5 +228,43 @@ class FloatingNavigationTest {
             assertTrue("Last row is clear of the floating bar at fontScale=$scale: row=$row bar=$bar", row.bottom < bar.top)
             compose.runOnIdle { nav.popBackStack(Routes.MAIN, false) }; advance()
         }
+    }
+
+    @Test fun bothFloatingControlsEnterAndLeaveTogetherWhenReturningFromConversation() {
+        setup()
+        val bar = compose.onNodeWithContentDescription(MainSection.Chats.label)
+        val fab = compose.onNodeWithContentDescription("新建会话")
+        fun positions() = bar.fetchSemanticsNode().boundsInRoot.center to fab.fetchSemanticsNode().boundsInRoot.center
+        for (mirrored in listOf(false, true)) {
+            compose.runOnIdle { rtl = mirrored; fontScale = if (mirrored) 1.3f else 1f }
+            advance()
+            val (barRest, fabRest) = positions()
+            compose.runOnIdle { nav.navigate(Routes.chat("bot", "long-session")) }
+            advance(80)
+            val (barExit, fabExit) = positions()
+            assertEquals("Both controls share the exit displacement", barExit.y - barRest.y, fabExit.y - fabRest.y, 1f)
+            advance()
+            bar.assertDoesNotExist(); fab.assertDoesNotExist()
+            compose.runOnIdle { nav.popBackStack() }
+            advance(48)
+            val (barEnter, fabEnter) = positions()
+            assertTrue("The floating controls enter through intermediate frames", barEnter.y > barRest.y + 1)
+            assertEquals("Both controls share the entrance displacement", barEnter.y - barRest.y, fabEnter.y - fabRest.y, 1f)
+            assertEquals("The switcher stays independent of the page slide", barRest.x, barEnter.x, 1f)
+            assertEquals("The corner action stays independent of the page slide", fabRest.x, fabEnter.x, 1f)
+            screenshot("floating-controls-return-${if (mirrored) "rtl" else "ltr"}")
+            advance()
+            assertEquals(barRest, positions().first)
+            assertEquals(fabRest, positions().second)
+            // A quick return followed by another open must not leave either control behind.
+            open(Routes.chat("bot", "again"))
+            compose.runOnIdle { nav.popBackStack() }; advance(64)
+            compose.runOnIdle { nav.navigate(Routes.chat("bot", "interrupt")) }; advance()
+            bar.assertDoesNotExist(); fab.assertDoesNotExist()
+            compose.runOnIdle { nav.popBackStack() }; advance()
+            assertOneBar(MainSection.Chats)
+            fab.assertIsDisplayed()
+        }
+        screenshot("floating-controls-return-settled")
     }
 }

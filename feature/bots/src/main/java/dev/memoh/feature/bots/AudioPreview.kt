@@ -61,7 +61,7 @@ internal fun AudioPreviewDialog(audio: AudioPreview, onDismiss: () -> Unit) {
                 if (playing) player.pause() else { if (position >= duration) player.seekTo(0); player.start() }; playing = !playing
             }, enabled = prepared && error == null, primary = true)
             if (prepared) { Slider(position.toFloat(), { position = it.toInt(); player.seekTo(position) }, valueRange = 0f..duration.coerceAtLeast(1).toFloat()); Text("${position / 1000} / ${duration / 1000} 秒", style = MaterialTheme.typography.labelSmall) }
-            else if (error == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+            else if (error == null) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     })

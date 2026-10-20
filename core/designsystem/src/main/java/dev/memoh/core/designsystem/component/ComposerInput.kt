@@ -1,5 +1,7 @@
 package dev.memoh.core.designsystem.component
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -10,11 +12,14 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -47,7 +52,11 @@ fun MemohComposerTextField(value: String, onValueChange: (String) -> Unit, place
             OutlinedTextFieldDefaults.DecorationBox(value = value, innerTextField = input,
                 enabled = enabled, singleLine = singleLine, visualTransformation = VisualTransformation.None,
                 interactionSource = interaction,
-                placeholder = { Text(placeholder, style = MaterialTheme.typography.bodyLarge) },
+                placeholder = {
+                    Crossfade(placeholder, animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(), label = "composer placeholder") {
+                        Text(it, style = MaterialTheme.typography.bodyLarge)
+                    }
+                },
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 container = {})
         })
@@ -57,15 +66,27 @@ fun MemohComposerTextField(value: String, onValueChange: (String) -> Unit, place
 fun MemohComposerIconButton(icon: ImageVector, contentDescription: String, enabled: Boolean,
     onClick: () -> Unit, filled: Boolean = false, danger: Boolean = false) {
     val scheme = MaterialTheme.colorScheme
-    val content: @Composable () -> Unit = { Icon(icon, contentDescription, Modifier.size(22.dp)) }
+    val content: @Composable () -> Unit = {
+        Crossfade(icon, modifier = Modifier.size(22.dp).semantics { this.contentDescription = contentDescription },
+            animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(), label = "composer action") {
+            Icon(it, null, Modifier.size(22.dp))
+        }
+    }
+    val containerColor by animateColorAsState(
+        if (!enabled) scheme.surfaceContainerHighest else if (danger) scheme.errorContainer else scheme.primary,
+        MaterialTheme.motionScheme.defaultEffectsSpec(), label = "composer action background")
+    val contentColor by animateColorAsState(
+        if (!enabled) scheme.onSurfaceVariant else if (danger) scheme.onErrorContainer else scheme.onPrimary,
+        MaterialTheme.motionScheme.defaultEffectsSpec(), label = "composer action color")
+    val plainColors = IconButtonDefaults.iconButtonColors(contentColor = scheme.onSurfaceVariant)
+    val plainTint by animateColorAsState(if (enabled) plainColors.contentColor else plainColors.disabledContentColor,
+        MaterialTheme.motionScheme.defaultEffectsSpec(), label = "composer control color")
     if (filled) FilledIconButton(onClick, modifier = Modifier.size(48.dp), shapes = IconButtonDefaults.shapes(), enabled = enabled,
         colors = IconButtonDefaults.filledIconButtonColors(
-            containerColor = if (danger) scheme.errorContainer else scheme.primary,
-            contentColor = if (danger) scheme.onErrorContainer else scheme.onPrimary,
-            disabledContainerColor = scheme.surfaceContainerHighest,
-            disabledContentColor = scheme.onSurfaceVariant), content = content)
+            containerColor = containerColor, contentColor = contentColor,
+            disabledContainerColor = containerColor, disabledContentColor = contentColor), content = content)
     else IconButton(onClick, modifier = Modifier.size(48.dp), shapes = IconButtonDefaults.shapes(), enabled = enabled,
-        colors = IconButtonDefaults.iconButtonColors(contentColor = scheme.onSurfaceVariant), content = content)
+        colors = IconButtonDefaults.iconButtonColors(contentColor = plainTint, disabledContentColor = plainTint), content = content)
 }
 
 @Composable

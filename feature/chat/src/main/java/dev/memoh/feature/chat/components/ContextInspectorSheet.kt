@@ -39,7 +39,7 @@ fun ContextInspectorSheet(state: ChatUiState, onLoad: (Boolean) -> Unit, onDismi
                 Text("显示 ${turns.size} 轮记录 · 统计仅覆盖当前返回的记录", style = MaterialTheme.typography.bodySmall)
                 if (page?.legacySource == true) Text("这些记录来自旧版会话历史", style = MaterialTheme.typography.bodySmall)
             }
-            if (state.contextLifecycleLoading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            if (state.contextLifecycleLoading) item { LinearWavyProgressIndicator(Modifier.fillMaxWidth()) }
             state.contextLifecycleError?.let { error -> item {
                 Text(error, color = MaterialTheme.colorScheme.error)
                 TextButton({ onLoad(false) }) { Text("重试") }

@@ -44,7 +44,7 @@ internal fun workspaceChild(parent: String, name: String): String {
 }
 internal fun workspaceImageFile(file: WorkspaceFile) = file.name.substringAfterLast('.').lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
 internal fun workspaceTextFile(file: WorkspaceFile): Boolean = !file.isDir && file.size <= 1_048_576 &&
-    (file.name.substringAfterLast('.').lowercase() in setOf("md", "markdown", "txt", "json", "jsonl", "yaml", "yml", "toml", "xml", "html", "css", "js", "jsx", "ts", "tsx", "kt", "kts", "java", "go", "py", "rb", "rs", "sh", "bash", "zsh", "sql", "csv", "log", "ini", "conf", "cfg", "properties", "env", "gitignore") ||
+    (file.name.substringAfterLast('.').lowercase() in setOf("md", "markdown", "txt", "json", "jsonl", "yaml", "yml", "toml", "xml", "html", "htm", "css", "js", "jsx", "ts", "tsx", "kt", "kts", "java", "go", "py", "rb", "rs", "sh", "bash", "zsh", "sql", "csv", "log", "ini", "conf", "cfg", "properties", "env", "gitignore") ||
         file.name.lowercase() in setOf("dockerfile", "makefile", "readme", "license"))
 
 private data class FileNameAction(val title: String, val initial: String = "", val apply: (String) -> Unit)
@@ -139,6 +139,8 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
                     state.fileDocument != null && state.fileEditing -> OutlinedTextField(value = state.fileDraft, onValueChange = viewModel::fileDraft,
                         modifier = Modifier.fillMaxSize().padding(bottom = 16.dp), enabled = !state.busy,
                         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), placeholder = { Text("输入文件内容") })
+                    state.fileDocument != null && selected.name.substringAfterLast('.').lowercase() in setOf("html", "htm") ->
+                        HtmlFilePreview(state.fileDraft, selected.path, Modifier.fillMaxSize().padding(bottom = 16.dp))
                     state.fileDocument != null -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
                         if (selected.name.substringAfterLast('.').lowercase() in setOf("md", "markdown")) MemohMarkdown.Markdown(state.fileDraft,
                             onLinkClick = { url ->

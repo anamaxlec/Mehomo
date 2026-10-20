@@ -100,7 +100,7 @@ internal fun LazyListScope.cloudTeamTools(state: ManagementState, vm: Management
             Text("已用 ${credits(included.text("used_micros"))} / ${credits(included.text("limit_micros"))} Credits")
             val limit = included.text("limit_micros").toDoubleOrNull() ?: 0.0
             val used = included.text("used_micros").toDoubleOrNull() ?: 0.0
-            LinearProgressIndicator(progress = { if (limit > 0.0) (used / limit).toFloat().coerceIn(0f, 1f) else 0f }, Modifier.fillMaxWidth())
+            LinearWavyProgressIndicator(progress = { if (limit > 0.0) (used / limit).toFloat().coerceIn(0f, 1f) else 0f }, Modifier.fillMaxWidth(), waveSpeed = 0.dp)
             billing.text("period_end").takeIf(String::isNotBlank)?.let { Text("周期截止 ${managementTimestamp(it)}", style = MaterialTheme.typography.bodySmall) }
         }
     } }

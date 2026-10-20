@@ -524,7 +524,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
         dismissButton = { TextButton(vm::dismissDependency) { Text("取消") } }) }
     state.operationLog?.let { log -> AlertDialog(onDismissRequest = vm::dismissOperationLog, title = { Text("依赖操作") }, text = {
         Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
             Text(log, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }

@@ -1,6 +1,7 @@
 package dev.memoh.core.model
 
 import kotlinx.serialization.json.*
+import kotlin.random.Random
 
 data class ChatExample(val id: String, val category: String, val title: String, val prompt: String, val requires: List<String> = emptyList()) {
     fun missing(capabilities: Map<String, Boolean>): List<String> = requires.filter { capabilities[it] == false }
@@ -26,6 +27,20 @@ val chatExamples: List<ChatExample> = listOf(
 )
 
 val chatExampleCategories = linkedMapOf("all" to "全部", "research" to "研究", "automation" to "自动化", "dev" to "开发", "memory" to "记忆", "team" to "协作", "writing" to "写作")
+
+/** Pick locally so changing suggestions works independently of prompt generation. */
+fun sampleChatExamples(
+    capabilities: Map<String, Boolean> = emptyMap(),
+    previous: List<StarterPrompt> = emptyList(),
+    random: Random = Random.Default,
+): List<StarterPrompt> {
+    val available = chatExamples.filter { it.missing(capabilities).isEmpty() }
+    val previousPrompts = previous.map { it.prompt }.toSet()
+    val unseen = available.filter { it.prompt !in previousPrompts }
+    val candidates = (if (unseen.size >= 3) unseen else available).shuffled(random)
+    val diverse = candidates.distinctBy { it.category }
+    return (diverse + candidates.filterNot { it in diverse }).take(3).map { StarterPrompt(it.title, it.prompt) }
+}
 
 fun exampleCapabilityLabel(id: String): String = when (id) {
     "web_search" -> "搜索服务"

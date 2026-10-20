@@ -315,6 +315,7 @@ class MemohApi(
 
     private suspend fun browserResourceRequest(
         url: okhttp3.HttpUrl, method: String, headers: Map<String, String>, websiteCookies: okhttp3.CookieJar, includeAccount: Boolean,
+        body: okhttp3.RequestBody?,
     ): Response = withContext(Dispatchers.IO) {
         val origin = endpoint.origin.toHttpUrl()
         val authenticated = includeAccount && url.scheme == origin.scheme && url.host == origin.host && url.port == origin.port
@@ -323,9 +324,10 @@ class MemohApi(
         val http = (if (authenticated && endpoint.isCloud) networkClient.newBuilder() else client.newBuilder().cookieJar(websiteCookies))
             .followRedirects(false).followSslRedirects(false).cache(null).build()
         fun sendResource(token: AuthLease?): Response {
-            val builder = Request.Builder().url(url).method(method, null)
+            val builder = Request.Builder().url(url).method(method, body)
             // WebView owns these request preferences; account and transport headers stay native.
-            headers.filterKeys { it.lowercase() in setOf("accept", "accept-language", "user-agent", "range") }
+            headers.filterKeys { it.lowercase() in setOf("accept", "accept-language", "user-agent", "range") ||
+                body != null && !authenticated && it.equals("Origin", true) }
                 .forEach { (name, value) -> builder.header(name, value) }
             if (authenticated) {
                 if (endpoint.isCloud) cloudAuth?.authorize(builder)

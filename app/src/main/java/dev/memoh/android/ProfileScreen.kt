@@ -15,12 +15,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import dev.memoh.core.data.SettingsStore
 import dev.memoh.core.designsystem.component.*
 import dev.memoh.core.model.*
 import dev.memoh.feature.settings.SettingsViewModel
 import dev.memoh.feature.sessions.BotFeature
 import dev.memoh.feature.bots.ManagementPage
+
+enum class SettingsCategory(val title: String, val description: String, val icon: ImageVector, val tone: ListIconTone) {
+    Workspace("Bot 与工作空间", "Bot、Agent、云端电脑与备份", Icons.Filled.SmartToy, ListIconTone.Primary),
+    Connections("模型与连接", "供应商、应用、MCP 与消息渠道", Icons.Filled.Hub, ListIconTone.Tertiary),
+    Features("功能与数据", "记忆、日程、文件与用量", Icons.Filled.Folder, ListIconTone.Secondary),
+    Appearance("外观与导航", "主题、配色与浮动菜单", Icons.Filled.Palette, ListIconTone.Primary),
+    Notifications("通知与后台", "任务进度、提醒与后台连接", Icons.Filled.NotificationsActive, ListIconTone.Tertiary),
+    Account("账号与团队", "个人资料与团队管理", Icons.Filled.AccountCircle, ListIconTone.Secondary),
+}
 
 @Composable
 fun ProfileScreen(
@@ -29,149 +39,85 @@ fun ProfileScreen(
     bot: Bot?,
     bots: List<Bot>,
     onSelectBot: (Bot) -> Unit,
-    onOpenManagement: (ManagementPage) -> Unit,
-    onOpenHistory: () -> Unit,
-    onOpen: (BotFeature) -> Unit,
+    onOpenSettings: (SettingsCategory) -> Unit,
 ) {
     val session by settings.session.collectAsState()
-    val mode by settings.themeMode.collectAsState()
-    val accent by settings.accent.collectAsState()
-    val floating by settings.floatingSections.collectAsState()
     val teams by settings.cloudTeams.collectAsState()
     val update by updates.state.collectAsState()
     val automaticUpdates by updates.automatic.collectAsState()
     var updatesOpen by remember { mutableStateOf(false) }
+    val cloud = session.account?.kind == "cloud"
     var teamsOpen by remember(session.account?.accountId) { mutableStateOf(false) }
-    var navigationOpen by remember { mutableStateOf(false) }
-    var logoutOpen by remember { mutableStateOf(false) }
     var botOpen by remember { mutableStateOf(false) }
-    var themeOpen by remember { mutableStateOf(false) }
-    var accentOpen by remember { mutableStateOf(false) }
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     Scaffold(modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        topBar = { MemohPageTopBar("我的", scrollBehavior = scrollBehavior) }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, maxOf(110.dp, LocalFloatingNavigationPadding.current)), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-            item {
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.extraLarge) {
-                    Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        topBar = { MemohPageTopBar("我的", large = false, scrollBehavior = scrollBehavior) }) { padding ->
+        LazyColumn(Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, maxOf(110.dp, LocalFloatingNavigationPadding.current)),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item(key = "account") {
+                Surface(onClick = { onOpenSettings(SettingsCategory.Account) },
+                    color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.extraLarge) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Icon(Icons.Filled.AccountCircle, null, Modifier.size(44.dp))
-                        Column { Text(session.account?.displayName ?: session.account?.username ?: "Mehomo 用户", style = MaterialTheme.typography.titleMedium)
-                            Text(if (session.account?.kind == "cloud") "Memoh Cloud" else "自托管服务", style = MaterialTheme.typography.bodyMedium)
-                            Text(session.account?.origin.orEmpty(), style = MaterialTheme.typography.bodySmall) }
-                    }
-                }
-            }
-            item {
-                SectionLabel("工作空间")
-                val cloud = session.account?.kind == "cloud"
-                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                if (cloud) SettingsRow("Cloud 团队", teams.teams.firstOrNull { it.team?.teamId == session.account?.teamId }?.team?.name ?: "切换团队工作空间",
-                    Icons.Filled.Groups, index = 0, count = 2, tone = ListIconTone.Tertiary,
-                    onClick = { teamsOpen = true; settings.loadCloudTeams() }, trailing = Icons.Filled.ArrowDropDown)
-                Box {
-                    SettingsRow(bot?.displayName ?: bot?.name ?: "选择 Bot",
-                        if (session.account?.teamId != null) "已连接团队工作空间" else "当前 Bot 的功能与数据",
-                        Icons.Filled.SmartToy, index = if (cloud) 1 else 0, count = if (cloud) 2 else 1,
-                        onClick = { botOpen = true }, trailing = Icons.Filled.ArrowDropDown)
-                    MemohPopupMenu(botOpen, { botOpen = false }, Alignment.TopStart) {
-                        MemohMenuGroup { bots.forEachIndexed { index, item -> MemohMenuRow(item.displayName ?: item.name, Icons.Filled.SmartToy,
-                            { onSelectBot(item); botOpen = false }, selected = item.id == bot?.id, selectable = true, index = index, count = bots.size) } }
-                    }
-                }
-                }
-            }
-            val groups = listOf(
-                "Bot 与工作空间" to listOf(ManagementPage.Bots, ManagementPage.Bot, ManagementPage.Agents, ManagementPage.Dependencies, ManagementPage.Workspace, ManagementPage.Computers, ManagementPage.Access, ManagementPage.Backup),
-                "模型与服务" to listOf(ManagementPage.Providers),
-                "连接与自动化" to listOf(ManagementPage.Connectors, ManagementPage.Channels, ManagementPage.Hooks, ManagementPage.Network),
-                "账号" to listOf(ManagementPage.Team, ManagementPage.Account),
-            )
-            groups.forEach { (title, entries) ->
-            val pages = entries.filter { (!it.needsBot || bot != null) && (it != ManagementPage.Network || session.account?.kind != "cloud") && (it != ManagementPage.Team || session.account?.kind == "cloud") }
-            if (pages.isNotEmpty()) item {
-                SectionLabel(title)
-                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                    pages.forEachIndexed { index, page ->
-                        SettingsRow(page.title, page.description, when (page) {
-                            ManagementPage.Bots -> Icons.Filled.Dashboard
-                            ManagementPage.Bot -> Icons.Filled.SmartToy
-                            ManagementPage.Agents -> Icons.Filled.Psychology
-                            ManagementPage.Dependencies -> Icons.Filled.Build
-                            ManagementPage.Providers -> Icons.Filled.Cloud
-                            ManagementPage.Models -> Icons.Filled.ModelTraining
-                            ManagementPage.Media -> Icons.Filled.PermMedia
-                            ManagementPage.Services -> Icons.Filled.TravelExplore
-                            ManagementPage.Connectors -> Icons.Filled.Extension
-                            ManagementPage.Computers -> Icons.Filled.Computer
-                            ManagementPage.Hooks -> Icons.Filled.Bolt
-                            ManagementPage.Channels -> Icons.Filled.Forum
-                            ManagementPage.Workspace -> Icons.Filled.Storage
-                            ManagementPage.Access -> Icons.Filled.Group
-                            ManagementPage.Backup -> Icons.Filled.Backup
-                            ManagementPage.Network -> Icons.Filled.Hub
-                            ManagementPage.Account -> Icons.Filled.AccountCircle
-                            ManagementPage.Team -> Icons.Filled.Groups
-                        }, index, pages.size, tone = when (page) {
-                            ManagementPage.Agents, ManagementPage.Access, ManagementPage.Services,
-                            ManagementPage.Connectors, ManagementPage.Hooks, ManagementPage.Team -> ListIconTone.Tertiary
-                            ManagementPage.Workspace, ManagementPage.Computers, ManagementPage.Media,
-                            ManagementPage.Backup, ManagementPage.Account -> ListIconTone.Secondary
-                            else -> ListIconTone.Primary
-                        }, onClick = { onOpenManagement(page) })
-                    }
-                }
-            }
-            }
-            if (bot != null) item {
-                SectionLabel("Bot 功能")
-                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                    BotFeature.entries.forEachIndexed { index, feature ->
-                        val section = MainSection.entries.first { it.feature == feature }
-                        SettingsRow(feature.title, featureDescription(feature), section.icon, index = index,
-                            count = BotFeature.entries.size, tone = if (feature in listOf(BotFeature.Memory, BotFeature.Usage, BotFeature.Skills)) ListIconTone.Tertiary else ListIconTone.Primary,
-                            onClick = { onOpen(feature) })
-                    }
-                }
-            }
-            item { SettingsRow("离线历史", "查看、搜索和管理近期会话缓存", Icons.Filled.OfflinePin, onClick = onOpenHistory) }
-            item { SettingsRow("版本与更新", "Mehomo ${update.currentVersion} · ${update.description()}", Icons.Filled.SystemUpdate,
-                tone = ListIconTone.Tertiary, onClick = { updatesOpen = true }) }
-            item {
-                SectionLabel("个性化")
-                    Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                        SettingsRow("浮动菜单", floating.mapNotNull { name -> MainSection.entries.firstOrNull { it.name == name }?.label }.joinToString(" · "),
-                            Icons.Filled.Tune, index = 0, count = 3, tone = ListIconTone.Tertiary, onClick = { navigationOpen = true })
-                        Box {
-                            SettingsRow("外观", themeLabel(mode), Icons.Filled.Contrast, index = 1, count = 3,
-                                tone = ListIconTone.Secondary, onClick = { themeOpen = true })
-                            MemohPopupMenu(themeOpen, { themeOpen = false }, Alignment.TopEnd) { MemohMenuGroup {
-                                ThemeMode.entries.forEachIndexed { index, item -> MemohMenuRow(themeLabel(item), Icons.Filled.Contrast,
-                                    { settings.setThemeMode(item); themeOpen = false }, selected = item == mode, selectable = true, index = index, count = ThemeMode.entries.size) }
-                            } }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(session.account?.displayName ?: session.account?.username ?: "Mehomo 用户",
+                                style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (cloud) "账号与团队 · Memoh Cloud" else "账号 · 自托管服务", style = MaterialTheme.typography.bodyMedium)
+                            Text(session.account?.origin.orEmpty(), style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Box {
-                            SettingsRow("主题色", accent.label, Icons.Filled.Palette, index = 2, count = 3,
-                                onClick = { accentOpen = true })
-                            MemohPopupMenu(accentOpen, { accentOpen = false }, Alignment.TopEnd) { MemohMenuGroup {
-                                MemohAccent.entries.forEachIndexed { index, item -> MemohMenuRow(item.label, Icons.Filled.Palette,
-                                    { settings.setAccent(item); accentOpen = false }, selected = item == accent, selectable = true, index = index, count = MemohAccent.entries.size) }
+                        Icon(Icons.Filled.ChevronRight, null, Modifier.size(20.dp))
+                    }
+                }
+            }
+            item(key = "workspace") {
+                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    if (cloud) SettingsRow("Cloud 团队",
+                        teams.teams.firstOrNull { it.team?.teamId == session.account?.teamId }?.team?.name ?: "切换团队工作空间",
+                        Icons.Filled.Groups, index = 0, count = 2, tone = ListIconTone.Tertiary, compact = true,
+                        onClick = { teamsOpen = true; settings.loadCloudTeams() }, trailing = Icons.Filled.ArrowDropDown)
+                    Box {
+                        SettingsRow(bot?.displayName ?: bot?.name ?: "选择 Bot", "当前工作空间",
+                            Icons.Filled.SmartToy, index = if (cloud) 1 else 0, count = if (cloud) 2 else 1, compact = true,
+                            onClick = { botOpen = true }, trailing = Icons.Filled.ArrowDropDown)
+                        MemohPopupMenu(botOpen, { botOpen = false }, Alignment.TopStart) {
+                            MemohMenuGroup { bots.forEachIndexed { index, item ->
+                                MemohMenuRow(item.displayName ?: item.name, Icons.Filled.SmartToy,
+                                    { onSelectBot(item); botOpen = false }, selected = item.id == bot?.id,
+                                    selectable = true, index = index, count = bots.size)
                             } }
                         }
                     }
+                }
             }
-            item { NotificationSettings(settings) }
-            item {
-                SettingsRow("退出登录", "再次使用时需要重新登录", Icons.AutoMirrored.Filled.Logout, tone = ListIconTone.Error,
-                    onClick = { logoutOpen = true }, trailing = null)
-                Text("Mehomo ${update.currentVersion}", Modifier.fillMaxWidth().padding(top = 20.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            item(key = "workspace-settings") {
+                SectionLabel("工作空间与服务")
+                val categories = listOf(SettingsCategory.Workspace, SettingsCategory.Connections, SettingsCategory.Features)
+                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    categories.forEachIndexed { index, category ->
+                        SettingsRow(category.title, category.description, category.icon, index, categories.size,
+                            tone = category.tone, compact = true, onClick = { onOpenSettings(category) })
+                    }
+                }
+            }
+            item(key = "app-settings") {
+                SectionLabel("应用")
+                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    listOf(SettingsCategory.Appearance, SettingsCategory.Notifications).forEachIndexed { index, category ->
+                        SettingsRow(category.title, category.description, category.icon, index, 3,
+                            tone = category.tone, compact = true, onClick = { onOpenSettings(category) })
+                    }
+                    SettingsRow("版本与更新", "Mehomo ${update.currentVersion}", Icons.Filled.SystemUpdate,
+                        index = 2, count = 3, compact = true, tone = ListIconTone.Secondary, onClick = { updatesOpen = true })
+                }
             }
         }
     }
     if (updatesOpen) AppUpdateSettings(update, automaticUpdates, updates::setAutomatic, { updates.check(manual = true) },
         { updatesOpen = false; updates.showRelease() }, { updatesOpen = false })
-    if (navigationOpen) FloatingMenuSettings(floating, { navigationOpen = false }, settings::setFloatingSections)
     if (teamsOpen) AlertDialog(onDismissRequest = { teamsOpen = false }, title = { Text("Cloud 团队") }, icon = { Icon(Icons.Filled.Groups, null) },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
             if (teams.loading) LoadingIndicator(Modifier.size(36.dp))
@@ -184,10 +130,146 @@ fun ProfileScreen(
             if (!teams.loading && teams.error == null && teams.teams.isEmpty()) Text("当前账号尚未加入团队")
         } }, confirmButton = { MemohActionButton("完成", Icons.Filled.Check, { teamsOpen = false }) },
         dismissButton = { if (teams.error != null) MemohActionButton("重试", Icons.Filled.Refresh, settings::loadCloudTeams) })
+}
+
+@Composable
+fun SettingsCategoryScreen(
+    category: SettingsCategory,
+    settings: SettingsViewModel,
+    bot: Bot?,
+    onBack: () -> Unit,
+    onOpenManagement: (ManagementPage) -> Unit,
+    onOpenHistory: () -> Unit,
+    onOpenFeature: (BotFeature) -> Unit,
+) {
+    val session by settings.session.collectAsState()
+    val mode by settings.themeMode.collectAsState()
+    val accent by settings.accent.collectAsState()
+    val floating by settings.floatingSections.collectAsState()
+    val cloud = session.account?.kind == "cloud"
+    var navigationOpen by remember { mutableStateOf(false) }
+    var logoutOpen by remember { mutableStateOf(false) }
+    var themeOpen by remember { mutableStateOf(false) }
+    var accentOpen by remember { mutableStateOf(false) }
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+    val title = if (category == SettingsCategory.Account && !cloud) "账号" else category.title
+    Scaffold(modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        topBar = { MemohPageTopBar(title, onBack = onBack, large = false, scrollBehavior = scrollBehavior) }) { padding ->
+        LazyColumn(Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, maxOf(110.dp, LocalFloatingNavigationPadding.current)),
+            verticalArrangement = Arrangement.spacedBy(24.dp)) {
+            val groups = when (category) {
+                SettingsCategory.Workspace -> listOf(
+                    "Bot" to listOf(ManagementPage.Bots, ManagementPage.Bot, ManagementPage.Agents, ManagementPage.Dependencies),
+                    "工作空间" to listOf(ManagementPage.Workspace, ManagementPage.Computers),
+                    "管理" to listOf(ManagementPage.Access, ManagementPage.Backup),
+                )
+                SettingsCategory.Connections -> listOf(
+                    "模型与服务" to listOf(ManagementPage.Providers),
+                    "连接与自动化" to listOf(ManagementPage.Connectors, ManagementPage.Channels, ManagementPage.Hooks, ManagementPage.Network),
+                )
+                SettingsCategory.Account -> listOf("账号" to listOf(ManagementPage.Team, ManagementPage.Account))
+                else -> emptyList()
+            }
+            groups.forEach { (label, entries) ->
+                val pages = entries.filter { (!it.needsBot || bot != null) &&
+                    (it != ManagementPage.Network || !cloud) && (it != ManagementPage.Team || cloud) }
+                if (pages.isNotEmpty()) item(key = label) {
+                    SectionLabel(label)
+                    ManagementSettingsRows(pages, onOpenManagement)
+                }
+            }
+            val features = when (category) {
+                SettingsCategory.Connections -> listOf(BotFeature.Apps, BotFeature.Mcp)
+                SettingsCategory.Features -> BotFeature.entries.filterNot { it == BotFeature.Apps || it == BotFeature.Mcp }
+                else -> emptyList()
+            }
+            if (bot != null && features.isNotEmpty()) item(key = "features") {
+                SectionLabel(if (category == SettingsCategory.Connections) "应用与工具" else "Bot 功能")
+                Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    features.forEachIndexed { index, feature ->
+                        val section = MainSection.entries.first { it.feature == feature }
+                        SettingsRow(feature.title, featureDescription(feature), section.icon, index, features.size,
+                            tone = if (feature in listOf(BotFeature.Memory, BotFeature.Usage, BotFeature.Skills)) ListIconTone.Tertiary else ListIconTone.Primary,
+                            onClick = { onOpenFeature(feature) })
+                    }
+                }
+            }
+            if (category == SettingsCategory.Features) item(key = "history") {
+                SectionLabel("本地数据")
+                SettingsRow("离线历史", "查看、搜索和管理近期会话缓存", Icons.Filled.OfflinePin, onClick = onOpenHistory)
+            }
+            if (category == SettingsCategory.Appearance) {
+                item(key = "appearance") {
+                    SectionLabel("个性化")
+                    Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                        SettingsRow("浮动菜单", floating.mapNotNull { name -> MainSection.entries.firstOrNull { it.name == name }?.label }.joinToString(" · "),
+                            Icons.Filled.Tune, index = 0, count = 3, tone = ListIconTone.Tertiary, onClick = { navigationOpen = true })
+                        Box {
+                            SettingsRow("外观", themeLabel(mode), Icons.Filled.Contrast, index = 1, count = 3,
+                                tone = ListIconTone.Secondary, onClick = { themeOpen = true })
+                            MemohPopupMenu(themeOpen, { themeOpen = false }, Alignment.TopEnd) { MemohMenuGroup {
+                                ThemeMode.entries.forEachIndexed { index, item -> MemohMenuRow(themeLabel(item), Icons.Filled.Contrast,
+                                    { settings.setThemeMode(item); themeOpen = false }, selected = item == mode, selectable = true, index = index, count = ThemeMode.entries.size) }
+                            } }
+                        }
+                        Box {
+                            SettingsRow("主题色", accent.label, Icons.Filled.Palette, index = 2, count = 3, onClick = { accentOpen = true })
+                            MemohPopupMenu(accentOpen, { accentOpen = false }, Alignment.TopEnd) { MemohMenuGroup {
+                                MemohAccent.entries.forEachIndexed { index, item -> MemohMenuRow(item.label, Icons.Filled.Palette,
+                                    { settings.setAccent(item); accentOpen = false }, selected = item == accent, selectable = true, index = index, count = MemohAccent.entries.size) }
+                            } }
+                        }
+                    }
+                }
+            }
+            if (category == SettingsCategory.Notifications) item(key = "notifications") { NotificationSettings(settings) }
+            if (category == SettingsCategory.Account) item(key = "logout") {
+                SettingsRow("退出登录", "再次使用时需要重新登录", Icons.AutoMirrored.Filled.Logout, tone = ListIconTone.Error,
+                    onClick = { logoutOpen = true }, trailing = null)
+            }
+        }
+    }
+    if (navigationOpen) FloatingMenuSettings(floating, { navigationOpen = false }, settings::setFloatingSections)
     if (logoutOpen) AlertDialog(onDismissRequest = { logoutOpen = false }, icon = { Icon(Icons.AutoMirrored.Filled.Logout, null) },
         title = { Text("退出登录") }, text = { Text("清除本机的当前登录凭据，再次使用时需要重新登录。") },
         confirmButton = { MemohActionButton("退出登录", Icons.AutoMirrored.Filled.Logout, { logoutOpen = false; settings.signOut() }, primary = true, danger = true) },
         dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { logoutOpen = false }) })
+}
+
+@Composable
+private fun ManagementSettingsRows(pages: List<ManagementPage>, onOpen: (ManagementPage) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+        pages.forEachIndexed { index, page ->
+            SettingsRow(page.title, page.description, when (page) {
+                ManagementPage.Bots -> Icons.Filled.Dashboard
+                ManagementPage.Bot -> Icons.Filled.SmartToy
+                ManagementPage.Agents -> Icons.Filled.Psychology
+                ManagementPage.Dependencies -> Icons.Filled.Build
+                ManagementPage.Providers -> Icons.Filled.Cloud
+                ManagementPage.Models -> Icons.Filled.ModelTraining
+                ManagementPage.Media -> Icons.Filled.PermMedia
+                ManagementPage.Services -> Icons.Filled.TravelExplore
+                ManagementPage.Connectors -> Icons.Filled.Extension
+                ManagementPage.Computers -> Icons.Filled.Computer
+                ManagementPage.Hooks -> Icons.Filled.Bolt
+                ManagementPage.Channels -> Icons.Filled.Forum
+                ManagementPage.Workspace -> Icons.Filled.Storage
+                ManagementPage.Access -> Icons.Filled.Group
+                ManagementPage.Backup -> Icons.Filled.Backup
+                ManagementPage.Network -> Icons.Filled.Hub
+                ManagementPage.Account -> Icons.Filled.AccountCircle
+                ManagementPage.Team -> Icons.Filled.Groups
+            }, index, pages.size, tone = when (page) {
+                ManagementPage.Agents, ManagementPage.Access, ManagementPage.Services,
+                ManagementPage.Connectors, ManagementPage.Hooks, ManagementPage.Team -> ListIconTone.Tertiary
+                ManagementPage.Workspace, ManagementPage.Computers, ManagementPage.Media,
+                ManagementPage.Backup, ManagementPage.Account -> ListIconTone.Secondary
+                else -> ListIconTone.Primary
+            }, onClick = { onOpen(page) })
+        }
+    }
 }
 
 @Composable
@@ -198,14 +280,16 @@ private fun SectionLabel(text: String) {
 
 @Composable
 private fun SettingsRow(title: String, subtitle: String, icon: ImageVector, index: Int = 0, count: Int = 1,
-    tone: ListIconTone = ListIconTone.Primary, trailing: ImageVector? = Icons.Filled.ChevronRight, onClick: () -> Unit) {
+    tone: ListIconTone = ListIconTone.Primary, trailing: ImageVector? = Icons.Filled.ChevronRight,
+    compact: Boolean = false, onClick: () -> Unit) {
     SegmentedListItem(onClick = onClick, shapes = ListItemDefaults.segmentedShapes(index, count), modifier = Modifier.fillMaxWidth(),
         colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
             contentColor = if (tone == ListIconTone.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface),
         leadingContent = { MemohListIcon(icon, tone) },
         trailingContent = trailing?.let { { Icon(it, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
-        supportingContent = { Text(subtitle, style = MaterialTheme.typography.bodyMedium) },
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp)) {
+        supportingContent = { Text(subtitle, style = MaterialTheme.typography.bodyMedium,
+            maxLines = if (compact) 1 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis) },
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = if (compact) 10.dp else 16.dp)) {
         Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
     }
 }

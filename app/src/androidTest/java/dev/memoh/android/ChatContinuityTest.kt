@@ -30,6 +30,7 @@ import dev.memoh.feature.chat.ChatSocketFactory
 import dev.memoh.feature.chat.ChatViewModel
 import dev.memoh.feature.sessions.SessionsViewModel
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import okhttp3.OkHttpClient
@@ -77,6 +78,270 @@ class ChatContinuityTest {
         return Triple(ChatViewModel(repository, json,
             ChatSocketFactory(OkHttpClient(), json, CloudAuth(OkHttpClient(), json)), settings,
             ChatHistoryStore(File(root, "history"), json), AttachmentDraftStore(File(root, "drafts"), json)), settings, repository)
+    }
+
+    @Test fun warmResumeKeepsRetryReadyButAnActualReconnectWaitsForItsSnapshot() {
+        ContinuityFixture(json).use { server ->
+            val reply = UITurn("turn", id = "persisted-reply", role = "assistant",
+                messages = listOf(UIMessage(0, "text", "保留已经完成的回复")))
+            server.messagesBody = json.encodeToString(ListResponse(items = listOf(reply)))
+            server.finishRun(reply.safeMessages)
+            val (vm, _, _) = chat(server)
+            val warmSnapshot = CountDownLatch(1)
+            val reconnectSnapshot = CountDownLatch(1)
+            try {
+                compose.setContent { MemohTheme {
+                    val state by vm.state.collectAsState()
+                    ChatSessionLifecycle(vm, state.session?.id)
+                    ChatScreen(state, {}, {}, {}, vm::setDraft, vm::loadOlder, onRegenerate = vm::regenerate,
+                        onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+                        onCancelUserInput = { _, _ -> }, onDismissError = {})
+                } }
+                compose.runOnIdle { vm.open("b", "s") }
+                compose.waitUntil(5_000) { vm.state.value.retryableTurnId == "turn" }
+                compose.onNodeWithContentDescription("重新生成").assertIsEnabled()
+                compose.runOnIdle { vm.setDraft("保留草稿") }
+                val subscriptions = server.subscriptionReads.get()
+                val baselineSeq = vm.state.value.runtime.seq
+                compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+                server.snapshotBlock = warmSnapshot
+                compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+                compose.waitUntil(5_000) { server.subscriptionReads.get() > subscriptions }
+                assertEquals("Warm refresh must keep the validated reply usable", "turn", vm.state.value.retryableTurnId)
+                assertFalse(vm.state.value.awaitingSnapshot)
+                compose.onNodeWithContentDescription("重新生成").assertIsEnabled()
+                assertEquals(1, server.connections.get())
+                warmSnapshot.countDown()
+                compose.waitUntil(5_000) { vm.state.value.runtime.seq > baselineSeq }
+                server.snapshotBlock = reconnectSnapshot
+                server.disconnectRuntime()
+                compose.waitUntil(5_000) { server.connections.get() == 2 &&
+                    server.subscriptionReads.get() > subscriptions + 1 && vm.state.value.socketStatus == SocketStatus.Connected }
+                assertTrue("A new transport must wait for its authoritative snapshot", vm.state.value.awaitingSnapshot)
+                assertNull(vm.state.value.retryableTurnId)
+                compose.onNodeWithContentDescription("重新生成").assertIsNotEnabled()
+                compose.onNodeWithText(reply.safeMessages.single().content).assertIsDisplayed()
+                reconnectSnapshot.countDown()
+                compose.waitUntil(5_000) { vm.state.value.retryableTurnId == "turn" }
+                compose.onNodeWithContentDescription("重新生成").assertIsEnabled().performClick()
+                compose.waitUntil(5_000) { server.retryRequests.get() == 1 }
+                assertEquals("保留草稿", vm.state.value.draft)
+                compose.onNodeWithText(reply.safeMessages.single().content).assertIsDisplayed()
+            } finally {
+                warmSnapshot.countDown(); reconnectSnapshot.countDown()
+                compose.runOnIdle { vm.viewModelScope.cancel() }
+            }
+        }
+    }
+
+    @Test fun firstReplyAndForegroundResumeKeepKnownHistoryAndAvoidRepeatedSubscriptions() {
+        ContinuityFixture(json).use { server ->
+            server.clearHistory()
+            server.modelsBody = """[{"id":"first-model","type":"chat"},{"id":"second-model","type":"chat"}]"""
+            val (vm, _, _) = chat(server)
+            try {
+                compose.setContent { MemohTheme {
+                    val state by vm.state.collectAsState()
+                    ChatSessionLifecycle(vm, state.session?.id)
+                    ChatScreen(state, {}, vm::send, vm::abort, vm::setDraft, vm::loadOlder,
+                        onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+                        onCancelUserInput = { _, _ -> }, onDismissError = {})
+                } }
+                compose.runOnIdle { vm.open("b", "s", Session("s", botId = "b", preferredChatModelId = "first-model")) }
+                compose.waitUntil(5_000) { vm.state.value.canSend && !vm.state.value.historyLoading && !vm.state.value.modelCatalogLoading }
+                assertFalse(vm.state.value.hasMoreHistory)
+                val subscriptions = server.subscriptionReads.get()
+                val infoReads = server.infoReads.get()
+                compose.onNode(hasSetTextAction()).performTextInput("第一条消息")
+                compose.onNodeWithContentDescription("发送").performClick()
+                compose.waitUntil(5_000) { vm.state.value.isRunning && server.infoReads.get() > infoReads }
+                assertEquals("Starting a task must not subscribe again", subscriptions, server.subscriptionReads.get())
+                val user = UITurn("turn", id = "first-user", role = "user", text = "第一条消息")
+                val reply = UITurn("turn", id = "first-assistant", role = "assistant",
+                    messages = listOf(UIMessage(0, "text", "第一条回复")))
+                server.messagesBody = json.encodeToString(ListResponse(items = listOf(user, reply)))
+                server.finishRun(reply.safeMessages)
+                compose.waitUntil(5_000) { !vm.state.value.isRunning && vm.state.value.history.lastOrNull()?.id == reply.id }
+                assertFalse("A first reply cannot create older history", vm.state.value.hasMoreHistory)
+                compose.onNodeWithText("第一条回复").assertIsDisplayed()
+                compose.onNodeWithContentDescription("正在加载更早消息").assertDoesNotExist()
+                assertEquals(0, server.olderHistoryReads.get())
+                compose.runOnIdle { vm.selectModel("second-model") }
+                compose.waitUntil(5_000) { vm.state.value.selectedModelId == "second-model" && !vm.state.value.busy }
+                assertEquals("Model changes must not subscribe again", subscriptions, server.subscriptionReads.get())
+                compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+                compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+                compose.waitUntil(5_000) { server.subscriptionReads.get() == subscriptions + 1 && vm.state.value.canSend }
+                assertEquals(1, server.connections.get())
+                assertEquals(0, server.olderHistoryReads.get())
+                compose.onNodeWithText("第一条回复").assertIsDisplayed()
+                compose.onNodeWithText("已连接").assertDoesNotExist()
+                compose.onNodeWithText("正在恢复连接…").assertDoesNotExist()
+            } finally { compose.runOnIdle { vm.viewModelScope.cancel() } }
+        }
+    }
+
+    @Test fun uncachedHistoryLoadsBeforeSlowSessionDetailsAndSurvivesTheirArrival() {
+        ContinuityFixture(json).use { server ->
+            server.clearHistory()
+            val details = CountDownLatch(1)
+            val snapshot = CountDownLatch(1)
+            server.sessionBlock = details
+            server.snapshotBlock = snapshot
+            val expected = listOf(UITurn(turnId = "persisted", role = "user", text = "无需等待会话信息的历史内容"))
+            server.messagesBody = json.encodeToString(ListResponse(items = expected))
+            val (vm, _, _) = chat(server)
+            try {
+                compose.setContent { MemohTheme {
+                    val state by vm.state.collectAsState()
+                    ChatScreen(state, {}, {}, {}, vm::setDraft, {},
+                        onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+                        onCancelUserInput = { _, _ -> }, onDismissError = {})
+                } }
+                compose.runOnIdle { vm.open("b", "s") }
+                compose.waitUntil(3_000) { server.historyReads.get() > 0 && !vm.state.value.historyLoading }
+                assertEquals(expected, vm.state.value.history)
+                assertFalse(vm.state.value.canSend)
+                assertFalse(vm.state.value.canEditDraft)
+                compose.onNodeWithText("无需等待会话信息的历史内容").assertIsDisplayed()
+                compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+                snapshot.countDown()
+                compose.waitUntil(3_000) { !vm.state.value.awaitingSnapshot && !vm.state.value.draftRestoring }
+                assertFalse("An address-only session must not send before metadata resolves", vm.state.value.canSend)
+                assertFalse(vm.state.value.canEditDraft)
+                details.countDown()
+                compose.waitUntil(3_000) { !vm.state.value.modelCatalogLoading }
+                assertEquals("Session metadata must not reset an already loaded page", expected, vm.state.value.history)
+                assertEquals("Opening must issue one initial history request", 1, server.historyReads.get())
+                compose.waitUntil(3_000) { vm.state.value.canSend }
+            } finally {
+                details.countDown(); snapshot.countDown()
+                compose.runOnIdle { vm.viewModelScope.cancel() }
+            }
+        }
+    }
+
+    @Test fun cachedEmptyConversationIsReadyBeforeSlowRefreshAndReusesBotOptions() {
+        ContinuityFixture(json).use { server ->
+            server.clearHistory()
+            server.modelsBody = """[{"id":"chosen-model","type":"chat","display_name":"Fixture Model"}]"""
+            server.workdirsBody = """{"workdirs":[{"id":"project","name":"Fixture Project"}]}"""
+            val gate = CountDownLatch(1)
+            server.sessionBlock = gate
+            val (repository, context) = repository(server)
+            val account = repository.state.value.account!!
+            val root = File(context.cacheDir, "prepared-chat-${System.nanoTime()}")
+            val store = ChatHistoryStore(File(root, "history"), json)
+            val cached = Session("s", botId = "b", runtimeType = "model", preferredChatModelId = "chosen-model")
+            runBlocking {
+                store.save(account.accountId, "", "b", cached, emptyList())
+                store.save(account.accountId, "", "b", cached.copy(id = "other"), emptyList())
+            }
+            val vm = ChatViewModel(repository, json,
+                ChatSocketFactory(OkHttpClient(), json, CloudAuth(OkHttpClient(), json)), SettingsStore(context),
+                store, AttachmentDraftStore(File(root, "drafts"), json))
+            var prepared = false
+            var secondPrepared = false
+            val secondGate = CountDownLatch(1)
+            try {
+                compose.runOnIdle { vm.viewModelScope.launch { vm.prepareOpen("b", "s"); prepared = true } }
+                compose.waitUntil(5_000) { prepared && server.sessionReads.get() > 0 }
+                assertEquals("s", vm.state.value.session?.id)
+                assertTrue(vm.state.value.hasResolvedHistory)
+                assertTrue(vm.state.value.history.isEmpty())
+                assertEquals("chosen-model", vm.state.value.selectedModelId)
+                compose.setContent { MemohTheme {
+                    val state by vm.state.collectAsState()
+                    ChatScreen(state, {}, {}, {}, vm::setDraft, {},
+                        onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+                        onCancelUserInput = { _, _ -> }, onDismissError = {})
+                } }
+                compose.onNodeWithText("开始对话").assertIsDisplayed()
+                compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+                compose.onNodeWithContentDescription("模型选项加载中").assertIsDisplayed()
+                gate.countDown()
+                compose.waitUntil(5_000) { !vm.state.value.modelCatalogLoading && vm.state.value.workdirs.isNotEmpty() }
+                val suggestions = vm.state.value.starterPrompts
+                server.sessionBlock = secondGate
+                server.modelsBlock = secondGate
+                compose.runOnIdle { vm.viewModelScope.launch { vm.prepareOpen("b", "other"); secondPrepared = true } }
+                compose.waitUntil(5_000) { secondPrepared }
+                assertEquals("other", vm.state.value.session?.id)
+                assertTrue(vm.state.value.hasResolvedHistory)
+                assertTrue(vm.state.value.modelCatalogLoading)
+                assertEquals("Fixture Model", vm.state.value.modelLabel)
+                assertEquals("Fixture Project", vm.state.value.workdirs.single().name)
+                assertEquals(suggestions, vm.state.value.starterPrompts)
+                compose.onNodeWithText("开始对话").assertIsDisplayed()
+                compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+                compose.onNodeWithContentDescription("模型：Fixture Model").assertIsDisplayed()
+                secondGate.countDown()
+                compose.waitUntil(5_000) { !vm.state.value.modelCatalogLoading }
+                assertEquals("Fixture Model", vm.state.value.modelLabel)
+                assertEquals("Fixture Project", vm.state.value.workdirs.single().name)
+            } finally {
+                gate.countDown(); secondGate.countDown()
+                compose.runOnIdle { vm.viewModelScope.cancel() }
+            }
+        }
+    }
+
+    @Test fun createdConversationShowsSuggestionsBeforeHistoryAndDoesNotRestartOnNavigation() {
+        ContinuityFixture(json).use { server ->
+            server.clearHistory()
+            val historyReady = CountDownLatch(1)
+            server.historyBlock = historyReady
+            server.capabilitiesBlock = historyReady
+            val (vm, _, _) = chat(server)
+            try {
+                compose.runOnIdle {
+                    val created = Session("s", botId = "b", preferredChatModelId = "chosen-model", workdirId = "project")
+                    vm.open("b", "s", created)
+                    assertEquals(created, vm.state.value.session)
+                    assertTrue(vm.state.value.hasResolvedHistory)
+                    assertEquals("chosen-model", vm.state.value.selectedModelId)
+                    assertEquals("project", vm.state.value.selectedWorkdirId)
+                    // The destination's open effect must reuse the preparation done before navigation.
+                    vm.open("b", "s")
+                    assertTrue(vm.state.value.hasResolvedHistory)
+                }
+                compose.setContent { MemohTheme {
+                    val state by vm.state.collectAsState()
+                    ChatScreen(state, {}, {}, {}, vm::setDraft, {},
+                        onRefreshSuggestions = vm::refreshSuggestions,
+                        onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+                        onCancelUserInput = { _, _ -> }, onDismissError = {})
+                } }
+                compose.waitUntil(5_000) { server.historyReads.get() > 0 && server.capabilityReads.get() > 0 }
+                compose.onNodeWithText("开始对话").assertIsDisplayed()
+                compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+                val chosen = vm.state.value.starterPrompts.items.first()
+                compose.onNodeWithText(chosen.title).assertIsDisplayed().performClick()
+                compose.runOnIdle { assertEquals(chosen.prompt, vm.state.value.draft) }
+                repeat(4) {
+                    val previous = vm.state.value.starterPrompts.items
+                    compose.onNodeWithText("换一组").assertIsEnabled().performClick()
+                    compose.runOnIdle {
+                        val next = vm.state.value.starterPrompts.items
+                        assertEquals(3, next.size)
+                        assertTrue(next.none { it in previous })
+                        assertEquals(chosen.prompt, vm.state.value.draft)
+                        assertNull(vm.state.value.suggestionsError)
+                    }
+                }
+                assertEquals(0, server.starterPromptReads.get())
+                compose.onNodeWithText("暂时没有新的推荐，可以稍后再试。").assertDoesNotExist()
+                compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+                assertEquals(0, server.sessionReads.get())
+                historyReady.countDown()
+                compose.waitUntil(5_000) { !vm.state.value.historyLoading }
+                compose.onNodeWithText("开始对话").assertIsDisplayed()
+                compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+            } finally {
+                historyReady.countDown()
+                compose.runOnIdle { vm.viewModelScope.cancel() }
+            }
+        }
     }
 
     @Test fun clearingHistoryWithANewRuntimeEpochRemovesTheOldRunAndTranscript() {
@@ -298,6 +563,21 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
     val infoReads = AtomicInteger()
     val tokens = AtomicLong(10_000)
     val messageRequests = AtomicInteger()
+    val retryRequests = AtomicInteger()
+    val historyReads = AtomicInteger()
+    val olderHistoryReads = AtomicInteger()
+    val subscriptionReads = AtomicInteger()
+    val sessionReads = AtomicInteger()
+    val starterPromptReads = AtomicInteger()
+    val capabilityReads = AtomicInteger()
+    @Volatile var historyBlock: CountDownLatch? = null
+    @Volatile var capabilitiesBlock: CountDownLatch? = null
+    @Volatile var sessionBlock: CountDownLatch? = null
+    @Volatile var modelsBlock: CountDownLatch? = null
+    @Volatile var snapshotBlock: CountDownLatch? = null
+    @Volatile var modelsBody = "[]"
+    @Volatile var messagesBody = """{"items":[]}"""
+    @Volatile var workdirsBody = """{"workdirs":[]}"""
     val enqueued = CopyOnWriteArrayList<Pair<Boolean, String>>()
     val queueRequests = AtomicInteger()
     @Volatile var queueFailure = false
@@ -322,7 +602,8 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
             val header = StringBuilder()
             while (!header.endsWith("\r\n\r\n")) header.append(input.readUnsignedByte().toChar())
             val lines = header.toString().split("\r\n")
-            val path = lines.first().split(' ')[1].substringBefore('?').removePrefix("/api")
+            val requestTarget = lines.first().split(' ')[1]
+            val path = requestTarget.substringBefore('?').removePrefix("/api")
             val method = lines.first().substringBefore(' ')
             val contentLength = lines.firstOrNull { it.startsWith("Content-Length:", true) }
                 ?.substringAfter(':')?.trim()?.toInt() ?: 0
@@ -345,10 +626,24 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
                     if (opcode != 1) continue
                     if (mask.isNotEmpty()) bytes.indices.forEach { bytes[it] = (bytes[it].toInt() xor mask[it % 4].toInt()).toByte() }
                     val frame = json.decodeFromString<WSClientMessage>(bytes.toString(Charsets.UTF_8))
-                    if (frame.type == WSClientMessage.MESSAGE) messageRequests.incrementAndGet()
+                    if (frame.type == WSClientMessage.RETRY_MESSAGE) retryRequests.incrementAndGet()
+                    if (frame.type == WSClientMessage.MESSAGE) {
+                        messageRequests.incrementAndGet()
+                        if (historyCleared) {
+                            historyCleared = false
+                            val user = UIUserTurn("turn", id = "first-user", text = frame.text.orEmpty())
+                            run = run.copy(invocationId = frame.invocationId, requestUserTurn = user,
+                                userTurns = listOf(user), status = RunStatus.RUNNING)
+                            sendEvent(client, UIStreamEvent(type = UIStreamEvent.RUN_ACCEPTED,
+                                invocationId = frame.invocationId, sessionId = frame.sessionId, turnId = run.turnId))
+                            snapshot(client, frame.sessionId ?: "s")
+                        }
+                    }
                     if (frame.type == WSClientMessage.RUNTIME_SUBSCRIBE) {
                         val id = frame.sessionId ?: continue
-                        subscribers.add(client to id)
+                        subscriptionReads.incrementAndGet()
+                        subscribers.addIfAbsent(client to id)
+                        snapshotBlock?.await(15, TimeUnit.SECONDS)
                         snapshot(client, id)
                     }
                 }
@@ -367,6 +662,21 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
                 val text = json.parseToJsonElement(requestBody).jsonObject["text"]!!.jsonPrimitive.content
                 enqueued.add(path.endsWith("/steer-queue") to text)
             }
+            if (path == "/bots/b/messages") {
+                historyReads.incrementAndGet()
+                if (requestTarget.contains("before_message_id=")) olderHistoryReads.incrementAndGet()
+                historyBlock?.await(10, TimeUnit.SECONDS)
+            }
+            if (path.contains("/starter-prompts")) starterPromptReads.incrementAndGet()
+            if (path == "/bots/b/settings") {
+                capabilityReads.incrementAndGet()
+                capabilitiesBlock?.await(10, TimeUnit.SECONDS)
+            }
+            if (path == "/bots/b/sessions/s" || path == "/bots/b/sessions/other") {
+                sessionReads.incrementAndGet()
+                sessionBlock?.await(15, TimeUnit.SECONDS)
+            }
+            if (path == "/models") modelsBlock?.await(15, TimeUnit.SECONDS)
             val body = when (path) {
                 "/bots" -> """{"items":[$bot]}"""
                 "/bots/b" -> bot
@@ -377,13 +687,15 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
                 "/bots/b/sessions/s/queue" -> json.encodeToString(SessionQueueResponse(steerSupported = true,
                     followUp = enqueued.mapIndexedNotNull { index, (steer, text) -> if (!steer) QueueItem("q-$index", text = text) else null },
                     steer = enqueued.mapIndexedNotNull { index, (steer, text) -> if (steer) QueueItem("q-$index", text = text) else null }))
-                "/bots/b/messages", "/bots/b/agents" -> """{"items":[]}"""
+                "/bots/b/messages" -> messagesBody
+                "/bots/b/agents" -> """{"items":[]}"""
                 "/bots/b/sessions/s/status" -> {
                     infoReads.incrementAndGet()
                     """{"context_usage":{"used_tokens":${tokens.get()},"context_window":100000}}"""
                 }
-                "/models", "/providers" -> "[]"
-                "/bots/b/workdirs" -> """{"workdirs":[]}"""
+                "/models" -> modelsBody
+                "/providers" -> "[]"
+                "/bots/b/workdirs" -> workdirsBody
                 "/bots/b/workspace-targets" -> """{"targets":[]}"""
                 else -> "{}"
             }.toByteArray()
@@ -395,9 +707,13 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
     @Volatile private var historyCleared = false
     @Volatile private var epoch = "fixture"
 
-    fun finishRun() {
-        run = run.copy(status = RunStatus.COMPLETED)
+    fun finishRun(messages: List<UIMessage> = run.safeMessages) {
+        run = run.copy(status = RunStatus.COMPLETED, messages = messages)
         subscribers.forEach { (client, id) -> if (!client.isClosed) snapshot(client, id) }
+    }
+
+    fun disconnectRuntime() {
+        subscribers.map { it.first }.distinct().forEach { it.close() }
     }
 
     fun clearHistory() {
@@ -409,6 +725,10 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
         val seq = if (historyCleared) 0L else sequence.incrementAndGet()
         val event = UIStreamEvent(type = UIStreamEvent.RUNTIME_SNAPSHOT, sessionId = sessionId, epoch = epoch, seq = seq,
             snapshot = RuntimeSnapshot(sessionId = sessionId, epoch = epoch, seq = seq, currentRunView = if (historyCleared) null else run))
+        sendEvent(client, event)
+    }
+
+    private fun sendEvent(client: Socket, event: UIStreamEvent) = synchronized(client) {
         val payload = json.encodeToString(event).toByteArray()
         val output = client.getOutputStream()
         output.write(129)

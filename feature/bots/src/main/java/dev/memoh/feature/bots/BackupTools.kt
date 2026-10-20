@@ -90,7 +90,7 @@ internal fun BackupTools(state: ManagementState, vm: ManagementViewModel, onOpen
                     enabled = !state.busy && selected.values.any { it != "skip" }, primary = true) }
             }
         }
-        if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
     }
     editor?.let { current -> ManagementForm(current, state.busy, state.error) { editor = null } }
     if (confirming) AlertDialog(onDismissRequest = { confirming = false }, title = { Text("恢复备份") }, text = {

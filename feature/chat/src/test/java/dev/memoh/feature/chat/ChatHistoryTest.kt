@@ -9,6 +9,69 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ChatHistoryTest {
+    @Test fun `assistant records sharing a turn have distinct body and action keys`() {
+        val messages = listOf(UIMessage(0, "reasoning", "Thinking"), UIMessage(1, "text", "Reply"))
+        val turns = listOf(
+            UITurn("shared-turn", id = "first-record", role = "assistant", messages = messages),
+            UITurn("shared-turn", id = "second-record", role = "assistant", messages = messages),
+        )
+        val identities = assistantHistoryKeys(turns)
+        val keys = turns.flatMap { turn ->
+            val identity = identities.getValue(turn.listKey)
+            assistantRenderItems(identity, turn.safeMessages).map { it.key } + "assistant-$identity:actions"
+        }
+        assertEquals(keys.size, keys.toSet().size)
+    }
+
+    @Test fun `prepending assistant pages preserves keys for already visible records`() {
+        val first = UITurn("shared-turn", id = "first-record", role = "assistant")
+        val middle = first.copy(id = "middle-record")
+        val latest = first.copy(id = "latest-record")
+        val initial = assistantHistoryKeys(listOf(middle, latest))
+        val paginated = assistantHistoryKeys(listOf(first, middle, latest))
+        initial.forEach { (record, key) -> assertEquals(key, paginated[record]) }
+        assertEquals(latest.turnId, paginated[latest.listKey])
+        assertEquals(latest.turnId, assistantHistoryKeys(listOf(latest))[latest.listKey])
+    }
+
+    @Test fun `user records do not replace the live assistant identity`() {
+        val assistant = UITurn("turn", id = "assistant", role = "assistant")
+        val user = UITurn("turn", id = "user", role = "user")
+        val keys = assistantHistoryKeys(listOf(assistant, user))
+        assertEquals(mapOf(assistant.listKey to assistant.turnId), keys)
+    }
+
+    private fun ChatUiState.folder() = capabilities({}, {}, {}).firstOrNull { it.label == "文件夹" && it.visible }
+
+    @Test fun `empty conversation folder remains visible across reconnect and capability refresh`() {
+        val empty = ChatUiState(session = dev.memoh.core.model.Session("empty"), historyLoading = false,
+            hasMoreHistory = false, awaitingSnapshot = false,
+            workdirs = listOf(dev.memoh.core.model.Workdir("project", name = "项目")))
+        assertNotNull(empty.folder())
+        for (status in dev.memoh.core.network.SocketStatus.entries) {
+            val refreshing = empty.copy(socketStatus = status, awaitingSnapshot = true, modelCatalogLoading = true,
+                historyLoading = true)
+            assertTrue(refreshing.isEmptyConversation)
+            assertTrue(refreshing.hasResolvedHistory)
+            assertEquals(empty.folder()?.options, refreshing.folder()?.options)
+            assertTrue(refreshing.folder()!!.enabled)
+        }
+        assertNotNull(empty.copy(historyLoading = true, historyError = "暂时离线").folder())
+    }
+
+    @Test fun `unbound folder is hidden for unknown history and actual conversation content`() {
+        assertNull(ChatUiState().folder())
+        val empty = ChatUiState(historyLoading = false, hasMoreHistory = false)
+        assertNotNull(empty.folder())
+        for (withContent in listOf(empty.copy(history = listOf(user)), empty.copy(runtime = run("running", emptyList())),
+            empty.copy(pending = listOf(PendingTurn("pending", "问题"))),
+            empty.copy(runtime = run("completed", listOf(UIMessage(0, "text", content = "回答")))))) {
+            assertFalse(withContent.isEmptyConversation)
+            assertNull(withContent.folder())
+            assertNotNull(withContent.copy(selectedWorkdirId = "project").folder())
+        }
+    }
+
     @Test fun `Grok runtime commands wait for an idle native session`() {
         val grok = ChatUiState(session = dev.memoh.core.model.Session("s", runtimeType = "grok-build"))
         assertTrue(grok.runtimeCommandsAvailable)
@@ -61,6 +124,25 @@ class ChatHistoryTest {
         assertNull(ready.copy(session = ready.session!!.copy(runtimeType = "codex")).retryableTurnId)
         assertNull(ready.copy(regeneration = PendingRegeneration("i", "turn")).retryableTurnId)
         assertNull(ready.copy(runtime = run("running", emptyList())).retryableTurnId)
+        for (blocked in listOf(ready.copy(session = null), ready.copy(sessionLoading = true),
+            ready.copy(busy = true), ready.copy(historyLoading = true), ready.copy(awaitingSnapshot = true),
+            ready.copy(runtime = ready.runtime.copy(needsSnapshot = true)),
+            ready.copy(pending = listOf(PendingTurn("pending", "Next question"))))) {
+            assertNull(blocked.retryableTurnId)
+        }
+        for (status in dev.memoh.core.network.SocketStatus.entries.filter { it != dev.memoh.core.network.SocketStatus.Connected }) {
+            assertNull(ready.copy(socketStatus = status).retryableTurnId)
+        }
+    }
+    @Test fun `retry stays ready while the unrelated composer draft or attachments load`() {
+        val ready = ChatUiState(session = dev.memoh.core.model.Session("session", runtimeType = "model"),
+            history = listOf(user, assistant), historyLoading = false, awaitingSnapshot = false,
+            socketStatus = dev.memoh.core.network.SocketStatus.Connected)
+        for (loading in listOf(ready.copy(draftRestoring = true), ready.copy(attachmentLoading = true),
+            ready.copy(draftRestoring = true, attachmentLoading = true))) {
+            assertFalse(loading.canSend)
+            assertEquals("turn", loading.retryableTurnId)
+        }
     }
     @Test fun `message copying preserves Markdown while excluding tools and reasoning`() {
         assertEquals("**Answer**\n\nCommand result", dev.memoh.feature.chat.components.replyCopyText(listOf(

@@ -77,7 +77,7 @@ class ProcessBlockRenderingTest {
         compose.onNodeWithText("读取 Main.kt").performClick()
         compose.onNodeWithText("fun main() = println(\"Hello\")").assertIsDisplayed()
         compose.runOnIdle {
-            state = state.copy(runtime = RuntimeState.EMPTY, history = state.history + UITurn("turn-1", role = "assistant",
+            state = state.copy(runtime = RuntimeState.EMPTY, history = state.history + UITurn("turn-1", id = "persisted-assistant", role = "assistant",
                 messages = messages.mapIndexed { i, m -> m.copy(id = i, running = false) }))
         }
         compose.waitForIdle()

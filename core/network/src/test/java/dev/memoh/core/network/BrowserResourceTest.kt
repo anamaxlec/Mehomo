@@ -122,6 +122,91 @@ class BrowserResourceTest {
         } }
     }
 
+    @Test fun `Cloud HTML launch posts the one time code and retains only delegated website cookies`() = runBlocking {
+        MockWebServer().use { account -> MockWebServer().use { preview ->
+            account.start(); preview.start()
+            val api = MemohApi(OkHttpClient(), endpoint(account, true), json, cloudAuth = cloud(account))
+            val launch = account.url("/api/v1/browser-sessions/${"c".repeat(32)}/launch").toString()
+            val client = api.browserPreview(launch)
+            account.enqueue(MockResponse().setHeader("Content-Type", "text/html; charset=utf-8")
+                .addHeader("Set-Cookie", "session=account-refreshed; Path=/; HttpOnly; Max-Age=3600").setBody("""
+                <!doctype html><title>Opening preview</title>
+                <form id="" action='${preview.url("/_memoh/bootstrap")}' method='POST'>
+                  <input value='fixture+once&amp;only&#x3d;one' name='code' type='hidden'>
+                  <button type='submit'>Continue</button>
+                </form><script>document.forms[0].submit()</script>
+            """.trimIndent()))
+            preview.enqueue(MockResponse().setResponseCode(303).setHeader("Location", "/nested/index.html")
+                .addHeader("Set-Cookie", "preview=delegated-only; Path=/; HttpOnly; Max-Age=3600"))
+            preview.enqueue(MockResponse().setHeader("Content-Type", "text/html").setBody("ready document"))
+            client.load(launch).use {
+                assertEquals(preview.url("/nested/index.html"), it.request.url)
+                assertEquals("ready document", it.body.string())
+            }
+            assertEquals("session=fixture-only", account.takeRequest().getHeader("Cookie"))
+            val bootstrap = preview.takeRequest()
+            assertEquals("POST", bootstrap.method)
+            assertEquals("/_memoh/bootstrap", bootstrap.path)
+            assertEquals("code=fixture%2Bonce%26only%3Done", bootstrap.body.readUtf8())
+            assertEquals(endpoint(account).origin, bootstrap.getHeader("Origin"))
+            for (name in listOf("Cookie", "Authorization", "X-Team-Id")) assertNull(name, bootstrap.getHeader(name))
+            val document = preview.takeRequest()
+            assertEquals("GET", document.method)
+            assertEquals("preview=delegated-only", document.getHeader("Cookie"))
+            assertNull(document.getHeader("Origin"))
+            assertFalse(client.allows(launch))
+            preview.enqueue(MockResponse().setBody("stylesheet"))
+            client.load(preview.url("/nested/theme.css").toString()).close()
+            assertEquals("preview=delegated-only", preview.takeRequest().getHeader("Cookie"))
+            assertEquals(1, account.requestCount)
+        } }
+    }
+
+    @Test fun `a bootstrap redirect cannot forward its code to another origin`() = runBlocking {
+        MockWebServer().use { account -> MockWebServer().use { preview -> MockWebServer().use { other ->
+            account.start(); preview.start(); other.start()
+            val api = MemohApi(OkHttpClient(), endpoint(account, true), json, cloudAuth = cloud(account))
+            val launch = account.url("/api/v1/browser-sessions/${"d".repeat(32)}/launch").toString()
+            account.enqueue(MockResponse().setHeader("Content-Type", "text/html").setBody("""
+                <form method="post" action="${preview.url("/_memoh/bootstrap")}">
+                <input type="hidden" name="code" value="fixture-only"></form>
+            """))
+            preview.enqueue(MockResponse().setResponseCode(307).setHeader("Location", other.url("/receive")))
+            try { api.browserPreview(launch).load(launch).close(); fail("Must not forward a bootstrap code") }
+            catch (_: UserFacingException) { }
+            assertEquals(1, preview.requestCount)
+            assertEquals(0, other.requestCount)
+        } } }
+    }
+
+    @Test fun `workspace HTML cannot initiate a native Cloud bootstrap`() = runBlocking {
+        MockWebServer().use { account -> MockWebServer().use { preview ->
+            account.start(); preview.start()
+            val api = MemohApi(OkHttpClient(), endpoint(account, true), json, cloudAuth = cloud(account))
+            val page = account.url("/preview/index.html").toString()
+            val html = """<form method="post" action="${preview.url("/_memoh/bootstrap")}"><input type="hidden" name="code" value="untrusted"></form>"""
+            account.enqueue(MockResponse().setHeader("Content-Type", "text/html").setBody(html))
+            api.browserPreview(page).load(page).use { assertEquals(html, it.body.string()) }
+            assertEquals(0, preview.requestCount)
+        } }
+    }
+
+    @Test fun `invalid launch form code fails without posting or invalidating the account`() = runBlocking {
+        MockWebServer().use { account -> MockWebServer().use { preview ->
+            account.start(); preview.start()
+            val cloud = cloud(account)
+            val api = MemohApi(OkHttpClient(), endpoint(account, true), json, cloudAuth = cloud)
+            val launch = account.url("/api/v1/browser-sessions/${"e".repeat(32)}/launch").toString()
+            account.enqueue(MockResponse().setHeader("Content-Type", "text/html").setBody("""
+                <form method="post" action="${preview.url("/_memoh/bootstrap")}"><input type="hidden" name="code" value=""></form>
+            """))
+            try { api.browserPreview(launch).load(launch).close(); fail("A code is required") }
+            catch (_: UserFacingException) { }
+            assertEquals(0, preview.requestCount)
+            assertTrue(cloud.hasSession)
+        } }
+    }
+
     @Test fun `self hosted same origin resources retry a stale bearer once`() = runBlocking {
         MockWebServer().use { server ->
             server.start()

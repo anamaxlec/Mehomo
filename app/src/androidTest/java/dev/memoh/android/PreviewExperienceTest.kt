@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.Density
@@ -24,11 +25,16 @@ import dev.memoh.core.data.*
 import dev.memoh.core.designsystem.theme.MemohTheme
 import dev.memoh.core.model.*
 import dev.memoh.core.network.*
+import dev.memoh.core.markdown.DocumentPreview
+import dev.memoh.core.markdown.HtmlFilePreview
+import dev.memoh.core.markdown.LocalMarkdownImageLoader
 import dev.memoh.feature.chat.ChatScreen
 import dev.memoh.feature.chat.ChatUiState
 import dev.memoh.feature.chat.components.ModelMenu
 import dev.memoh.feature.sessions.WorkspaceScreen
 import dev.memoh.feature.sessions.WorkspaceViewModel
+import dev.memoh.feature.sessions.BotFeatureViewModel
+import dev.memoh.feature.sessions.WorkspaceFilesScreen
 import kotlinx.coroutines.cancel
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -86,44 +92,140 @@ class PreviewExperienceTest {
         screenshot("reasoning-seven-choices-large-font")
     }
 
-    @Test fun newEmptyConversationKeepsItsSkeletonAcrossReconnectAndInitialRecommendations() {
-        var state by mutableStateOf(ChatUiState(session = Session("new"), historyLoading = false,
-            hasMoreHistory = false, socketStatus = SocketStatus.Connecting))
+    @Test fun emptyConversationNeverShowsMessageSkeletonWhileConnectingOrLoadingRecommendations() {
+        var state by mutableStateOf(ChatUiState(session = Session("new"), historyLoading = false, hasMoreHistory = false,
+            socketStatus = SocketStatus.Connecting))
         compose.setContent { MemohTheme { ChatScreen(state, {}, {}, {}, {}, {},
             onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
             onCancelUserInput = { _, _ -> }, onDismissError = {}) } }
-        compose.onNodeWithContentDescription("正在加载会话").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        compose.onNodeWithText("开始对话").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+        screenshot("new-session-empty-before-history")
+        compose.runOnIdle { state = state.copy(historyLoading = false, hasMoreHistory = false) }
+        compose.onNodeWithText("开始对话").assertIsDisplayed()
         compose.runOnIdle { state = state.copy(socketStatus = SocketStatus.Reconnecting) }
-        compose.onNodeWithContentDescription("正在加载会话").assertIsDisplayed()
-        compose.onNodeWithText("开始对话").assertDoesNotExist()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        compose.onNodeWithText("开始对话").assertIsDisplayed()
         compose.runOnIdle {
             state = state.copy(socketStatus = SocketStatus.Connected, awaitingSnapshot = false,
-                runtime = RuntimeState(sessionId = "new"), suggestionsLoading = true)
+                runtime = RuntimeState(sessionId = "new"))
         }
-        compose.onNodeWithContentDescription("正在加载会话").assertIsDisplayed()
-        compose.onNodeWithText("开始对话").assertDoesNotExist()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        compose.onNodeWithText("开始对话").assertIsDisplayed()
         screenshot("new-session-loading-recommendations")
-        compose.runOnIdle { state = state.copy(suggestionsLoading = false,
+        compose.runOnIdle { state = state.copy(
             starterPrompts = StarterPromptsResponse("fixture", listOf(StarterPrompt("写一份计划", "先问我今天的安排")))) }
         compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
         compose.onNodeWithText("写一份计划").assertIsDisplayed()
         // A subsequent refresh must keep this already-visible page in place.
-        compose.runOnIdle { state = state.copy(suggestionsLoading = true) }
+        compose.runOnIdle { state = state.copy(exampleCapabilities = mapOf("web_search" to true)) }
         compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
         compose.onNodeWithText("写一份计划").assertIsDisplayed()
     }
 
-    @Test fun initialRecommendationFailureRevealsUsableFallbackSuggestions() {
+    @Test fun backgroundCapabilityUpdatesKeepRecommendationsUsableAndSilent() {
         var state by mutableStateOf(ChatUiState(session = Session("failed-recommendations"), historyLoading = false,
-            awaitingSnapshot = false, suggestionsLoading = true, hasMoreHistory = false, socketStatus = SocketStatus.Connected))
+            awaitingSnapshot = false, hasMoreHistory = false, socketStatus = SocketStatus.Connected))
         compose.setContent { MemohTheme { ChatScreen(state, {}, {}, {}, {}, {},
             onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
             onCancelUserInput = { _, _ -> }, onDismissError = {}) } }
-        compose.onNodeWithContentDescription("正在加载会话").assertIsDisplayed()
-        compose.runOnIdle { state = state.copy(suggestionsLoading = false) }
         compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
         compose.onNodeWithText("开始对话").assertIsDisplayed()
         compose.onNodeWithText("更多示例").assertIsEnabled()
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+        compose.runOnIdle { state = state.copy(exampleCapabilities = mapOf("web_search" to false)) }
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+        compose.onNodeWithText("开始对话").assertIsDisplayed()
+        compose.onNodeWithText("更多示例").assertIsEnabled()
+    }
+
+    @Test fun onlyManualSuggestionRefreshShowsProgressAndKeepsLayoutStable() {
+        val fixed = (1..3).map { StarterPrompt("建议 $it", "写下第 $it 个问题") }
+        val refreshed = (1..3).map { StarterPrompt("新建议 $it", "写下新的第 $it 个问题") }
+        var state by mutableStateOf(ChatUiState(session = Session("new"), historyLoading = false, hasMoreHistory = false,
+            draft = "保留我的草稿", starterPrompts = StarterPromptsResponse(items = fixed)))
+        compose.setContent { MemohTheme { ChatScreen(state, {}, {}, {}, {}, {},
+            onRefreshSuggestions = { state = state.copy(starterPrompts = StarterPromptsResponse(items = refreshed)) },
+            onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+            onCancelUserInput = { _, _ -> }, onDismissError = {}) } }
+        val header = compose.onNodeWithText("开始对话").getUnclippedBoundsInRoot()
+        val card = compose.onNodeWithText("建议 1").getUnclippedBoundsInRoot()
+        val refresh = compose.onNodeWithText("换一组").getUnclippedBoundsInRoot()
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+        // Automatic history/capability updates stay silent and keep the same cards.
+        compose.mainClock.autoAdvance = false
+        compose.runOnIdle { state = state.copy(historyLoading = true, exampleCapabilities = mapOf("web_search" to true),
+            socketStatus = SocketStatus.Reconnecting) }
+        compose.mainClock.advanceTimeBy(600)
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+        assertEquals(header, compose.onNodeWithText("开始对话").getUnclippedBoundsInRoot())
+        assertEquals(card, compose.onNodeWithText("建议 1").getUnclippedBoundsInRoot())
+        assertEquals(refresh, compose.onNodeWithText("换一组").getUnclippedBoundsInRoot())
+        screenshot("suggestions-automatic-update-silent")
+        compose.onNodeWithText("换一组").performClick()
+        compose.mainClock.advanceTimeBy(96)
+        compose.onNodeWithContentDescription("正在加载建议").assertIsDisplayed()
+        compose.onNodeWithText("建议 1").assertExists()
+        compose.onNodeWithText("新建议 1").assertExists()
+        assertEquals(header, compose.onNodeWithText("开始对话").getUnclippedBoundsInRoot())
+        assertEquals(refresh, compose.onNodeWithText("换一组").getUnclippedBoundsInRoot())
+        screenshot("suggestions-manual-refresh-progress")
+        compose.mainClock.advanceTimeBy(800)
+        compose.mainClock.autoAdvance = true
+        compose.onNodeWithText("建议 1").assertDoesNotExist()
+        compose.onNodeWithText("新建议 1").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+        assertEquals("保留我的草稿", state.draft)
+        assertEquals(refresh, compose.onNodeWithText("换一组").getUnclippedBoundsInRoot())
+        // Entering another empty session resets the transition instead of showing refresh progress.
+        compose.runOnIdle { state = state.copy(session = Session("another"),
+            starterPrompts = StarterPromptsResponse(items = fixed)) }
+        compose.onNodeWithText("建议 1").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载建议").assertDoesNotExist()
+    }
+
+    @Test fun folderPickerRemainsVisibleAndClickableAfterSwitchingAgentAndDuringReconnect() {
+        var state by mutableStateOf(ChatUiState(session = Session("empty"), historyLoading = false, hasMoreHistory = false,
+            modelCatalogLoading = false, awaitingSnapshot = false, socketStatus = SocketStatus.Connected,
+            workdirs = listOf(Workdir("project", name = "个人项目")), agents = listOf(BotAgent("a", name = "测试 Agent"))))
+        var chosenFolder: String? = null
+        compose.setContent { MemohTheme { ChatScreen(state, {}, {}, {}, {}, {},
+            onSelectAgent = { id -> state = state.copy(selectedAgentId = id, awaitingSnapshot = true,
+                socketStatus = SocketStatus.Reconnecting, modelCatalogLoading = true) },
+            onSelectWorkdir = { chosenFolder = it },
+            onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+            onCancelUserInput = { _, _ -> }, onDismissError = {}) } }
+        compose.onNodeWithText("无文件夹").assertIsDisplayed()
+        compose.onNodeWithText("Memoh").performClick()
+        compose.onNodeWithText("测试 Agent").performClick()
+        compose.onNodeWithText("无文件夹").assertIsDisplayed().performClick()
+        compose.onNodeWithText("个人项目").assertIsDisplayed()
+        compose.runOnIdle { state = state.copy(historyLoading = true) }
+        compose.onNodeWithText("个人项目").assertIsDisplayed().performClick()
+        assertEquals("project", chosenFolder)
+        compose.onNodeWithText("无文件夹").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        screenshot("empty-session-folder-during-reconnect")
+        compose.runOnIdle { state = state.copy(historyLoading = false, awaitingSnapshot = false,
+            socketStatus = SocketStatus.Connected) }
+        compose.onNodeWithText("无文件夹").assertIsDisplayed()
+    }
+
+    @Test fun existingMessagesRemainReadableWhileHistoryAndConnectionRefresh() {
+        var state by mutableStateOf(ChatUiState(session = Session("existing"), historyLoading = true,
+            history = listOf(UITurn(turnId = "old", role = "user", text = "已有历史消息")), socketStatus = SocketStatus.Connecting))
+        compose.setContent { MemohTheme { ChatScreen(state, {}, {}, {}, {}, {},
+            onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+            onCancelUserInput = { _, _ -> }, onDismissError = {}) } }
+        compose.onNodeWithText("已有历史消息").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
+        compose.runOnIdle { state = state.copy(historyLoading = false, hasMoreHistory = false, awaitingSnapshot = false,
+            socketStatus = SocketStatus.Connected, runtime = RuntimeState(sessionId = "existing")) }
+        compose.onNodeWithText("已有历史消息").assertIsDisplayed()
+        compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
     }
 
     @Test fun htmlPreviewAuthenticatesRelativeAssetsFollowsRedirectsAndRunsJavaScript() {
@@ -147,13 +249,156 @@ class PreviewExperienceTest {
         }
     }
 
-    private fun readWeb(script: String): String {
+    @Test fun browserKeepsOneWavyProgressBelowTheAddressThroughBothLoadingStages() {
+        PreviewFixture(holdBrowserSession = true, holdBrowserDocument = true).use { server ->
+            val vm = WorkspaceViewModel(repository(server))
+            // Auto-advance cancels infinite transitions at their initial phase.
+            // Advance this test explicitly so screenshots include the moving wave.
+            compose.mainClock.autoAdvance = false
+            compose.setContent { MemohTheme { WorkspaceScreen("b", "", WorkspaceSurface.Browser, vm,
+                onBack = {}, initialAddress = "localhost:8124/") } }
+            fun awaitStage(timeout: Long = 10_000, ready: () -> Boolean) {
+                compose.waitUntil(timeout) {
+                    compose.mainClock.advanceTimeByFrame()
+                    ready()
+                }
+            }
+            try {
+                awaitStage { server.browserSessionRequested.count == 0L }
+                val address = compose.onNode(hasSetTextAction())
+                val progress = compose.onNodeWithContentDescription("网页加载进度")
+                progress.assertIsDisplayed()
+                compose.onAllNodes(hasProgressBarRangeInfo(ProgressBarRangeInfo.Indeterminate)).assertCountEquals(1)
+                val addressBounds = address.getUnclippedBoundsInRoot()
+                val progressBounds = progress.getUnclippedBoundsInRoot()
+                compose.mainClock.advanceTimeBy(400)
+                screenshot("browser-progress-connecting")
+                // Material expands progress semantics vertically for accessibility;
+                // the drawn wave runs through the center of that enlarged region.
+                assertTrue("The wave stays below the address: $progressBounds / $addressBounds",
+                    (progressBounds.top + progressBounds.bottom) / 2 >= addressBounds.bottom)
+                server.releaseBrowserSession.countDown()
+                awaitStage { vm.state.value.browser != null }
+                awaitStage { server.browserDocumentRequested.count == 0L }
+                compose.mainClock.advanceTimeBy(400)
+                progress.assertIsDisplayed()
+                compose.onAllNodes(hasProgressBarRangeInfo(ProgressBarRangeInfo.Indeterminate)).assertCountEquals(1)
+                assertEquals(addressBounds, address.getUnclippedBoundsInRoot())
+                assertEquals("Session-to-page handoff retains the same progress position", progressBounds, progress.getUnclippedBoundsInRoot())
+                val pageBounds = webBounds()
+                screenshot("browser-progress-document-loading")
+                server.releaseBrowserDocument.countDown()
+                awaitStage(12_000) { readWeb("document.getElementById('status')?.textContent").contains("HTML 资源加载完成") }
+                awaitStage(5_000) { compose.onAllNodesWithContentDescription("网页加载进度").fetchSemanticsNodes().isEmpty() }
+                assertEquals("Finishing a load must not move the address", addressBounds, address.getUnclippedBoundsInRoot())
+                assertEquals("Finishing a load must not resize or move the page", pageBounds, webBounds())
+                assertNull(vm.state.value.error)
+                screenshot("browser-progress-finished")
+            } finally {
+                server.releaseBrowserSession.countDown()
+                server.releaseBrowserDocument.countDown()
+                vm.viewModelScope.cancel()
+            }
+        }
+    }
+
+    @Test fun clickingAnHtmlFileRendersItsPageAndRelativeResourcesAndRetainsEditing() {
+        PreviewFixture().use { server ->
+            val vm = BotFeatureViewModel(repository(server))
+            compose.setContent { MemohTheme {
+                val state by vm.state.collectAsState()
+                WorkspaceFilesScreen(state, vm)
+            } }
+            try {
+                compose.runOnIdle { vm.openFileLink("b", "/data/html/index.html") }
+                compose.waitUntil(12_000) { readWeb("document.getElementById('status')?.textContent").contains("文件资源已就绪") }
+                assertNull(vm.state.value.error)
+                assertTrue(readWeb("getComputedStyle(document.getElementById('card')).borderRadius").contains("24px"))
+                assertTrue(readWeb("document.getElementById('cover').naturalWidth > 0").contains("true"))
+                assertEquals("\"\"", readWeb("document.cookie"))
+                assertEquals("\"undefined\"", readWeb("typeof NativeWorkspace"))
+                val resources = server.requests.filter { it.first.startsWith("/bots/b/container/fs/download?") }
+                val paths = resources.map { android.net.Uri.parse(it.first).getQueryParameter("path") }
+                assertTrue(paths.containsAll(listOf("/data/html/theme.css", "/data/html/app.mjs", "/data/html/data.mjs",
+                    "/data/html/data.json", "/data/html/cover.svg")))
+                resources.forEach { assertTrue(it.second.contains("Authorization: Bearer fixture-only", true)) }
+                readWeb("document.getElementById('action').click()")
+                compose.waitUntil(5_000) { readWeb("document.getElementById('action').textContent").contains("交互已响应") }
+                screenshot("workspace-html-file-interactive")
+                compose.onNodeWithContentDescription("编辑文件").performClick()
+                compose.onNode(hasSetTextAction()).assertTextContains("<!doctype html>", substring = true)
+                compose.onNodeWithContentDescription("预览文件").performClick()
+                compose.waitUntil(12_000) { readWeb("document.getElementById('status')?.textContent").contains("文件资源已就绪") }
+                assertEquals(server.artifactHtml, vm.state.value.fileDraft)
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
+    @Test fun htmlFilesCannotReadAboveTheirDirectoryOrShareAnotherViewersStorage() {
+        val resources = CopyOnWriteArrayList<String>()
+        val loader: suspend (String) -> ByteArray = { resources += it; "{}".toByteArray() }
+        var first by mutableStateOf(true)
+        val one = """<div id="status">加载中</div><script>localStorage.setItem('artifact','first');fetch('../private.json').then(r=>document.getElementById('status').textContent=String(r.status))</script>"""
+        val two = """<div id="status"></div><script>document.getElementById('status').textContent=localStorage.getItem('artifact')||'empty'</script>"""
+        compose.setContent { MemohTheme { HtmlFilePreview(if (first) one else two,
+            if (first) "/data/html/index.html" else "/data/other/index.html", Modifier.fillMaxSize(), loader) } }
+        compose.waitUntil(12_000) { readWeb("document.getElementById('status')?.textContent").contains("403") }
+        assertTrue(resources.isEmpty())
+        val origin = readWeb("location.origin")
+        compose.runOnIdle { first = false }
+        compose.waitUntil(12_000) { readWeb("document.getElementById('status')?.textContent").contains("empty") }
+        assertNotEquals(origin, readWeb("location.origin"))
+        assertTrue(resources.isEmpty())
+    }
+
+    @Test fun anInlineHtmlAttachmentRendersInTheDocumentDialog() {
+        val html = """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:20px system-ui;padding:24px;background:#f1f0f8}</style><h1>附件页面</h1><p id="status">正在打开</p><script>document.getElementById('status').textContent='附件HTML已运行'</script>"""
+        val source = "data:text/html;base64," + android.util.Base64.encodeToString(html.toByteArray(), android.util.Base64.NO_WRAP)
+        compose.setContent { MemohTheme {
+            CompositionLocalProvider(LocalMarkdownImageLoader provides { _: String -> html.toByteArray() }) {
+                DocumentPreview(source, "artifact.html", "text/html") {}
+            }
+        } }
+        try {
+            compose.waitUntil(12_000) {
+                readWeb("document.getElementById('status')?.textContent", inDialog = true).contains("附件HTML已运行")
+            }
+        } finally { screenshot("html-attachment-document-preview") }
+    }
+
+    private fun findWeb(view: View): WebView? = if (view is WebView) view else if (view is ViewGroup)
+        (0 until view.childCount).firstNotNullOfOrNull { findWeb(view.getChildAt(it)) } else null
+
+    private fun webBounds(): android.graphics.Rect {
+        var bounds = android.graphics.Rect()
+        compose.runOnIdle {
+            val web = checkNotNull(findWeb(compose.activity.window.decorView))
+            val location = IntArray(2)
+            web.getLocationOnScreen(location)
+            bounds = android.graphics.Rect(location[0], location[1], location[0] + web.width, location[1] + web.height)
+        }
+        return bounds
+    }
+
+    private fun readWeb(script: String, inDialog: Boolean = false): String {
         var result = ""
         val done = CountDownLatch(1)
-        fun find(view: View): WebView? = if (view is WebView) view else if (view is ViewGroup)
-            (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) } else null
+        if (inDialog) {
+            try {
+                androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom(WebView::class.java))
+                    .perform(object : androidx.test.espresso.ViewAction {
+                        override fun getDescription() = "Read the HTML document in its dialog window"
+                        override fun getConstraints() = androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom(WebView::class.java)
+                        override fun perform(controller: androidx.test.espresso.UiController, view: View) {
+                            (view as WebView).evaluateJavascript(script) { result = it; done.countDown() }
+                        }
+                    })
+            } catch (_: androidx.test.espresso.NoMatchingViewException) { return "" }
+            assertTrue(done.await(3, TimeUnit.SECONDS))
+            return result
+        }
         compose.runOnIdle {
-            val web = find(compose.activity.window.decorView)
+            val web = findWeb(compose.activity.window.decorView)
             if (web == null) done.countDown() else web.evaluateJavascript(script) { result = it; done.countDown() }
         }
         assertTrue(done.await(3, TimeUnit.SECONDS))
@@ -186,10 +431,15 @@ class PreviewExperienceTest {
     }
 }
 
-private class PreviewFixture : AutoCloseable {
+private class PreviewFixture(holdBrowserSession: Boolean = false, holdBrowserDocument: Boolean = false) : AutoCloseable {
     private val socket = ServerSocket(0, 20, InetAddress.getByName("127.0.0.1"))
     val origin = "http://localhost:${socket.localPort}"
     val requests = CopyOnWriteArrayList<Pair<String, String>>()
+    val browserSessionRequested = CountDownLatch(1)
+    val releaseBrowserSession = CountDownLatch(if (holdBrowserSession) 1 else 0)
+    val browserDocumentRequested = CountDownLatch(1)
+    val releaseBrowserDocument = CountDownLatch(if (holdBrowserDocument) 1 else 0)
+    val artifactHtml = """<!doctype html><html lang="zh"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="theme.css"><script type="module" src="app.mjs"></script><body><h1>HTML 文件预览</h1><section id="card"><img id="cover" src="cover.svg" width="64" height="64"><h2 id="status">资源加载中</h2><p>直接点开工作空间里的 HTML 文件。</p><button id="action" onclick="this.textContent='交互已响应'">试一下</button></section></body></html>"""
     private val worker = Thread {
         while (!socket.isClosed) try { socket.accept().use { client ->
             client.soTimeout = 5_000
@@ -197,25 +447,44 @@ private class PreviewFixture : AutoCloseable {
             val header = StringBuilder()
             while (!header.endsWith("\r\n\r\n")) { val next = input.read(); if (next < 0) break; header.append(next.toChar()) }
             val lines = header.toString().split("\r\n")
-            val path = lines.first().split(' ').getOrElse(1) { "/" }.substringBefore('?')
+            val rawPath = lines.first().split(' ').getOrElse(1) { "/" }
+            val path = rawPath.substringBefore('?')
             val size = lines.firstOrNull { it.startsWith("Content-Length:", true) }?.substringAfter(':')?.trim()?.toIntOrNull() ?: 0
             repeat(size) { input.read() }
-            requests += path to header.toString()
+            requests += rawPath to header.toString()
             var type = "application/json"
             var status = 200
             var extra = ""
             val body = when {
-                path.startsWith("/preview/") && !header.contains("Authorization: Bearer fixture-only", true) -> {
+                (path.startsWith("/preview/") || path.startsWith("/bots/b/container/fs/")) && !header.contains("Authorization: Bearer fixture-only", true) -> {
                     status = 401; """{"code":"INVALID_CREDENTIALS"}"""
                 }
-                path == "/bots/b/container/browser/sessions" && lines.first().startsWith("POST ") ->
+                path == "/bots/b/container/browser/sessions" && lines.first().startsWith("POST ") -> {
+                    browserSessionRequested.countDown()
+                    check(releaseBrowserSession.await(20, TimeUnit.SECONDS))
                     """{"id":"fixture-preview","url":"$origin/preview/start"}"""
+                }
                 path == "/preview/start" -> { status = 302; extra = "Location: /preview/nested/index.html\r\n"; "" }
-                path == "/preview/nested/index.html" -> { type = "text/html"; """<!doctype html><html lang="zh"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="theme.css"><script defer src="app.js"></script><body><h1>HTML 产物预览</h1><section id="card"><img src="cover.svg" width="64" height="64"><h2 id="status">资源加载中</h2><p>相对路径、样式和脚本来自需要认证的云端端口。</p><button id="action" onclick="this.textContent='交互已响应'">试一下</button></section></body></html>""" }
+                path == "/preview/nested/index.html" -> {
+                    browserDocumentRequested.countDown()
+                    check(releaseBrowserDocument.await(20, TimeUnit.SECONDS))
+                    type = "text/html"; """<!doctype html><html lang="zh"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="theme.css"><script defer src="app.js"></script><body><h1>HTML 产物预览</h1><section id="card"><img src="cover.svg" width="64" height="64"><h2 id="status">资源加载中</h2><p>相对路径、样式和脚本来自需要认证的云端端口。</p><button id="action" onclick="this.textContent='交互已响应'">试一下</button></section></body></html>"""
+                }
                 path == "/preview/nested/theme.css" -> { type = "text/css"; "body{margin:24px;background:#f3f5ed;color:#1c251a;font-family:system-ui}#card{border-radius:24px;background:#d6efc0;padding:24px}button{padding:14px 24px;border:0;border-radius:28px;background:#37672a;color:white}" }
                 path == "/preview/nested/app.js" -> { type = "text/javascript"; "fetch('data.json').then(r=>r.json()).then(v=>document.getElementById('status').textContent=v.message)" }
                 path == "/preview/nested/data.json" -> """{"message":"HTML 资源加载完成"}"""
                 path == "/preview/nested/cover.svg" -> { type = "image/svg+xml"; """<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="30" fill="#37672a"/><path d="m18 33 10 10 19-22" fill="none" stroke="white" stroke-width="5"/></svg>""" }
+                path == "/bots/b/container/fs/list" -> """{"path":"/data/html","entries":[{"name":"index.html","path":"/data/html/index.html","size":4096}]}"""
+                path == "/bots/b/container/fs/read" -> Json.encodeToString(WorkspaceDocument.serializer(),
+                    WorkspaceDocument("/data/html/index.html", artifactHtml, revision = "fixture-revision"))
+                path == "/bots/b/container/fs/download" -> when (android.net.Uri.parse(rawPath).getQueryParameter("path")) {
+                    "/data/html/theme.css" -> { type = "text/css"; "body{margin:24px;background:#f3f5ed;color:#1c251a;font-family:system-ui}#card{border-radius:24px;background:#d6efc0;padding:24px}button{padding:14px 24px;border:0;border-radius:28px;background:#37672a;color:white}" }
+                    "/data/html/app.mjs" -> { type = "text/javascript"; "import {prefix} from './data.mjs';fetch('data.json').then(r=>r.json()).then(v=>document.getElementById('status').textContent=prefix+v.message)" }
+                    "/data/html/data.mjs" -> { type = "text/javascript"; "export const prefix='文件';" }
+                    "/data/html/data.json" -> """{"message":"资源已就绪"}"""
+                    "/data/html/cover.svg" -> { type = "image/svg+xml"; """<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="30" fill="#37672a"/></svg>""" }
+                    else -> { status = 404; "not found" }
+                }
                 else -> "{}"
             }.toByteArray(Charsets.UTF_8)
             client.getOutputStream().apply {
@@ -224,5 +493,8 @@ private class PreviewFixture : AutoCloseable {
             }
         } } catch (_: Exception) { if (socket.isClosed) break }
     }.apply { isDaemon = true; start() }
-    override fun close() { socket.close(); worker.join(1_000) }
+    override fun close() {
+        releaseBrowserSession.countDown(); releaseBrowserDocument.countDown()
+        socket.close(); worker.join(1_000)
+    }
 }

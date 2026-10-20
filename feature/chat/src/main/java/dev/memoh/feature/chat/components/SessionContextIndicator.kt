@@ -1,6 +1,12 @@
 package dev.memoh.feature.chat.components
 
 import androidx.activity.compose.BackHandler
+import dev.memoh.core.designsystem.motion.MemohMotion
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,7 +53,14 @@ fun SessionContextIndicator(state: ChatUiState, onRefresh: () -> Unit, onInspect
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 CircularProgressIndicator(progress = { progress }, modifier = Modifier.size(16.dp),
                     color = tint, trackColor = tint.copy(alpha = .4f), strokeWidth = 2.dp, strokeCap = StrokeCap.Round)
-                Text(if (window != null) "$roundedPercent%" else "--", style = MaterialTheme.typography.labelLarge)
+                AnimatedContent(if (window != null) "$roundedPercent%" else "--",
+                    transitionSpec = {
+                        (fadeIn(MemohMotion.enterSpec()) togetherWith
+                            fadeOut(MemohMotion.exitSpec()))
+                            .using(SizeTransform { _, _ -> MemohMotion.enterSpec() })
+                    }, label = "context percentage") { label ->
+                    Text(label, style = MaterialTheme.typography.labelLarge)
+                }
             }
         }
         MemohPopupMenu(open, { open = false }, Alignment.BottomEnd, width = 320.dp, maxHeight = 320.dp, aboveAnchor = true) {
@@ -62,7 +75,7 @@ fun SessionContextIndicator(state: ChatUiState, onRefresh: () -> Unit, onInspect
                         Icon(Icons.Outlined.ManageSearch, "上下文检查器", Modifier.size(20.dp))
                     }
                 }
-                if (state.sessionInfo == null && state.sessionInfoLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (state.sessionInfo == null && state.sessionInfoLoading) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
                 if (window != null) ContextWaffle(usage, state.modelContextWindow)
                 ContextLegend(usage)
                 if (percent >= 70 && usage.autoCompactTokens != null) {

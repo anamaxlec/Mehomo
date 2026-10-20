@@ -87,7 +87,10 @@ fun MarkdownImage(
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxWidth().then(
                     if (height != null) Modifier.height(height)
+                    // Release the forced minimum width so the ratio can fit within the height
+                    // cap. Otherwise a tall image is measured beyond its reserved message frame.
                     else Modifier.heightIn(max = 360.dp)
+                        .wrapContentSize()
                         .aspectRatio(current.bitmap.width.toFloat() / current.bitmap.height)
                 )
                     .clip(MaterialTheme.shapes.medium).clickable { preview = true },

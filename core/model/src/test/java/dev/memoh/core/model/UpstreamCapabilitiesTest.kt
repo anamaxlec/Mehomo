@@ -3,9 +3,36 @@ package dev.memoh.core.model
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
+import kotlin.random.Random
 
 class UpstreamCapabilitiesTest {
     private val json = Json { ignoreUnknownKeys = true }
+
+    @Test fun localSuggestionsRotateThroughTheOfficialCatalogWithoutRepeatingThePreviousSet() {
+        var previous = emptyList<StarterPrompt>()
+        val seen = mutableSetOf<String>()
+        repeat(60) { seed ->
+            val next = sampleChatExamples(previous = previous, random = Random(seed))
+            assertEquals(3, next.size)
+            assertEquals(3, next.map { it.prompt }.distinct().size)
+            assertTrue(next.all { prompt -> chatExamples.any { it.title == prompt.title && it.prompt == prompt.prompt } })
+            assertTrue(next.none { it in previous })
+            assertEquals(3, next.map { prompt -> chatExamples.single { it.prompt == prompt.prompt }.category }.distinct().size)
+            seen.addAll(next.map { it.prompt })
+            previous = next
+        }
+        assertEquals(chatExamples.map { it.prompt }.toSet(), seen)
+    }
+
+    @Test fun localSuggestionsExcludeOnlyKnownMissingCapabilitiesAndNeverExhaustTheCatalog() {
+        val unavailable = chatExamples.flatMap { it.requires }.distinct().associateWith { false }
+        val basics = sampleChatExamples(unavailable, random = Random(1))
+        assertEquals(3, basics.size)
+        assertTrue(basics.all { prompt -> chatExamples.single { it.prompt == prompt.prompt }.requires.isEmpty() })
+        assertEquals(basics.toSet(), sampleChatExamples(unavailable, basics, Random(2)).toSet())
+        val limited = mapOf("browser" to false, "web_search" to false)
+        assertTrue(sampleChatExamples(limited).all { prompt -> chatExamples.single { it.prompt == prompt.prompt }.missing(limited).isEmpty() })
+    }
 
     @Test fun unchangedAndFailedGenerationKeepTheHeldPromptSet() {
         val held = StarterPromptsResponse("server-material", listOf(StarterPrompt("旧标题", "旧问题")))

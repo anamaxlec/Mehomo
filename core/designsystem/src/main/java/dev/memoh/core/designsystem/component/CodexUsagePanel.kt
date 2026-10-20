@@ -18,7 +18,7 @@ fun CodexUsagePanel(usage: CodexUsage?, loading: Boolean, error: String?, onRefr
             Text("ChatGPT 账号额度", style = MaterialTheme.typography.titleMedium)
             TextButton(onRefresh, enabled = !loading) { Text("刷新") }
         }
-        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (loading) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
         if (usage?.limitReached == true) Text("账号额度已用尽，请等待重置。", color = MaterialTheme.colorScheme.error)
         error?.takeIf(String::isNotBlank)?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         usage?.windows?.forEach { window ->
@@ -26,8 +26,9 @@ fun CodexUsagePanel(usage: CodexUsage?, loading: Boolean, error: String?, onRefr
                 Text(window.label, style = MaterialTheme.typography.bodyMedium)
                 Text("${String.format(Locale.ROOT, "%.0f", window.usedPercent)}% 已用", style = MaterialTheme.typography.labelMedium)
             }
-            LinearProgressIndicator(progress = { (window.usedPercent / 100).toFloat().coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth(),
-                color = if (window.usedPercent >= 90) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+            LinearWavyProgressIndicator(progress = { (window.usedPercent / 100).toFloat().coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth(),
+                color = if (window.usedPercent >= 90) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                waveSpeed = 0.dp)
             Text(window.resetsAt?.let { time -> "重置时间 · " + runCatching {
                 Instant.parse(time).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))
             }.getOrDefault(time) } ?: "未提供重置时间", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

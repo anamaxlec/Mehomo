@@ -1,12 +1,18 @@
 package dev.memoh.feature.chat.components
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.activity.compose.BackHandler
+import dev.memoh.core.designsystem.motion.MemohMotion
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
@@ -54,6 +60,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -214,16 +221,13 @@ fun Composer(
                         if (onModelClick != null) {
                             Box(Modifier.weight(1f).heightIn(min = 48.dp), contentAlignment = Alignment.CenterEnd) {
                                 Box {
-                                Crossfade(modelLoading, animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(), label = "model loaded") { loading ->
-                                    if (loading) MemohSkeleton(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), "正在加载模型") {
-                                        MemohSkeletonBlock(Modifier.width(18.dp + 154.dp * expansion).height(18.dp), MaterialTheme.shapes.large)
-                                    } else ModelSelector(
-                                        label = modelLabel ?: "暂无可用模型",
+                                ModelSelector(
+                                        label = modelLabel,
+                                        loading = modelLoading,
                                         onClick = { plusOpen = false; modelOpen = !modelOpen },
                                         enabled = enabled && modelLabel != null,
                                         expansion = expansion,
                                     )
-                                }
                                 modelMenu?.invoke(modelOpen) { modelOpen = false }
                                 }
                             }
@@ -257,7 +261,8 @@ fun Composer(
 /** The model and effort, shown as one tappable label rather than two controls. */
 @Composable
 private fun ModelSelector(
-    label: String,
+    label: String?,
+    loading: Boolean,
     onClick: () -> Unit,
     enabled: Boolean,
     expansion: Float = 1f,
@@ -271,20 +276,28 @@ private fun ModelSelector(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        // Keep the Tune control in place, even before the catalogue is available.
+        // Only the expanded label needs a placeholder or a content transition.
+        AnimatedContent(
+            targetState = label ?: if (loading) null else "暂无可用模型",
+            transitionSpec = {
+                (fadeIn(MemohMotion.enterSpec()) togetherWith
+                    fadeOut(MemohMotion.exitSpec()))
+                    .using(SizeTransform { _, _ -> MemohMotion.enterSpec() })
+            }, label = "model label",
             modifier = Modifier.weight(1f, fill = false).clipToBounds().layout { measurable, constraints ->
                 val label = measurable.measure(constraints)
                 layout((label.width * expansion).roundToInt(), label.height) { label.placeRelative(0, 0) }
             }.graphicsLayer { alpha = ((expansion - .35f) / .65f).coerceIn(0f, 1f) },
-        )
+        ) { displayed ->
+            if (displayed == null) MemohSkeleton(description = "正在加载模型") {
+                MemohSkeletonBlock(Modifier.width(154.dp).height(18.dp), MaterialTheme.shapes.large)
+            } else Text(displayed, style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
         Crossfade(targetState = expansion >= .5f, animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(), label = "modelControl") { expanded ->
             Icon(if (expanded) Icons.Filled.ArrowDropDown else Icons.Filled.Tune,
-                if (expanded) null else "模型：$label", Modifier.size(18.dp),
+                if (expanded) null else if (label == null && loading) "模型选项加载中" else "模型：${label ?: "暂无可用模型"}", Modifier.size(18.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -308,6 +321,8 @@ data class ComposerCapability(
     val selectedId: String? = null,
     /** Keep the control visible while its options are unavailable. */
     val enabled: Boolean = true,
+    /** Keep the slot addressable until its enter/exit transition finishes. */
+    val visible: Boolean = true,
 )
 
 /** One choice inside a [ComposerCapability]; a null [id] means "follow the default". */
@@ -320,26 +335,36 @@ data class CapabilityOption(
 private fun CapabilityRow(capabilities: List<ComposerCapability>, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier.horizontalScroll(rememberScrollState()).padding(start = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        capabilities.forEach { capability ->
-            CapabilityChip(capability)
+        capabilities.forEachIndexed { index, capability ->
+            key(capability.label) {
+                androidx.compose.animation.AnimatedVisibility(capability.visible,
+                    enter = expandHorizontally(MemohMotion.enterSpec(), expandFrom = Alignment.Start) + fadeIn(MemohMotion.enterSpec()),
+                    exit = shrinkHorizontally(MemohMotion.enterSpec(), shrinkTowards = Alignment.Start) + fadeOut(MemohMotion.exitSpec()),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Spacing collapses with the item instead of snapping away on the final frame.
+                        if (index > 0) Spacer(Modifier.width(4.dp))
+                        CapabilityChip(capability)
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun CapabilityChip(capability: ComposerCapability) {
+private fun CapabilityChip(capability: ComposerCapability, modifier: Modifier = Modifier) {
     var open by remember { mutableStateOf(false) }
-    BackHandler(open) { open = false }
+    BackHandler(open && capability.visible) { open = false }
 
-    Box {
+    Box(modifier) {
         Row(
             modifier = Modifier
                 .heightIn(min = 48.dp)
                 .clip(MaterialTheme.shapes.large)
-                .clickable(enabled = capability.enabled, role = Role.Button,
+                .clickable(enabled = capability.enabled && capability.visible, role = Role.Button,
                     onClickLabel = "选择${capability.label}") { open = true }
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -351,14 +376,19 @@ private fun CapabilityChip(capability: ComposerCapability) {
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(16.dp),
             )
-            Text(
-                text = capability.value ?: capability.label,
+            AnimatedContent(
+                targetState = capability.value ?: capability.label,
                 modifier = Modifier.widthIn(max = 128.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+                contentAlignment = Alignment.CenterStart,
+                transitionSpec = {
+                    (fadeIn(MemohMotion.enterSpec()) togetherWith
+                        fadeOut(MemohMotion.exitSpec()))
+                        .using(SizeTransform { _, _ -> MemohMotion.enterSpec() })
+                }, label = "capability value",
+            ) { value ->
+                Text(value, style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
 
         // The same popup the + and model menus use, so every menu in the
@@ -366,7 +396,7 @@ private fun CapabilityChip(capability: ComposerCapability) {
         // different shape, elevation and motion from its neighbours, which made
         // the row look like it belonged to a different app.
         MemohPopupMenu(
-            expanded = open,
+            expanded = open && capability.visible,
             onDismiss = { open = false },
             alignment = Alignment.BottomStart,
         ) {
@@ -377,6 +407,7 @@ private fun CapabilityChip(capability: ComposerCapability) {
                     icon = capability.icon,
                     selected = option.id == capability.selectedId,
                     selectable = true,
+                    enabled = capability.enabled && capability.visible,
                     onClick = {
                         open = false
                         capability.onSelect(option.id)

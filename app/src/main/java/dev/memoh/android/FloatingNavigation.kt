@@ -1,8 +1,11 @@
 package dev.memoh.android
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -23,6 +26,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import dev.memoh.core.designsystem.component.LocalFloatingNavigationPadding
 import dev.memoh.core.designsystem.component.MemohSectionBar
 import dev.memoh.core.designsystem.component.collapseOnScroll
+import dev.memoh.core.designsystem.motion.MemohMotion
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -69,7 +73,7 @@ internal fun rememberSectionNavigationState() = rememberSaveable(saver = Section
 
 internal fun floatingSection(route: String?, feature: String?, surface: String?, section: MainSection): MainSection? = when (route) {
     Routes.MAIN -> section
-    Routes.MANAGEMENT, Routes.HISTORY -> MainSection.Profile
+    Routes.MANAGEMENT, Routes.HISTORY, Routes.SETTINGS -> MainSection.Profile
     Routes.FEATURE -> MainSection.entries.firstOrNull { it.feature?.name == feature } ?: MainSection.Profile
     Routes.WORKSPACE -> MainSection.entries.firstOrNull { it.name == surface } ?: MainSection.Profile
     else -> null
@@ -87,6 +91,7 @@ internal fun FloatingNavigationHost(
     navigation: SectionNavigationState,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    cornerContent: @Composable BoxScope.() -> Unit = {},
     builder: NavGraphBuilder.() -> Unit,
 ) {
     val entry by navController.currentBackStackEntryAsState()
@@ -113,25 +118,35 @@ internal fun FloatingNavigationHost(
         Box(modifier.fillMaxSize().collapseOnScroll(navigation.barExpanded,
             onExpand = { navigation.barExpanded = true }, onCollapse = { navigation.barExpanded = false })) {
             MemohNavHost(navController, startDestination, sectionReturn = sectionReturn, builder = builder)
-            if (visible) MemohSectionBar(
-                items = sections.map { it.navItem },
-                selectedIndex = sections.indexOf(selected),
-                collapsed = !navigation.barExpanded && selected != null,
-                onSelect = { index ->
-                    val target = sections[index]
-                    val from = selected ?: target
-                    val fromDetail = route != Routes.MAIN
-                    val motion = if (target == from && section != from) SectionMotion.Pop else tabMotion(from, target, sections, rtl)
-                    if (fromDetail) entry?.let { sectionReturn = SectionReturn(it.id, motion) }
-                    navigation.select(target, motion, fromDetail)
-                    if (fromDetail && !navController.popBackStack(Routes.MAIN, false)) {
-                        navController.navigate(Routes.MAIN) { popUpTo(navController.graph.id) { inclusive = true } }
-                    }
-                },
-                modifier = Modifier.align(Alignment.BottomStart).navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .onSizeChanged { barHeight = with(density) { it.height.toDp() } },
-            )
+            // Both floating controls live outside NavHost and share one entrance.
+            // A corner action inside the shell would also inherit the page slide.
+            AnimatedVisibility(visible,
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                enter = MemohMotion.panelEnter(), exit = MemohMotion.panelExit()) {
+                Box(Modifier.fillMaxWidth()) {
+                    MemohSectionBar(
+                        items = sections.map { it.navItem },
+                        selectedIndex = sections.indexOf(selected),
+                        collapsed = !navigation.barExpanded && selected != null,
+                        onSelect = { index ->
+                            val target = sections[index]
+                            val from = selected ?: target
+                            val fromDetail = route != Routes.MAIN
+                            val motion = if (target == from && section != from) SectionMotion.Pop else tabMotion(from, target, sections, rtl)
+                            if (fromDetail) entry?.let { sectionReturn = SectionReturn(it.id, motion) }
+                            navigation.select(target, motion, fromDetail)
+                            if (fromDetail && !navController.popBackStack(Routes.MAIN, false)) {
+                                navController.navigate(Routes.MAIN) { popUpTo(navController.graph.id) { inclusive = true } }
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.CenterStart)
+                            .onSizeChanged { barHeight = with(density) { it.height.toDp() } },
+                    )
+                    // Keep the action beside the bar throughout its exit into chat.
+                    if (route == Routes.MAIN || section == null) cornerContent()
+                }
+            }
         }
     }
 }

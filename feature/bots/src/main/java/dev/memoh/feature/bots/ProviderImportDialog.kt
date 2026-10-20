@@ -70,7 +70,7 @@ fun ProviderImportDialog(payload: ProviderImport, destination: String, state: Pr
             Text(payload.baseUrl)
             Text(payload.clientType, style = MaterialTheme.typography.bodySmall)
             Text("API key · ${payload.maskedKey}", style = MaterialTheme.typography.bodyMedium)
-            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (state.createdId == null) Text("确认后会保存配置，并尝试从此供应商导入模型。", style = MaterialTheme.typography.bodySmall)
             else if (!state.modelsImported) Text("模型导入暂未完成，可在供应商页面重试。", style = MaterialTheme.typography.bodySmall)

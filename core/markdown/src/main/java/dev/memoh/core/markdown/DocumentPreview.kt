@@ -2,6 +2,7 @@ package dev.memoh.core.markdown
 
 
 import android.content.Intent
+import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
@@ -61,7 +62,7 @@ fun DocumentPreview(source: String, name: String, mime: String? = null, onDismis
                     DocumentState.Ready(file, bytes, pages)
                 } else DocumentState.Ready(file, bytes, text = when {
                     extension in setOf("docx", "pptx", "odt") -> officeText(bytes, extension)
-                    extension in setOf("txt", "md", "markdown", "json", "csv", "log", "xml", "html", "svg", "mmd", "tex") || mime?.startsWith("text/") == true -> bytes.toString(Charsets.UTF_8)
+                    extension in setOf("txt", "md", "markdown", "json", "csv", "log", "xml", "html", "htm", "svg", "mmd", "tex") || mime?.startsWith("text/") == true -> bytes.toString(Charsets.UTF_8)
                     else -> null
                 })
             }
@@ -100,6 +101,16 @@ fun DocumentPreview(source: String, name: String, mime: String? = null, onDismis
                 is DocumentState.Failed -> Box(Modifier.fillMaxSize().padding(padding).padding(24.dp), contentAlignment = Alignment.Center) { Text(document.message, color = MaterialTheme.colorScheme.error) }
                 is DocumentState.Ready -> if (document.pages > 0) LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(document.pages) { page -> PdfPage(document.file, page, document.pages) }
+                } else if (document.text != null && (name.substringAfterLast('.').lowercase() in setOf("html", "htm") || mime == "text/html")) {
+                    val location = remember(source) { Uri.parse(source) }
+                    val filePath = if (location.isHierarchical) location.getQueryParameter("path") else null
+                    val resourceLoader: (suspend (String) -> ByteArray)? = remember(source, loader) {
+                        if (filePath == null || loader == null) null else { path ->
+                            loader(location.buildUpon().clearQuery().appendQueryParameter("path", path).build().toString())
+                        }
+                    }
+                    HtmlFilePreview(document.text, filePath ?: "/${name.substringAfterLast('/')}",
+                        Modifier.fillMaxSize().padding(padding), resourceLoader)
                 } else Column(Modifier.fillMaxSize().padding(padding).padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     val extension = name.substringAfterLast('.').lowercase()
                     if (document.text == null) Text("此格式可保存或用其他应用打开。", style = MaterialTheme.typography.bodyLarge)
@@ -140,7 +151,7 @@ private fun PdfPage(file: File, index: Int, total: Int) {
         Text("${index + 1} / $total", style = MaterialTheme.typography.labelSmall)
         if (error != null) Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
         else bitmap?.let { Image(it.asImageBitmap(), "第 ${index + 1} 页", Modifier.fillMaxWidth().padding(top = 4.dp)) }
-            ?: LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
+            ?: LinearWavyProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
     }
 }
 

@@ -20,6 +20,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -78,6 +80,7 @@ fun MemohCornerFab(
     containerColor: Color = MaterialTheme.colorScheme.primaryContainer,
     contentColor: Color = MaterialTheme.colorScheme.onPrimaryContainer,
     collapsed: Boolean = false,
+    enabled: Boolean = true,
 ) {
     val size by animateDpAsState(
         targetValue = if (collapsed) 40.dp else 56.dp,
@@ -85,8 +88,8 @@ fun MemohCornerFab(
         label = "cornerFabSize",
     )
     FloatingActionButton(
-        onClick = onClick,
-        modifier = modifier.size(size),
+        onClick = { if (enabled) onClick() },
+        modifier = modifier.size(size).semantics { if (!enabled) disabled() },
         shape = CircleShape,
         containerColor = containerColor,
         contentColor = contentColor,

@@ -1,6 +1,7 @@
 package dev.memoh.feature.chat.components
 
 import android.content.ClipData
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -79,9 +80,15 @@ fun MessageActions(
             Icon(if (copied) Icons.Outlined.Check else Icons.Outlined.ContentCopy,
                 if (copied) "已复制" else "复制消息", Modifier.size(16.dp))
         }
-        if (assistant) IconButton(onClick = onRetry, modifier = buttonModifier, enabled = enabled && retryEnabled,
-            colors = colors, shapes = shapes) {
-            Icon(Icons.Outlined.Replay, if (retryEnabled) "重新生成" else "仅最新回复可重新生成", Modifier.size(16.dp))
+        if (assistant) {
+            val canRetry = enabled && retryEnabled
+            val retryTint by animateColorAsState(if (canRetry) colors.contentColor else colors.disabledContentColor,
+                MaterialTheme.motionScheme.defaultEffectsSpec(), label = "retry availability")
+            IconButton(onClick = onRetry, modifier = buttonModifier, enabled = canRetry,
+                colors = IconButtonDefaults.iconButtonColors(contentColor = retryTint, disabledContentColor = retryTint),
+                shapes = shapes) {
+                Icon(Icons.Outlined.Replay, "重新生成", Modifier.size(16.dp))
+            }
         }
         Box {
             IconButton(onClick = { moreOpen = !moreOpen }, modifier = buttonModifier, colors = colors, shapes = shapes) {

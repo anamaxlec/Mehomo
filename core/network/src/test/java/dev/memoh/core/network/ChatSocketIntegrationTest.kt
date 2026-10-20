@@ -16,6 +16,34 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSocketIntegrationTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    @Test fun `foreground recovery bypasses retry delay and leaves a healthy connection alone`() {
+        val server = MockWebServer()
+        val frames = LinkedBlockingQueue<String>()
+        val failed = LinkedBlockingQueue<Unit>()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) { frames.add(text) }
+        }))
+        server.start()
+        val attempts = AtomicInteger()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val socket = ChatSocket(OkHttpClient(), json, scope, buildRequest = {
+            if (attempts.incrementAndGet() == 1) throw IOException("Temporary background disconnect")
+            Request.Builder().url(server.url("/web/ws")).build()
+        }, onEvent = {}, onStatus = { if (it == SocketStatus.Reconnecting) failed.add(Unit) })
+        try {
+            socket.connect("session")
+            assertNotNull(failed.poll(3, TimeUnit.SECONDS))
+            repeat(5) { socket.reconnectIfNeeded() }
+            val restored = frames.poll(800, TimeUnit.MILLISECONDS)
+                ?: throw AssertionError("Foreground recovery waited for the retry backoff")
+            assertEquals("runtime_subscribe", json.parseToJsonElement(restored).jsonObject["type"]!!.jsonPrimitive.content)
+            repeat(5) { socket.reconnectIfNeeded() }
+            assertNull("A healthy transport must not reconnect or repeat its subscription", frames.poll(1300, TimeUnit.MILLISECONDS))
+            assertEquals(2, attempts.get())
+        } finally { socket.close(); scope.cancel(); server.shutdown() }
+    }
+
     @Test fun `sidebar observes several sessions replaces its set and restores subscriptions after reconnect`() {
         val server = MockWebServer()
         val frames = LinkedBlockingQueue<String>()

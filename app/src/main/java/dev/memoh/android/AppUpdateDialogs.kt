@@ -9,10 +9,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.markdown.MemohMarkdown
+import android.content.ClipData
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal fun AppUpdateState.description(): String = when (status) {
     UpdateStatus.Idle -> "从 GitHub 发行版检查更新"
@@ -25,6 +32,13 @@ internal fun AppUpdateState.description(): String = when (status) {
 @Composable
 internal fun AppUpdateSettings(state: AppUpdateState, automatic: Boolean, onAutomatic: (Boolean) -> Unit,
     onCheck: () -> Unit, onRelease: () -> Unit, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val crashReport by produceState<String?>(null, context) {
+        value = withContext(Dispatchers.IO) { runCatching { LocalCrashReports.read(context) }.getOrNull() }
+    }
+    var copied by remember { mutableStateOf(false) }
     MemohFormDialog("版本与更新", onDismiss,
         confirmButton = { MemohActionButton(if (state.status == UpdateStatus.Available) "查看更新" else "检查更新", Icons.Filled.Refresh,
             if (state.status == UpdateStatus.Available) onRelease else onCheck, enabled = state.status != UpdateStatus.Checking, primary = true) },
@@ -42,6 +56,20 @@ internal fun AppUpdateSettings(state: AppUpdateState, automatic: Boolean, onAuto
                         Text("打开应用时检查，每天一次；发现新正式版时提醒。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Switch(automatic, onAutomatic)
+                }
+                if (crashReport != null) {
+                    HorizontalDivider()
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("崩溃记录", style = MaterialTheme.typography.titleSmall)
+                        Text("仅保存在本机，包含应用版本、机型、系统和异常调用栈。", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        MemohActionButton(if (copied) "崩溃日志已复制" else "复制崩溃日志", Icons.Filled.ContentCopy, {
+                            scope.launch {
+                                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Mehomo 崩溃日志", crashReport)))
+                                copied = true
+                            }
+                        })
+                    }
                 }
             }
         })

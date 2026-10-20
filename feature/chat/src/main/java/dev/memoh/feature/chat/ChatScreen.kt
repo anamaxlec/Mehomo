@@ -1,6 +1,5 @@
 package dev.memoh.feature.chat
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.AnimationSpec
@@ -75,8 +74,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -180,6 +188,9 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
 
     val settled = state.settledHistory
+    val assistantKeys = remember(settled) { assistantHistoryKeys(settled) }
+    val retryableTurnId = state.retryableTurnId
+    val retryableRowKey = if (retryableTurnId != null) state.history.lastOrNull { it.isAssistant }?.listKey else null
     val liveMessages = state.liveMessages
     val liveUsers = state.liveUserTurns
     val run = state.runtime.run
@@ -187,7 +198,9 @@ fun ChatScreen(
         parseQueueCommand(state.draft, state.controls?.commands.orEmpty().mapNotNull { it.name })
     }
     var initiallyPositioned by rememberSaveable(state.session?.id) { mutableStateOf(false) }
-    val showHistoryPlaceholder = (!initiallyPositioned || state.historyLoading && settled.isEmpty() && liveMessages.isEmpty()) && state.historyError == null
+    val showEmptyConversation = state.hasResolvedHistory && state.isEmptyConversation && state.historyError == null
+    val showHistoryPlaceholder = state.historyError == null &&
+        (!state.hasResolvedHistory && state.isEmptyConversation || !state.isEmptyConversation && !initiallyPositioned)
     val historyPlaceholder = remember(state.session?.id) {
         MutableTransitionState(showHistoryPlaceholder)
     }
@@ -203,12 +216,28 @@ fun ChatScreen(
         resumeScrollPending = true
         resumed = true
     }
+    val connection = connectionMessage(state.socketStatus, state.awaitingSnapshot, state.runtime.sessionId == null)
+    val connectionAttention = connectionNeedsAttention(state.session?.id, state.socketStatus, state.awaitingSnapshot, resumed)
     var jumpingToLatest by remember(state.session?.id) { mutableStateOf(false) }
     var loadingHistoryImages by remember(state.session?.id) { mutableIntStateOf(0) }
     val onHistoryImageLoading = remember(state.session?.id) {
         { loading: Boolean -> loadingHistoryImages += if (loading) 1 else -1 }
     }
     val latestState by androidx.compose.runtime.rememberUpdatedState(state)
+    val loadOlder by androidx.compose.runtime.rememberUpdatedState(onLoadOlder)
+    val historyScroll = remember(listState) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                val current = latestState
+                // Reaching index zero through layout/following a reply is not a request for old history.
+                if (source == NestedScrollSource.UserInput && consumed.y + available.y > 0f && initiallyPositioned &&
+                    listState.firstVisibleItemIndex == 0 &&
+                    current.hasMoreHistory && !current.historyLoading && !current.loadingMore &&
+                    current.historyError == null && current.olderHistoryError == null) loadOlder()
+                return Offset.Zero
+            }
+        }
+    }
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     val scrollSpec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
     val transcriptAlpha by animateFloatAsState(
@@ -240,19 +269,11 @@ fun ChatScreen(
         // the last socket frame. Follow those frames as well as text appends.
         androidx.compose.runtime.snapshotFlow { Triple(latestState, listState.layoutInfo, loadingHistoryImages) }.conflate().collect {
             androidx.compose.runtime.withFrameNanos { }
-            if (latestState.historyLoading) return@collect
-            if (!initiallyPositioned && latestState.awaitingSnapshot && latestState.runtime.sessionId == null) {
-                val offlineHistory = latestState.settledHistory.isNotEmpty() &&
-                    latestState.socketStatus in listOf(SocketStatus.Reconnecting, SocketStatus.Closed)
-                if (!offlineHistory) return@collect
-            }
-            if (jumpingToLatest) return@collect
-            if (latestState.settledHistory.isEmpty() && latestState.liveMessages.isEmpty() &&
-                latestState.liveUserTurns.isEmpty() && latestState.pending.isEmpty() && !latestState.isRunning) {
-                if (!initiallyPositioned && latestState.suggestionsLoading && latestState.starterPrompts.items.isEmpty()) return@collect
+            if (latestState.hasResolvedHistory && latestState.isEmptyConversation) {
                 initiallyPositioned = true
                 return@collect
             }
+            if (jumpingToLatest) return@collect
             if ((!initiallyPositioned || followingLatest) && listState.layoutInfo.totalItemsCount > 0) {
                 // A drag can cancel this scroll without cancelling the follower.
                 coroutineScope {
@@ -261,23 +282,15 @@ fun ChatScreen(
                 // The first scroll may need another measurement, especially
                 // when the last Markdown block is taller than the viewport.
                 androidx.compose.runtime.withFrameNanos { }
-                // A decoded image can grow beyond its loading placeholder.
-                // Keep the first reveal covered until that height is measured.
-                if (atBottom && loadingHistoryImages == 0) {
+                // Images keep their own placeholders. Reveal readable content as
+                // soon as it is positioned; later image growth still follows below.
+                if (atBottom) {
                     initiallyPositioned = true
                     resumeScrollPending = false
                 }
             }
         }
     }
-    LaunchedEffect(initiallyPositioned, state.hasMoreHistory, state.historyLoading,
-        state.loadingMore, state.historyError, state.olderHistoryError) {
-        if (!initiallyPositioned || !state.hasMoreHistory || state.historyLoading ||
-            state.loadingMore || state.historyError != null || state.olderHistoryError != null) return@LaunchedEffect
-        androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex }.first { it == 0 }
-        onLoadOlder()
-    }
-
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -291,26 +304,33 @@ fun ChatScreen(
                     }
                 },
                 title = {
-                    Column {
-                        Text(
-                            text = state.session?.title?.takeIf(String::isNotBlank)
-                                ?: "会话",
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        ConnectionLine(
-                            status = state.socketStatus,
-                            isRunning = state.isRunning,
-                            initialLoading = state.awaitingSnapshot && state.runtime.sessionId == null,
-                        )
-                    }
+                    Text(
+                        text = state.session?.title?.takeIf(String::isNotBlank) ?: "会话",
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 },
                 actions = {
                     var moreOpen by remember { mutableStateOf(false) }
                     Box {
-                        IconButton(onClick = { moreOpen = !moreOpen }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = "更多")
+                        IconButton(onClick = { moreOpen = !moreOpen }, modifier = Modifier.semantics {
+                            if (connectionAttention) {
+                                stateDescription = connection.first
+                                liveRegion = LiveRegionMode.Polite
+                            }
+                        }) {
+                            BadgedBox(badge = {
+                                // The badge is an overlay; its entrance never resizes the action.
+                                Box(Modifier.size(6.dp).clearAndSetSemantics {}) {
+                                    androidx.compose.animation.AnimatedVisibility(connectionAttention,
+                                        enter = fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
+                                        exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec())) {
+                                        // Recovery fades the attention dot out without flashing an online color.
+                                        MemohStatusDot(MemohStatus.Warning, size = 6.dp)
+                                    }
+                                }
+                            }) { Icon(Icons.Filled.MoreVert, contentDescription = "更多") }
                         }
                         // Conversation actions stay together; workspace surfaces
                         // are opened from the adjacent + control.
@@ -319,6 +339,19 @@ fun ChatScreen(
                             onDismiss = { moreOpen = false },
                             alignment = Alignment.BottomEnd,
                         ) {
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("连接状态", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Row(verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    MemohStatusDot(connection.second, size = 6.dp)
+                                    Text(connection.first, style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface, maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            MemohMenuDivider()
                             MemohMenuRow("会话控制", Icons.Filled.Tune, { moreOpen = false; onOpenControls() })
                             MemohMenuRow("记忆", Icons.Filled.Psychology, { moreOpen = false; onOpenFeature("Memory") })
                             MemohMenuRow("日程", Icons.Filled.CalendarMonth, { moreOpen = false; onOpenFeature("Schedules") })
@@ -367,18 +400,13 @@ fun ChatScreen(
                         }
                     }
 
-                    initiallyPositioned && !state.historyLoading && settled.isEmpty() && liveMessages.isEmpty() && liveUsers.isEmpty() && state.pending.isEmpty() && !state.isRunning -> {
-                        EmptyConversation(
-                            state = state, onPick = onDraftChange, onRefresh = onRefreshSuggestions, onConfigure = onConfigureExample,
-                            modifier = Modifier.align(Alignment.Center)
-                                .graphicsLayer { alpha = transcriptAlpha },
-                        )
-                    }
+                    showEmptyConversation -> Unit
 
                     else -> CompositionLocalProvider(LocalMarkdownImageLoading provides onHistoryImageLoading) {
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize()
+                                .nestedScroll(historyScroll)
                                 .graphicsLayer { alpha = transcriptAlpha }
                                 .then(if (initiallyPositioned) Modifier else Modifier.clearAndSetSemantics { }),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -388,16 +416,17 @@ fun ChatScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             settled.forEach { turn ->
+                                val assistantKey = assistantKeys[turn.listKey] ?: turn.turnId
                                 if (turn.isAssistant && turn.safeMessages.isNotEmpty()) {
-                                    assistantMessages(turn.turnId, turn.safeMessages, isRunning = false,
+                                    assistantMessages(assistantKey, turn.safeMessages, isRunning = false,
                                         onToggleDetails = { followingLatest = false })
                                 } else item(key = "turn-${turn.listKey}") {
                                     TurnItem(turn, Modifier.padding(top = 10.dp))
                                 }
-                                if (turn.isAssistant) item(key = "assistant-${turn.turnId}:actions") {
+                                if (turn.isAssistant) item(key = "assistant-$assistantKey:actions") {
                                     MessageActions(replyCopyText(turn.safeMessages), turn.timestamp, assistant = true,
                                         enabled = !state.busy && !state.isRunning,
-                                        retryEnabled = state.retryableTurnId == turn.turnId,
+                                        retryEnabled = retryableRowKey == turn.listKey,
                                         onRetry = { onRegenerate(turn.turnId) },
                                         onFork = if (state.canFork(turn)) {{ onFork(turn.turnId) }} else null)
                                 }
@@ -422,7 +451,7 @@ fun ChatScreen(
                                         timestamp = run.updatedAt.orEmpty(), messages = liveMessages)
                                     MessageActions(replyCopyText(liveMessages), turn.timestamp, assistant = true,
                                         enabled = !state.busy && !state.isRunning,
-                                        retryEnabled = state.retryableTurnId == run.turnId,
+                                        retryEnabled = retryableTurnId == run.turnId,
                                         onRetry = { onRegenerate(run.turnId) },
                                         onFork = if (state.canFork(turn)) {{ onFork(run.turnId) }} else null)
                                     }
@@ -439,6 +468,15 @@ fun ChatScreen(
                 }
 
                 androidx.compose.animation.AnimatedVisibility(
+                    visible = showEmptyConversation,
+                    modifier = Modifier.align(Alignment.Center),
+                    enter = androidx.compose.animation.fadeIn(MemohMotion.enterSpec()),
+                    exit = androidx.compose.animation.fadeOut(MemohMotion.exitSpec()),
+                ) {
+                    EmptyConversation(state, onDraftChange, onRefreshSuggestions, onConfigureExample)
+                }
+
+                androidx.compose.animation.AnimatedVisibility(
                     visibleState = historyPlaceholder,
                     enter = fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
                     exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
@@ -448,11 +486,14 @@ fun ChatScreen(
 
                 // Pagination status is an overlay: confirming there are no older
                 // turns must not remove a row and shift a short conversation.
-                if (initiallyPositioned && !historyPlaceholder.currentState && !historyPlaceholder.targetState &&
-                    state.loadingMore && listState.firstVisibleItemIndex == 0) {
-                    Box(Modifier.align(Alignment.TopCenter).padding(top = 8.dp)) {
-                        ContainedLoadingIndicator()
-                    }
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = initiallyPositioned && !historyPlaceholder.currentState && !historyPlaceholder.targetState &&
+                        state.loadingMore && listState.firstVisibleItemIndex == 0,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
+                    enter = fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
+                    exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
+                ) {
+                    ContainedLoadingIndicator(Modifier.semantics { contentDescription = "正在加载更早消息" })
                 }
 
                 // Jump-to-bottom, shown only when the reader has scrolled away.
@@ -702,57 +743,27 @@ private suspend fun LazyListState.scrollToLatest(animationSpec: AnimationSpec<Fl
     }
 }
 
-/** Connection and run state, in one line so the two never compete for space. */
+private fun connectionMessage(status: SocketStatus, awaitingSnapshot: Boolean, initialLoading: Boolean): Pair<String, MemohStatus> = when {
+    status == SocketStatus.Closed -> "连接已断开" to MemohStatus.Offline
+    status == SocketStatus.Connected && !awaitingSnapshot -> "已连接" to MemohStatus.Online
+    initialLoading -> "正在连接会话…" to MemohStatus.Warning
+    status == SocketStatus.Connected -> "正在同步会话…" to MemohStatus.Warning
+    else -> "正在恢复连接…" to MemohStatus.Warning
+}
+
+/** Connection feedback stays outside the title; brief handshakes remain quiet. */
 @Composable
-private fun ConnectionLine(status: SocketStatus, isRunning: Boolean, initialLoading: Boolean) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        when {
-            isRunning -> {
-                MemohStatusDot(MemohStatus.Running, size = 6.dp)
-                Text(
-                    text = "运行中",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            initialLoading && status != SocketStatus.Reconnecting && status != SocketStatus.Closed -> {
-                dev.memoh.core.designsystem.component.MemohSkeleton(description = "正在连接会话") {
-                    dev.memoh.core.designsystem.component.MemohSkeletonBlock(Modifier.width(56.dp).height(12.dp))
-                }
-            }
-
-            status == SocketStatus.Connected -> {
-                MemohStatusDot(MemohStatus.Online, size = 6.dp)
-                Text(
-                    text = "已连接",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            status == SocketStatus.Connecting || status == SocketStatus.Reconnecting -> {
-                MemohStatusDot(MemohStatus.Warning, size = 6.dp)
-                Text(
-                    text = if (status == SocketStatus.Reconnecting) "重连中…" else "连接中…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            else -> {
-                MemohStatusDot(MemohStatus.Offline, size = 6.dp)
-                Text(
-                    text = "未连接",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+private fun connectionNeedsAttention(sessionId: String?, status: SocketStatus, awaitingSnapshot: Boolean,
+    resumed: Boolean): Boolean {
+    val waiting = status != SocketStatus.Connected || awaitingSnapshot
+    var showWaiting by remember(sessionId, waiting, resumed) { mutableStateOf(false) }
+    LaunchedEffect(sessionId, waiting, resumed) {
+        if (waiting && resumed) {
+            kotlinx.coroutines.delay(1_500)
+            showWaiting = true
         }
     }
+    return resumed && waiting && (status == SocketStatus.Closed || showWaiting)
 }
 
 @Composable

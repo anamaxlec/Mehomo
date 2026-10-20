@@ -53,7 +53,7 @@ class ChatSocket(
     private val onResubscribeNeeded: () -> Unit = {},
 ) {
     private val mutex = Mutex()
-    private var socket: WebSocket? = null
+    @Volatile private var socket: WebSocket? = null
     private var reconnectJob: Job? = null
     private var status: SocketStatus = SocketStatus.Idle
 
@@ -84,6 +84,18 @@ class ChatSocket(
             mutex.withLock {
                 if (closed) return@withLock
                 sessionId?.let { subscribedSessionId = it }
+                openLocked()
+            }
+        }
+    }
+
+    /** Resume a failed transport immediately, without replacing a healthy connection or handshake. */
+    fun reconnectIfNeeded() {
+        scope.launch {
+            mutex.withLock {
+                if (closed || socket != null) return@withLock
+                reconnectJob?.cancel()
+                reconnectJob = null
                 openLocked()
             }
         }
@@ -244,7 +256,7 @@ class ChatSocket(
         override fun onOpen(webSocket: WebSocket, response: Response) {
             scope.launch {
                 mutex.withLock {
-                    if (closed) { webSocket.cancel(); return@withLock }
+                    if (closed || socket !== webSocket) { webSocket.cancel(); return@withLock }
                     reconnectDelayMs.set(INITIAL_RECONNECT_MS)
                     setStatus(SocketStatus.Connected)
 
@@ -281,6 +293,7 @@ class ChatSocket(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (closed || socket !== webSocket) return
             val event = try {
                 json.decodeFromString(UIStreamEvent.serializer(), text)
             } catch (e: Exception) {
@@ -311,7 +324,8 @@ class ChatSocket(
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             scope.launch {
                 mutex.withLock {
-                    if (closed) return@withLock
+                    if (closed || socket !== webSocket) return@withLock
+                    socket = null
                     setStatus(SocketStatus.Reconnecting)
                     scheduleReconnectLocked()
                 }
@@ -325,7 +339,8 @@ class ChatSocket(
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             scope.launch {
                 mutex.withLock {
-                    if (closed) return@withLock
+                    if (closed || socket !== webSocket) return@withLock
+                    socket = null
                     setStatus(SocketStatus.Reconnecting)
                     scheduleReconnectLocked()
                 }

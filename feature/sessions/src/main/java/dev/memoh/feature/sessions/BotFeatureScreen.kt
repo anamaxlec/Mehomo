@@ -564,7 +564,7 @@ fun BotFeatureScreen(
                 textStyle = MaterialTheme.typography.bodyMedium, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = !state.busy)
             }
             (validation ?: state.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
         }
     }, confirmButton = { FeatureAction("保存", Icons.Filled.Save, {
         try {

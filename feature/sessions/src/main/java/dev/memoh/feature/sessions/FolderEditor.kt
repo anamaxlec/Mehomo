@@ -136,7 +136,7 @@ fun FolderEditorSheet(state: FolderEditorState, vm: FolderEditorViewModel, onDis
                     Text("工作目录：${state.resolvedPath}", style = MaterialTheme.typography.bodySmall)
                     Text(if (state.native && state.createChild) "目录不存在时会创建；已有目录会直接使用。" else "使用目标电脑上的已有目录。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (state.loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                if (state.loading) item { LinearWavyProgressIndicator(Modifier.fillMaxWidth()) }
                 if (state.parents.isNotEmpty()) item { TextButton({ vm.browse(state.parents.last(), back = true) }, enabled = !state.loading && !state.busy) { Text("返回上一级") } }
                 items(state.directories, key = { it.path }) { directory ->
                     TextButton({ vm.browse(directory.path) }, Modifier.fillMaxWidth(), enabled = !state.loading && !state.busy) {

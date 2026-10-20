@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import dev.memoh.core.data.SessionRepository
 import dev.memoh.core.data.SettingsStore
 import dev.memoh.core.data.ChatHistoryStore
+import dev.memoh.core.data.CachedChat
 import dev.memoh.core.data.AttachmentDraftStore
 import dev.memoh.core.data.RuntimeMonitorEvents
 import dev.memoh.core.data.LocalRunAccepted
@@ -36,7 +37,7 @@ import kotlinx.serialization.json.*
 import dev.memoh.core.network.ChatSocket
 import dev.memoh.core.network.RuntimeReducer
 import dev.memoh.core.network.SocketStatus
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -64,9 +65,14 @@ data class PendingTurn(
 
 data class PendingRegeneration(val invocationId: String, val turnId: String, val acceptedTurnId: String? = null)
 
+/** Forks load their transcript; a newly created conversation can render immediately. */
+data class SessionNavigation(val session: Session, val isNew: Boolean)
+
 data class ChatUiState(
     val botId: String = "",
     val session: Session? = null,
+    /** Only the address is known; session metadata must resolve before composer actions are usable. */
+    val sessionLoading: Boolean = false,
     /** Settled history, oldest first. */
     val history: List<UITurn> = emptyList(),
     val historyLoading: Boolean = true,
@@ -99,8 +105,7 @@ data class ChatUiState(
     /** Agents (runtime hosts) this session may run on. */
     val agents: List<dev.memoh.core.model.BotAgent> = emptyList(),
     val selectedAgentId: String? = null,
-    val starterPrompts: StarterPromptsResponse = StarterPromptsResponse(),
-    val suggestionsLoading: Boolean = false,
+    val starterPrompts: StarterPromptsResponse = StarterPromptsResponse(items = sampleChatExamples()),
     val suggestionsError: String? = null,
     val exampleCapabilities: Map<String, Boolean> = emptyMap(),
     val attachments: List<ChatAttachment> = emptyList(),
@@ -127,7 +132,7 @@ data class ChatUiState(
     val botPermissions: List<String>? = null,
     val pendingFolderChange: Boolean = false,
     val pendingFolderId: String? = null,
-    val navigateSessionId: String? = null,
+    val navigateSession: SessionNavigation? = null,
     val error: String? = null,
     val errorProblem: MemohError? = null,
     /** True until the first snapshot of the current session arrives. */
@@ -135,10 +140,19 @@ data class ChatUiState(
     val offlineSyncedAt: Long? = null,
 ) {
     val isRunning: Boolean get() = runtime.isRunning || regeneration != null
+    val isEmptyConversation: Boolean get() = history.isEmpty() && liveMessages.isEmpty() &&
+        liveUserTurns.isEmpty() && pending.isEmpty() && !isRunning
+    // A completed empty history page stays known while it is refreshed or the socket reconnects.
+    val hasResolvedHistory: Boolean get() = !historyLoading && historyError == null || !hasMoreHistory
     val retryableTurnId: String?
-        get() = if (!canSend || isRunning || historyLoading || pending.isNotEmpty() ||
-            session?.runtimeType !in listOf(null, "model")) null
-        else history.lastOrNull { it.isAssistant }?.turnId
+        get() {
+            val currentSession = session ?: return null
+            // Retrying does not consume the composer draft or attachments.
+            if (!currentSession.isLocal || currentSession.runtimeType !in listOf(null, "model") ||
+                sessionLoading || busy || isRunning || historyLoading || pending.isNotEmpty() ||
+                awaitingSnapshot || runtime.needsSnapshot || socketStatus != SocketStatus.Connected) return null
+            return history.lastOrNull { it.isAssistant }?.turnId
+        }
 
     fun canFork(turn: UITurn): Boolean = !busy && !isRunning && session?.isLocal != false &&
         turn.turnId.isNotBlank() && (session?.runtimeType in listOf(null, "model") ||
@@ -166,14 +180,14 @@ data class ChatUiState(
     /**
      * The capability selectors, in the order the web client shows them.
      *
-     * A bound folder stays visible. An unbound folder is only selectable before
-     * the first message, after both history and the initial snapshot are known.
+     * A bound folder stays visible. An unbound folder is selectable before the
+     * first message; refreshing transport or capabilities must not remove it.
      */
     fun capabilities(
         onSelectTarget: (String?) -> Unit,
         onSelectWorkdir: (String?) -> Unit,
         onSelectAgent: (String?) -> Unit,
-    ): List<ComposerCapability> = listOfNotNull(
+    ): List<ComposerCapability> = listOf(
         ComposerCapability(
             label = "云端电脑",
             icon = ComposerIcons.Computer,
@@ -189,9 +203,7 @@ data class ChatUiState(
             selectedId = selectedTargetId,
             enabled = workspaceTargets.size > 1,
         ),
-        if (!selectedWorkdirId.isNullOrBlank() ||
-            !historyLoading && historyError == null && !awaitingSnapshot &&
-            history.isEmpty() && pending.isEmpty() && liveMessages.isEmpty() && liveUserTurns.isEmpty() && !isRunning) ComposerCapability(
+        ComposerCapability(
             label = "文件夹",
             icon = ComposerIcons.Folder,
             value = workdirs.firstOrNull { it.id == selectedWorkdirId }?.name
@@ -201,7 +213,8 @@ data class ChatUiState(
             onSelect = onSelectWorkdir,
             selectedId = selectedWorkdirId,
             enabled = workdirs.isNotEmpty(),
-        ) else null,
+            visible = !selectedWorkdirId.isNullOrBlank() || hasResolvedHistory && isEmptyConversation,
+        ),
         ComposerCapability(
             label = "Agent",
             icon = ComposerIcons.Agent,
@@ -225,7 +238,7 @@ data class ChatUiState(
      * stranded.
      */
     val canSend: Boolean
-        get() = !busy && !attachmentLoading && !draftRestoring && regeneration == null && !awaitingSnapshot && socketStatus == SocketStatus.Connected &&
+        get() = !busy && !attachmentLoading && !draftRestoring && !sessionLoading && regeneration == null && !awaitingSnapshot && socketStatus == SocketStatus.Connected &&
             !(session?.isLocal == false)
 
     /**
@@ -236,7 +249,7 @@ data class ChatUiState(
      * on the socket made the whole composer inert while it reconnected, which
      * reads as the app being broken rather than as the network being down.
      */
-    val canEditDraft: Boolean get() = !draftRestoring && session != null && session.isLocal
+    val canEditDraft: Boolean get() = !draftRestoring && !sessionLoading && session != null && session.isLocal
     val canCompose: Boolean get() = !busy && canEditDraft
 
     /** An idle ledger snapshot may have no blocks; it must never erase persisted output. */
@@ -357,59 +370,110 @@ class ChatViewModel @Inject constructor(
     private var operationJob: Job? = null
     private var controlsJob: Job? = null
     private var queueJob: Job? = null
-    private var suggestionsJob: Job? = null
     private var attachmentJob: Job? = null
     private var draftAddress: Triple<String, String, String>? = null
     private var draftRevision = 0L
     private var attachmentReadId = 0L
     private var draftInvocationId: String? = null
+    private var boundGeneration = -1L
 
     /** Debounce for coalescing streaming appends into fewer recompositions. */
     private var flushJob: kotlinx.coroutines.Job? = null
 
-    /**
-     * Binds to a session and starts streaming.
-     *
-     * The session object is fetched rather than passed through the navigation
-     * route: its channel type and runtime decide whether the composer is usable,
-     * and a stale copy in the back stack would show the wrong controls.
-     */
-    fun open(botId: String, sessionId: String) {
-        if (_state.value.botId == botId && _state.value.session?.id == sessionId && socket != null) return
+    /** Restore local content before navigation; network refresh never holds up the destination. */
+    suspend fun prepareOpen(botId: String, sessionId: String) {
+        if (isOpen(botId, sessionId)) return
+        val generation = repository.generation
+        val account = repository.state.value.account
+        val cached = account?.let { historyStore.read(it.accountId, it.teamId.orEmpty(), botId, sessionId) }
+        currentCoroutineContext().ensureActive()
+        if (generation == repository.generation) bind(botId, sessionId, null, cached)
+    }
+
+    fun open(botId: String, sessionId: String, createdSession: Session? = null) {
+        bind(botId, sessionId, createdSession, null)
+    }
+
+    private fun isOpen(botId: String, sessionId: String) = boundGeneration == repository.generation &&
+        _state.value.botId == botId && (_state.value.session?.id == sessionId ||
+            _state.value.session == null && draftAddress?.second == botId && draftAddress?.third == sessionId) &&
+        (socket != null || openJob?.isActive == true)
+
+    private fun bind(botId: String, sessionId: String, createdSession: Session?, restored: CachedChat?) {
+        require(createdSession == null || createdSession.id == sessionId)
+        if (isOpen(botId, sessionId)) return
+        val generation = repository.generation
+        val previous = state.value.takeIf { boundGeneration == generation && it.botId == botId }
+        boundGeneration = generation
+        val seed = createdSession ?: restored?.session
+        fun sameModelCatalog(session: Session) = previous?.session?.let {
+            (it.runtimeType ?: "model") == (session.runtimeType ?: "model") && it.botAgentId == session.botAgentId
+        } == true
         openJob?.cancel()
         historyJob?.cancel()
         capabilitiesJob?.cancel()
         operationJob?.cancel()
         controlsJob?.cancel()
         queueJob?.cancel()
-        suggestionsJob?.cancel()
         contextLifecycleJob?.cancel()
         sessionInfoJob?.cancel()
         attachmentJob?.cancel()
         attachmentReadId++
         socket?.close(); socket = null
-        val generation = repository.generation
         draftAddress = repository.state.value.account?.accountId?.let { Triple(it, botId, sessionId) }
         draftRevision = 0
         draftInvocationId = null
-        _state.value = ChatUiState(botId = botId, historyLoading = true, draftRestoring = true)
+        // Reuse the existing offline history and bot options, including an empty history page.
+        // These are available on the destination's first frame, while REST validates them.
+        _state.value = ChatUiState(botId = botId, session = seed ?: Session(sessionId, botId = botId), sessionLoading = seed == null,
+            history = restored?.turns.orEmpty(), offlineSyncedAt = restored?.syncedAt,
+            historyLoading = seed == null, hasMoreHistory = createdSession == null && restored?.turns?.isEmpty() != true,
+            draftRestoring = true,
+            models = previous?.models.orEmpty().takeIf { seed != null && sameModelCatalog(seed) }.orEmpty(),
+            modelProviders = previous?.modelProviders.orEmpty().takeIf { seed != null && sameModelCatalog(seed) }.orEmpty(),
+            workspaceTargets = previous?.workspaceTargets.orEmpty(), workdirs = previous?.workdirs.orEmpty(),
+            agents = previous?.agents.orEmpty(), exampleCapabilities = previous?.exampleCapabilities.orEmpty(),
+            starterPrompts = previous?.starterPrompts ?: StarterPromptsResponse(items = sampleChatExamples()),
+            botPermissions = previous?.botPermissions,
+            selectedModelId = seed?.preferredChatModelId, reasoningEffort = seed?.preferredReasoningEffort,
+            selectedWorkdirId = seed?.workdirId, selectedAgentId = seed?.botAgentId)
         openJob = viewModelScope.launch {
-            val address = draftAddress
-            val restored = try { address?.let { settings.draft(it.first, it.second, it.third) } }
-                catch (e: java.io.IOException) { _state.update { it.copy(error = "读取草稿失败") }; null }
-            if (generation != repository.generation) return@launch
-            val accountForDraft = repository.state.value.account
-            val restoredAttachments = try { if (address != null) attachmentDrafts.read(address.first, accountForDraft?.teamId.orEmpty(), address.second, address.third) else emptyList() }
-                catch (e: CancellationException) { throw e }
-                catch (e: Exception) { _state.update { it.copy(error = "读取附件草稿失败") }; emptyList() }
-            if (generation != repository.generation) return@launch
-            _state.update { it.copy(draft = if (draftRevision == 0L) restored.orEmpty() else it.draft, attachments = restoredAttachments + it.attachments, draftRestoring = false) }
-            val api = repository.api()
             val account = repository.state.value.account
-            val cached = account?.let { historyStore.read(it.accountId, it.teamId.orEmpty(), botId, sessionId) }
+            if (createdSession != null && account != null) {
+                try { historyStore.save(account.accountId, account.teamId.orEmpty(), botId, createdSession, emptyList()) }
+                catch (e: CancellationException) { throw e }
+                catch (_: java.io.IOException) { /* The first history response can retry the offline save. */ }
+            }
+            val cached = restored ?: if (createdSession == null) account?.let {
+                historyStore.read(it.accountId, it.teamId.orEmpty(), botId, sessionId)
+            } else null
             if (generation != repository.generation) return@launch
-            cached?.let { _state.update { current -> current.copy(session = it.session, history = it.turns, historyLoading = false, offlineSyncedAt = it.syncedAt) } }
-            val session = runCatching { api?.session(botId, sessionId) }
+            cached?.let { cache -> _state.update { current -> current.copy(session = cache.session, history = cache.turns,
+                sessionLoading = false, historyLoading = false, hasMoreHistory = cache.turns.isNotEmpty(), offlineSyncedAt = cache.syncedAt,
+                selectedModelId = cache.session.preferredChatModelId, reasoningEffort = cache.session.preferredReasoningEffort,
+                selectedWorkdirId = cache.session.workdirId, selectedAgentId = cache.session.botAgentId,
+                models = previous?.models.orEmpty().takeIf { sameModelCatalog(cache.session) }.orEmpty(),
+                modelProviders = previous?.modelProviders.orEmpty().takeIf { sameModelCatalog(cache.session) }.orEmpty()) } }
+            // History and the runtime subscription only need the address. Neither
+            // waits for metadata, attachment drafts, or the model catalogue.
+            val initial = createdSession ?: cached?.session ?: requireNotNull(state.value.session)
+            connectSocket(botId, initial)
+            loadHistory(botId, initial, refreshTitle = false)
+            launch {
+                val address = draftAddress
+                val restoredDraft = try { address?.let { settings.draft(it.first, it.second, it.third) } }
+                    catch (e: java.io.IOException) { _state.update { it.copy(error = "读取草稿失败") }; null }
+                if (generation != repository.generation) return@launch
+                val accountForDraft = repository.state.value.account
+                val restoredAttachments = try { if (address != null) attachmentDrafts.read(address.first, accountForDraft?.teamId.orEmpty(), address.second, address.third) else emptyList() }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) { _state.update { it.copy(error = "读取附件草稿失败") }; emptyList() }
+                if (generation != repository.generation) return@launch
+                _state.update { it.copy(draft = if (draftRevision == 0L) restoredDraft.orEmpty() else it.draft,
+                    attachments = restoredAttachments + it.attachments, draftRestoring = false) }
+            }
+            val api = repository.api()
+            val session = createdSession ?: runCatching { api?.session(botId, sessionId) }
                 .getOrNull()
             currentCoroutineContext().ensureActive()
             if (generation != repository.generation) return@launch
@@ -417,9 +481,7 @@ class ChatViewModel @Inject constructor(
             _state.update {
                 it.copy(
                     session = resolved,
-                    history = cached?.turns.orEmpty(),
-                    offlineSyncedAt = cached?.syncedAt,
-                    historyLoading = cached == null,
+                    sessionLoading = false,
                     // Seeded from the session's own server-side preference, so
                     // the composer opens showing what will actually be used
                     // rather than an empty default.
@@ -427,13 +489,19 @@ class ChatViewModel @Inject constructor(
                     reasoningEffort = resolved.preferredReasoningEffort,
                     selectedWorkdirId = resolved.workdirId,
                     selectedAgentId = resolved.botAgentId,
+                    models = previous?.models.orEmpty().takeIf { sameModelCatalog(resolved) }.orEmpty(),
+                    modelProviders = previous?.modelProviders.orEmpty().takeIf { sameModelCatalog(resolved) }.orEmpty(),
                 )
             }
-            connectSocket(botId, resolved)
-            loadHistory(botId, resolved)
             loadCapabilities(botId, resolved)
             refreshControls()
             refreshSessionInfo()
+            val current = state.value
+            if (account != null && !current.historyLoading && current.historyError == null) {
+                try { historyStore.save(account.accountId, account.teamId.orEmpty(), botId, resolved, current.history) }
+                catch (e: CancellationException) { throw e }
+                catch (_: java.io.IOException) { /* The next history refresh can retry the offline save. */ }
+            }
         }
     }
 
@@ -462,10 +530,11 @@ class ChatViewModel @Inject constructor(
                     _state.update { it.copy(socketStatus = status,
                         awaitingSnapshot = it.awaitingSnapshot || status != SocketStatus.Connected) }
                     if (status == SocketStatus.Connected && current.socketStatus != SocketStatus.Connected) {
-                        if (current.historyError != null) loadHistory(botId, session)
+                        val activeSession = current.session ?: session
+                        if (current.historyError != null) loadHistory(botId, activeSession)
                         if (!current.modelCatalogLoading && current.models.isEmpty()) {
                             _state.update { it.copy(modelCatalogLoading = true) }
-                            loadCapabilities(botId, session)
+                            loadCapabilities(botId, activeSession)
                         }
                     }
                 }
@@ -481,10 +550,11 @@ class ChatViewModel @Inject constructor(
     /**
      * Re-subscribes after a gap. The server never back-fills deltas, so the only
      * correct recovery is to ask for a fresh authoritative snapshot.
+     * A foreground refresh on a continuously healthy socket may retain its validated state.
      */
-    private fun resubscribe() {
+    private fun resubscribe(invalidateCurrent: Boolean = true) {
         val session = _state.value.session ?: return
-        _state.update { it.copy(awaitingSnapshot = true) }
+        if (invalidateCurrent) _state.update { it.copy(awaitingSnapshot = true) }
         socket?.subscribe(session.id, cursor = null)
     }
 
@@ -637,8 +707,18 @@ class ChatViewModel @Inject constructor(
      */
     private fun loadCapabilities(botId: String, session: Session) {
         capabilitiesJob?.cancel()
+        val generation = repository.generation
         capabilitiesJob = viewModelScope.launch {
             val api = repository.api() ?: return@launch
+
+            launch {
+                try {
+                    val capabilities = exampleCapabilities(api.managementRead("bots", botId, "settings").jsonObject,
+                        state.value.workspaceTargets.isNotEmpty())
+                    _state.update { if (generation == repository.generation && it.botId == botId && it.session?.id == session.id) it.copy(exampleCapabilities = capabilities) else it }
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { /* Unknown capabilities must not block local examples. */ }
+            }
 
             launch {
                 try {
@@ -678,12 +758,12 @@ class ChatViewModel @Inject constructor(
             if (!session.isAcpRuntime && DirectAgentRuntime.fromId(session.runtimeType) == null) launch {
                 val providers = try { api.providers() }
                     catch (e: CancellationException) { throw e }
-                    catch (_: Exception) { emptyList() }
+                    catch (_: Exception) { return@launch }
                 _state.update { if (it.session?.id == session.id) it.copy(modelProviders = providers) else it }
             }
             launch {
                 val targets = runCatching { api.workspaceTargets(botId).targets }
-                    .getOrDefault(emptyList())
+                    .getOrElse { if (it is CancellationException) throw it else return@launch }
                 _state.update { current ->
                     if (current.botId != botId || current.session?.id != session.id) current
                     else current.copy(workspaceTargets = targets)
@@ -691,7 +771,7 @@ class ChatViewModel @Inject constructor(
             }
             launch {
                 val workdirs = runCatching { api.workdirs(botId) }
-                    .getOrDefault(emptyList()).filter { it.isActive }
+                    .getOrElse { if (it is CancellationException) throw it else return@launch }.filter { it.isActive }
                 _state.update { current ->
                     if (current.botId != botId || current.session?.id != session.id) current
                     else current.copy(workdirs = workdirs)
@@ -699,7 +779,7 @@ class ChatViewModel @Inject constructor(
             }
             launch {
                 val agents = runCatching { api.agents(botId) }
-                    .getOrDefault(emptyList()).filter { it.enabled != false }
+                    .getOrElse { if (it is CancellationException) throw it else return@launch }.filter { it.enabled != false }
                 _state.update { current ->
                     if (current.botId != botId || current.session?.id != session.id) current
                     else current.copy(agents = agents)
@@ -763,14 +843,14 @@ class ChatViewModel @Inject constructor(
     fun confirmFolderChange() = operation { api, current, session ->
         val created = api.newSession(current.botId, apiBody("workdir_id" to current.pendingFolderId,
             "bot_agent_id" to session.botAgentId, "type" to "chat"))
-        _state.update { it.copy(pendingFolderChange = false, navigateSessionId = created.id) }
+        _state.update { it.copy(pendingFolderChange = false, navigateSession = SessionNavigation(created, isNew = true)) }
     }
-    fun clearNavigation() { _state.update { it.copy(navigateSessionId = null) } }
+    fun clearNavigation() { _state.update { it.copy(navigateSession = null) } }
     fun newSession() = operation { api, current, session ->
         val created = api.newSession(current.botId, apiBody("type" to "chat", "workdir_id" to session.workdirId,
             "bot_agent_id" to session.botAgentId, "preferred_chat_model_id" to current.selectedModelId,
             "preferred_reasoning_effort" to current.reasoningEffort))
-        _state.update { it.copy(navigateSessionId = created.id) }
+        _state.update { it.copy(navigateSession = SessionNavigation(created, isNew = true)) }
     }
     fun selectAgent(agentId: String?) = operation { api, current, session ->
         check(!current.isRunning) { "请等当前任务结束后切换 Agent" }
@@ -870,7 +950,7 @@ class ChatViewModel @Inject constructor(
     }
     fun fork(turnId: String) = operation { api, current, session ->
         val forked = api.forkSession(current.botId, session.id, turnId)
-        _state.update { it.copy(navigateSessionId = forked.id) }
+        _state.update { it.copy(navigateSession = SessionNavigation(forked, isNew = false)) }
     }
     fun quickAction(id: String) = operation { api, current, session ->
         val result = api.quickAction(current.botId, apiBody("action_id" to id, "session_id" to session.id,
@@ -885,12 +965,21 @@ class ChatViewModel @Inject constructor(
 
     /** Resync on resume without clearing content; slow context requests finish before the next poll. */
     suspend fun observeSession() {
-        if (state.value.runtime.sessionId != null && state.value.socketStatus == SocketStatus.Connected) resubscribe()
+        socket?.reconnectIfNeeded()
+        val current = state.value
+        if (current.runtime.sessionId != null && current.socketStatus == SocketStatus.Connected) {
+            // A continuously connected, valid runtime stays usable during a foreground refresh.
+            resubscribe(invalidateCurrent = current.awaitingSnapshot || current.runtime.needsSnapshot)
+        }
         while (true) {
+            val observed = state.value
             refreshQueue()
             refreshSessionInfo()
             sessionInfoJob?.join()
-            delay(if (state.value.isRunning) 5_000 else 30_000)
+            // Task/model changes refresh context promptly without re-subscribing the transport.
+            withTimeoutOrNull(if (observed.isRunning) 5_000L else 30_000L) {
+                state.first { it.isRunning != observed.isRunning || it.selectedModelId != observed.selectedModelId }
+            }
         }
     }
 
@@ -966,7 +1055,7 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    private fun loadHistory(botId: String, session: Session, before: String? = null, replace: Boolean = false) {
+    private fun loadHistory(botId: String, session: Session, before: String? = null, replace: Boolean = false, refreshTitle: Boolean = true) {
         historyJob?.cancel()
         val account = repository.state.value.account
         val generation = repository.generation
@@ -995,18 +1084,16 @@ class ChatViewModel @Inject constructor(
                                 offlineSyncedAt = null,
                                 history = merged.distinctBy { it.listKey },
                                 historyLoading = false,
-                                // The empty page is not ready until its initial suggestions settle.
-                                suggestionsLoading = current.suggestionsLoading || before == null && merged.isEmpty() && session.isLocal,
                                 historyError = if (before == null) null else current.historyError,
                                 olderHistoryError = null,
                                 loadingMore = false,
-                                hasMoreHistory = page.items.any { pageTurn ->
+                                // A known history start stays known when newer replies arrive.
+                                hasMoreHistory = (before != null || replace || current.hasMoreHistory) && page.items.any { pageTurn ->
                                     before == null || current.history.none { it.listKey == pageTurn.listKey }
                                 } && page.items.any { !it.id.isNullOrBlank() },
                             )
                         }
-                        if (before == null && _state.value.history.isEmpty() && session.isLocal) loadStarterPrompts()
-                        if (before == null && _state.value.session?.title.isNullOrBlank()) {
+                        if (refreshTitle && before == null && _state.value.session?.title.isNullOrBlank()) {
                             val refreshed = try { api.session(botId, session.id) }
                                 catch (e: CancellationException) { throw e }
                                 catch (_: Exception) { null }
@@ -1018,7 +1105,7 @@ class ChatViewModel @Inject constructor(
                         }
                         account?.let { stored ->
                             val current = _state.value
-                            if (current.botId != botId || current.session?.id != session.id) return@let
+                            if (current.botId != botId || current.session?.id != session.id || current.sessionLoading) return@let
                             try { historyStore.save(stored.accountId, stored.teamId.orEmpty(), botId, current.session, current.history) }
                             catch (e: CancellationException) { throw e }
                             catch (_: java.io.IOException) { _state.update { it.copy(notice = "历史已加载，离线缓存保存失败") } }
@@ -1241,47 +1328,9 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    fun loadStarterPrompts(refresh: Boolean = false) {
-        if (suggestionsJob?.isActive == true) return
-        val current = state.value
-        val account = repository.state.value.account ?: return
-        val address = draftAddress ?: return
-        val generation = repository.generation
-        val locale = "zh-CN"
-        _state.update { it.copy(suggestionsLoading = true, suggestionsError = null) }
-        suggestionsJob = viewModelScope.launch {
-            fun matches() = generation == repository.generation && address == draftAddress
-            try {
-                val cached = try { settings.starterPrompts(account.accountId, account.teamId.orEmpty(), current.botId, locale) }
-                    catch (e: CancellationException) { throw e }
-                    catch (_: Exception) { null }
-                if (!matches()) return@launch
-                val held = current.starterPrompts.takeIf { it.items.isNotEmpty() } ?: cached
-                if (held != null) _state.update { it.copy(starterPrompts = held) }
-                val api = repository.api() ?: error("请先登录")
-                // Capability probes are optional; lack of permission does not prove a missing capability.
-                val capabilities = try { exampleCapabilities(api.managementRead("bots", current.botId, "settings").jsonObject,
-                    state.value.workspaceTargets.isNotEmpty()) }
-                    catch (e: CancellationException) { throw e }
-                    catch (_: Exception) { emptyMap() }
-                if (!matches()) return@launch
-                _state.update { it.copy(exampleCapabilities = capabilities) }
-                val response = if (refresh) api.refreshStarterPrompts(current.botId, locale, held?.items.orEmpty().map { it.prompt })
-                    else api.starterPrompts(current.botId, locale, held?.hash)
-                if (!matches()) return@launch
-                val resolved = resolveStarterPrompts(held, response)
-                _state.update { it.copy(starterPrompts = resolved, suggestionsLoading = false,
-                    suggestionsError = if (refresh && (response.unchanged || response.items.isEmpty())) "暂时没有新的推荐，可以稍后再试。" else null) }
-                if (resolved.hash.isNotBlank()) try {
-                    settings.saveStarterPrompts(account.accountId, account.teamId.orEmpty(), current.botId, locale, resolved)
-                } catch (e: CancellationException) { throw e }
-                catch (_: Exception) { /* A cache write must not discard visible suggestions. */ }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) {
-                if (matches()) _state.update { it.copy(suggestionsLoading = false,
-                    suggestionsError = if (refresh) e.userMessage("推荐暂时不可用，请稍后重试") else null) }
-            }
-        }
+    fun refreshSuggestions() = _state.update { current ->
+        current.copy(starterPrompts = StarterPromptsResponse(items = sampleChatExamples(
+            current.exampleCapabilities, current.starterPrompts.items)), suggestionsError = null)
     }
 
     fun importShared(context: Context, text: String, uris: List<Uri>) {

@@ -24,6 +24,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -120,18 +122,31 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
             .padding(bottom = if (bottomControlSpace && !keyboardVisible) maxOf(100.dp, LocalFloatingNavigationPadding.current) else 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.botId.isBlank()) { MemohEmptyState("请先选择一个 Bot"); return@Column }
-            if (state.loading || state.connecting) LinearProgressIndicator(Modifier.fillMaxWidth())
-            state.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            if (surface != WorkspaceSurface.Browser) {
+                if (state.loading || state.connecting) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
+                state.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
             if (surface == WorkspaceSurface.Browser) {
                 OutlinedTextField(state.address, viewModel::address, singleLine = true, modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.extraLarge, label = { Text("云端端口和路径") }, placeholder = { Text("localhost:5173/") },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go), keyboardActions = KeyboardActions(onGo = { viewModel.openBrowser() }),
                     trailingIcon = { IconButton(onClick = viewModel::openBrowser, enabled = !state.connecting) { Icon(Icons.Filled.ArrowForward, "打开预览") } })
+                // One reserved slot spans both session creation and WebView loading;
+                // finishing or restarting a request never moves the address or page.
+                Box(Modifier.fillMaxWidth().height(WavyProgressIndicatorDefaults.LinearContainerHeight), contentAlignment = Alignment.Center) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = state.error == null && (state.loading || state.connecting || state.browser != null && webProgress < 100),
+                        enter = androidx.compose.animation.fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
+                        exit = androidx.compose.animation.fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
+                    ) {
+                        LinearWavyProgressIndicator(Modifier.fillMaxWidth().semantics { contentDescription = "网页加载进度" })
+                    }
+                }
+                state.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 if (state.browser == null) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     if (state.connecting) MemohTextSkeleton(Modifier.fillMaxSize().padding(16.dp), "正在加载网页预览")
                     else MemohEmptyState("预览云端网页", description = "填写云端电脑上运行的网站端口，例如 localhost:5173/。")
                 } else {
-                    if (webProgress in 1..99) LinearProgressIndicator(progress = { webProgress / 100f }, modifier = Modifier.fillMaxWidth())
                     Surface(Modifier.fillMaxWidth().weight(1f), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLowest) {
                         Box {
                         BrowserPreview(state.browser!!, viewModel::browserResource, viewModel::canNavigateBrowser,
@@ -180,7 +195,7 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
                     if (state.displayInfo?.prepareSupported == true && !state.preparing) MemohActionButton("准备桌面环境", Icons.Filled.InstallDesktop, { prepareConfirm = true }, primary = true)
                 }
                 if (state.preparing) {
-                    LinearProgressIndicator(progress = { (state.preparePercent ?: 0).coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
+                    LinearWavyProgressIndicator(progress = { (state.preparePercent ?: 0).coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
                     Text(state.prepareMessage ?: "正在准备桌面环境…", style = MaterialTheme.typography.bodySmall)
                 }
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

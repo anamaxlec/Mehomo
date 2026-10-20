@@ -8,7 +8,7 @@
 
 Mehomo brings conversations and an agent's cloud workspace into one Android app. It connects to **official Memoh Cloud** and **self-hosted Memoh**. This is an independent, unofficial client.
 
-The current release is **[v0.1.17](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.17)**, following Memoh v0.22.0 with Grok Build support, account authorization, desktop text clipboard actions and connection recovery. [Release notes](docs/releases/v0.1.17.md)
+The current release is **[v0.1.18](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.18)**, improving conversation loading and recovery, settings organization and M3E motion, fixing long-conversation crashes and tall images, and adding HTML file and cloud website previews. [Release notes](docs/releases/v0.1.18.md)
 
 ## Material 3 Expressive, throughout
 

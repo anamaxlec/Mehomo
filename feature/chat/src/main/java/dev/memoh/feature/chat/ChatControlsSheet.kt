@@ -46,7 +46,7 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
         Column(Modifier.fillMaxWidth().heightIn(max = 600.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("会话控制", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
-            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
             (state.error ?: state.controlsError)?.let { message ->
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                     Text(message, Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
