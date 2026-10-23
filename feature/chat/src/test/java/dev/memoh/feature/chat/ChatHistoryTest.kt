@@ -9,6 +9,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ChatHistoryTest {
+    @Test fun `completed runtime cannot replace published history with original workspace image text`() {
+        val archived = "![产物](/bots/b/media/${"a".repeat(64)})"
+        val persisted = UITurn("turn", id = "persisted", role = "assistant",
+            messages = listOf(UIMessage(0, "text", content = archived)))
+        val snapshot = RuntimeState(run = RuntimeCurrentRunView(runId = "run", turnId = "turn", status = "completed",
+            messages = listOf(UIMessage(0, "text", content = "![产物](/data/image.png)"))))
+        val updated = ChatUiState(history = listOf(persisted)).withRuntime(snapshot)
+        assertEquals(archived, updated.settledHistory.single().safeMessages.single().content)
+        assertTrue(updated.liveMessages.isEmpty())
+        val transient = persisted.copy(id = null)
+        val transientUpdate = ChatUiState(history = listOf(transient)).withRuntime(snapshot)
+        assertEquals(snapshot.run!!.safeMessages, transientUpdate.history.single().safeMessages)
+    }
     @Test fun `assistant records sharing a turn have distinct body and action keys`() {
         val messages = listOf(UIMessage(0, "reasoning", "Thinking"), UIMessage(1, "text", "Reply"))
         val turns = listOf(

@@ -181,6 +181,9 @@ fun ChatScreen(
     onCancelAttachments: () -> Unit = {},
     onConfirmFolder: () -> Unit = {},
     onCancelFolder: () -> Unit = {},
+    onDismissCommandOutput: () -> Unit = {},
+    onRefreshSlashCatalog: () -> Unit = {},
+    onQuickAction: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -194,8 +197,17 @@ fun ChatScreen(
     val liveMessages = state.liveMessages
     val liveUsers = state.liveUserTurns
     val run = state.runtime.run
-    val queueCommand = remember(state.draft, state.controls?.commands) {
-        parseQueueCommand(state.draft, state.controls?.commands.orEmpty().mapNotNull { it.name })
+    val composerAction = state.composerAction()
+    fun runShortcut(action: ComposerQuickAction, openModelMenu: () -> Unit) {
+        if (!state.composerAction(action.command).enabled) return
+        onDraftChange("")
+        when (action) {
+            ComposerQuickAction.Help -> onQuickAction("help")
+            ComposerQuickAction.Skills -> onQuickAction("skill.list")
+            ComposerQuickAction.New -> onNewSession()
+            ComposerQuickAction.Model -> openModelMenu()
+            ComposerQuickAction.Permission, ComposerQuickAction.Plan, ComposerQuickAction.Goal -> onOpenControls()
+        }
     }
     var initiallyPositioned by rememberSaveable(state.session?.id) { mutableStateOf(false) }
     val showEmptyConversation = state.hasResolvedHistory && state.isEmptyConversation && state.historyError == null
@@ -561,19 +573,22 @@ fun ChatScreen(
                         Composer(
                             text = state.draft,
                             onTextChange = onDraftChange,
-                            onSend = { onSend(state.draft) },
-                            sendDescription = when {
-                                queueCommand?.steer == true -> "插话"
-                                state.isRunning || queueCommand != null -> "加入后续队列"
-                                else -> "发送"
+                            onSend = { openModelMenu ->
+                                val shortcut = state.composerQuickAction(state.draft)
+                                if (composerAction.kind == ComposerActionKind.QuickAction && shortcut != null)
+                                    runShortcut(shortcut, openModelMenu)
+                                else onSend(state.draft)
                             },
+                            sendDescription = composerAction.description,
+                            showStop = composerAction.kind == ComposerActionKind.Stop,
                             onStop = onStop,
                             isRunning = state.isRunning,
                             // Controls stay usable while the socket reconnects;
                             // only the send action itself needs a connection.
                             enabled = state.canCompose,
                             textEnabled = state.canEditDraft,
-                            sendEnabled = state.canSend,
+                            sendEnabled = composerAction.enabled,
+                            compactForSuggestions = state.canCompose && slashMenuQuery(state.draft) != null,
                             hasAttachments = state.attachments.isNotEmpty(),
                             attachmentLoading = state.attachmentLoading,
                             attachments = {
@@ -643,8 +658,22 @@ fun ChatScreen(
                                     enabled = !state.busy,
                                 )
                             },
-                            above = {
+                            above = { openModelMenu ->
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    state.commandOutput?.let { output ->
+                                        dev.memoh.feature.chat.components.RuntimeCommandOutput(output, onDismissCommandOutput)
+                                    }
+                                    dev.memoh.feature.chat.components.RuntimeCommandSuggestions(state.draft,
+                                        state.controls?.commands.orEmpty(), state.canEditDraft, onDraftChange,
+                                        skills = if (state.nativeSkillsEnabled) state.skillCatalog else emptyList(),
+                                        nativeSkills = state.nativeSkillsEnabled,
+                                        loading = if (state.nativeSkillsEnabled) state.skillCatalogLoading
+                                            else state.controlsLoading && state.controls?.commands.isNullOrEmpty(),
+                                        error = if (state.nativeSkillsEnabled) state.skillCatalogError else state.controlsError,
+                                        onRetry = onRefreshSlashCatalog,
+                                        quickActions = state.composerQuickActions(),
+                                        quickActionEnabled = { state.composerAction(it.command).enabled },
+                                        onQuickAction = { runShortcut(it, openModelMenu) })
                                     ComposerQueue(state.queue, state.isRunning, state.busy,
                                         onOpenControls, onPromoteQueue, onRemoveQueued)
                                     run?.let { current ->

@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.material.icons.outlined.Image
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -36,6 +37,7 @@ val LocalMarkdownImageLoader = staticCompositionLocalOf<(suspend (String) -> Byt
 
 /** Lets a transcript finish its initial positioning after visible media has settled. */
 val LocalMarkdownImageLoading = staticCompositionLocalOf<((Boolean) -> Unit)?> { null }
+internal val LocalMarkdownWorkspaceImagesAsLinks = staticCompositionLocalOf { false }
 
 private sealed interface ImageState {
     data object Loading : ImageState
@@ -50,7 +52,26 @@ fun MarkdownImage(
     modifier: Modifier = Modifier,
     height: Dp? = null,
     showCaption: Boolean = true,
+    onImageClick: (() -> Unit)? = null,
 ) {
+    if (destination.startsWith("memoh-media-error:")) {
+        Text(listOf(alt.takeIf(String::isNotBlank), "引用的图片暂不可用").filterNotNull().joinToString(" · "),
+            modifier, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    // Unpublished workspace references are files, not paths on the API origin.
+    // Archived /bots/{id}/media/{hash} images still use the account-aware loader.
+    val workspaceFile = if (LocalMarkdownWorkspaceImagesAsLinks.current && destination.startsWith("/data/"))
+        classifyWorkspaceLink(destination) as? WorkspaceLink.File else null
+    if (workspaceFile != null) {
+        val open = LocalWorkspaceLinkHandler.current
+        TextButton(onClick = { open?.invoke(workspaceFile) }, enabled = open != null, modifier = modifier) {
+            Icon(Icons.Outlined.Image, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(alt.ifBlank { workspaceFile.path.substringAfterLast('/') })
+        }
+        return
+    }
     val loader = LocalMarkdownImageLoader.current
     var retry by remember(destination) { mutableIntStateOf(0) }
     var preview by remember(destination) { mutableStateOf(false) }
@@ -93,7 +114,7 @@ fun MarkdownImage(
                         .wrapContentSize()
                         .aspectRatio(current.bitmap.width.toFloat() / current.bitmap.height)
                 )
-                    .clip(MaterialTheme.shapes.medium).clickable { preview = true },
+                    .clip(MaterialTheme.shapes.medium).clickable { if (onImageClick != null) onImageClick() else preview = true },
             )
             ImageState.Loading -> MemohSkeleton(description = "正在加载图片") {
                 MemohSkeletonBlock(Modifier.fillMaxWidth().height(height ?: 160.dp), MaterialTheme.shapes.medium)

@@ -101,7 +101,8 @@ fun StatusLine(message: UIMessage, modifier: Modifier = Modifier) {
 /** The assistant's answer itself: plain Markdown in the reading flow. */
 @Composable
 fun TextBlock(content: String, modifier: Modifier = Modifier) {
-    MemohMarkdown.Markdown(markdown = content, modifier = modifier)
+    MemohMarkdown.Markdown(markdown = content, modifier = modifier, singleDollarMath = false,
+        workspaceImagesAsLinks = true)
 }
 
 /** A pulsing caret marking the live end of a streaming answer. */

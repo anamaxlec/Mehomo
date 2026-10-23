@@ -23,6 +23,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * retry, and the "give up and log out" path.
  */
 class MemohApiAuthTest {
+    @Test fun `published media supports upstream 20 MiB ceiling and rejects larger bodies`() = runTest {
+        val bytes = ByteArray(17 * 1024 * 1024) { 7 }
+        server.enqueue(MockResponse().setBody(okio.Buffer().write(bytes)))
+        assertTrue(api(FakeAuth()).media("/bots/b/media/${"a".repeat(64)}").contentEquals(bytes))
+        server.enqueue(MockResponse().setBody("oversized").setHeader("Content-Length", 21 * 1024 * 1024))
+        assertTrue(runCatching { api(FakeAuth()).media("/bots/b/media/${"b".repeat(64)}") }.exceptionOrNull() is IllegalArgumentException)
+    }
 
     @Test fun `media uses account headers refreshes once and returns binary bytes`() = runTest {
         server.enqueue(MockResponse().setResponseCode(401))

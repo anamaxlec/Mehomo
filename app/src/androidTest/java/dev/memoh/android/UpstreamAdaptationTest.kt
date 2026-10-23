@@ -76,7 +76,7 @@ class UpstreamAdaptationTest {
             exampleCapabilities = mapOf("web_search" to false)), {}, {}, { configured = it }) } }
         compose.onNodeWithText("更多示例").performClick()
         compose.onNodeWithText("研究", substring = false).performClick()
-        compose.onNodeWithText("研究助理").performScrollTo().performClick()
+        compose.onNode(hasText("研究助理") and hasText("先配置搜索服务")).performScrollTo().performClick()
         compose.waitUntil { configured == "web_search" }
     }
 

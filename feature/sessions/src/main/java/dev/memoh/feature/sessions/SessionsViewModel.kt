@@ -8,6 +8,7 @@ import dev.memoh.core.data.SessionRepository
 import dev.memoh.core.data.SettingsStore
 import dev.memoh.core.model.Bot
 import dev.memoh.core.model.Session
+import dev.memoh.core.model.ListResponse
 import dev.memoh.core.model.Workdir
 import dev.memoh.core.model.RuntimeState
 import dev.memoh.core.model.UIStreamEvent
@@ -18,6 +19,9 @@ import dev.memoh.core.network.SessionRunStatusReducer
 import dev.memoh.core.network.sessionStatusSocket
 import dev.memoh.core.network.managementRead
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -139,7 +143,7 @@ class SessionsViewModel @Inject constructor(
             viewModelScope.launch {
                 if (attempt != observation || generation != repository.generation) return@launch
                 val sessionId = event.sessionId ?: return@launch
-                if (state.value.sessions.none { it.id == sessionId }) return@launch
+                if (sessionId !in runCursors && state.value.sessions.none { it.id == sessionId }) return@launch
                 val previous = runCursors[sessionId] ?: RuntimeState.EMPTY
                 val next = if (event.type == UIStreamEvent.RUNTIME_DROPPED) previous.copy(needsSnapshot = true)
                     else SessionRunStatusReducer.apply(previous, event)
@@ -190,12 +194,18 @@ class SessionsViewModel @Inject constructor(
                 _state.update { it.copy(loading = false, refreshing = false, initialized = true, error = "未登录") }
                 return@launch
             }
-            runCatching { api.bots() }.fold(
-                onSuccess = { receivedBots ->
-                    val bots = availableBots(receivedBots)
+            try { coroutineScope {
+                    val preferredId = botId ?: settings.lastBotId.first()
+                    // The last bot is only a prefetch hint. Publish its data after
+                    // the current account's bot catalogue confirms the selection.
+                    val firstPage = preferredId?.takeIf(String::isNotBlank)?.let { id ->
+                        async { runCatching { api.sessions(id, types = Session.CHAT_TYPES, limit = 50, hideScheduleRuns = true) } }
+                    }
+                    val bots = availableBots(api.bots())
                     currentCoroutineContext().ensureActive()
-                    if (generation != repository.generation) return@launch
+                    if (generation != repository.generation) { firstPage?.cancel(); return@coroutineScope }
                     if (bots.isEmpty()) {
+                        firstPage?.cancel()
                         stopObservingRuns(clearStates = true); botId = null
                         // Signed in, but the account has no bot yet. Not an
                         // error: the empty state explains it better than a
@@ -203,12 +213,10 @@ class SessionsViewModel @Inject constructor(
                         _state.update {
                             it.copy(loading = false, refreshing = false, initialized = true, bots = emptyList(), bot = null, sessions = emptyList(), folders = emptyList(), nextCursor = null)
                         }
-                        return@launch
+                        return@coroutineScope
                     }
-                    val lastBot = settings.lastBotId.first()
-                    currentCoroutineContext().ensureActive()
-                    if (generation != repository.generation) return@launch
-                    val selected = preferredBot(bots, botId ?: lastBot) ?: return@launch
+                    val selected = preferredBot(bots, preferredId) ?: return@coroutineScope
+                    if (selected.id != preferredId) firstPage?.cancel()
                     val changed = botId != selected.id
                     if (changed) { stopObservingRuns(clearStates = true); examplesJob?.cancel() }
                     _state.update { it.copy(initialized = true, bots = bots, bot = selected,
@@ -218,16 +226,13 @@ class SessionsViewModel @Inject constructor(
                         nextCursor = if (changed) null else it.nextCursor, creating = if (changed) false else it.creating) }
                     botId = selected.id
                     settings.setLastBotId(selected.id)
-                    readSessions(selected.id, api, generation)
-                },
-                onFailure = { error ->
-                    if (error is CancellationException) throw error
-                    if (generation != repository.generation) return@launch
-                    _state.update {
-                        it.copy(loading = false, refreshing = false, initialized = true, error = describeFailure("加载 Bot 失败", error))
-                    }
-                },
-            )
+                    readSessions(selected.id, api, generation, firstPage.takeIf { selected.id == preferredId })
+            } } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == repository.generation) _state.update {
+                    it.copy(loading = false, refreshing = false, initialized = true, error = describeFailure("加载 Bot 失败", error))
+                }
+            }
         }
     }
 
@@ -260,28 +265,41 @@ class SessionsViewModel @Inject constructor(
         }
     }
 
-    private suspend fun readSessions(id: String, api: MemohApi, generation: Long) {
+    private suspend fun readSessions(id: String, api: MemohApi, generation: Long,
+        firstPage: Deferred<Result<ListResponse<Session>>>? = null) = coroutineScope {
         val count = maxOf(50, state.value.sessions.size)
-        // Folders and sessions are independent: a folder list that fails
-        // must not blank the sessions, and vice versa. The folder failure is
-        // therefore swallowed — the pinned section simply does not appear.
-        val folders = try { api.workdirs(id) }
-            catch (e: CancellationException) { throw e }
-            catch (_: Exception) { emptyList() }
+        // Folders never hold the first page behind a slower workspace request.
+        launch {
+            try {
+                val folders = api.workdirs(id).filter(Workdir::isActive)
+                currentCoroutineContext().ensureActive()
+                if (generation == repository.generation && botId == id) _state.update { it.copy(folders = folders) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* Retain known folders during a transient workspace failure. */ }
+        }
         val sessions = runCatching {
-            var page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, hideScheduleRuns = true)
+            var page = firstPage?.await()?.getOrThrow()
+                ?: api.sessions(id, types = Session.CHAT_TYPES, limit = 50, hideScheduleRuns = true)
             var items = page.items
+            currentCoroutineContext().ensureActive()
+            if (generation != repository.generation || botId != id) return@coroutineScope
+            if (items.size < count && !page.nextCursor.isNullOrBlank()) {
+                // Show fresh top rows now, preserving the already loaded tail
+                // until its refresh finishes. Pagination keeps its existing cursor.
+                _state.update { it.copy(sessions = appendSessions(items, it.sessions), error = null) }
+                statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
+            }
             // Refresh every loaded page so returning from a chat retains older rows.
             while (items.size < count && !page.nextCursor.isNullOrBlank()) {
                 val cursor = page.nextCursor
                 page = api.sessions(id, types = Session.CHAT_TYPES, limit = 50, cursor = cursor, hideScheduleRuns = true)
                 items = appendSessions(items, page.items)
-                if (page.nextCursor == cursor) break
+                check(page.nextCursor != cursor) { "服务端返回了重复分页游标，请刷新后重试" }
             }
             page.copy(items = items)
         }
         currentCoroutineContext().ensureActive()
-        if (generation != repository.generation || botId != id) return
+        if (generation != repository.generation || botId != id) return@coroutineScope
 
         sessions.fold(
             onSuccess = { page ->
@@ -292,11 +310,11 @@ class SessionsViewModel @Inject constructor(
                         sessions = page.items,
                         selectedSessions = it.selectedSessions.intersect(page.items.map { session -> session.id }.toSet()),
                         nextCursor = page.nextCursor,
-                        folders = folders.filter(Workdir::isActive),
                         error = null,
                     )
                 }
                 statusSocket?.observeSessions(page.items.map { it.id }.toSet())
+                runCursors.keys.retainAll(page.items.map { it.id }.toSet())
             },
             onFailure = { error ->
                 if (error is CancellationException) throw error
@@ -304,7 +322,6 @@ class SessionsViewModel @Inject constructor(
                     it.copy(
                         loading = false,
                         refreshing = false,
-                        folders = folders.filter(Workdir::isActive),
                         error = describeFailure("加载会话失败", error),
                     )
                 }
@@ -359,7 +376,8 @@ class SessionsViewModel @Inject constructor(
                     currentCoroutineContext().ensureActive()
                     if (generation != repository.generation || botId != id) return@fold
                     _state.update {
-                        it.copy(creating = false, sessions = listOf(session) + it.sessions)
+                        // A silent sync may publish this row before its POST response arrives.
+                        it.copy(creating = false, sessions = appendSessions(listOf(session), it.sessions))
                     }
                     statusSocket?.observeSessions(state.value.sessions.map { it.id }.toSet())
                     onCreated(session)

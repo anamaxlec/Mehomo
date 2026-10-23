@@ -155,6 +155,14 @@ fun SessionsScreen(
     onOpenExamples: () -> Unit = {},
 ) {
     var searching by remember { mutableStateOf(false) }
+    val todayDate = java.time.LocalDate.now()
+    // Item composition must never scan and parse the entire transcript list.
+    val visibleSessions = remember(state.sessions, state.query) { state.visibleSessions }
+    val (todaySessions, earlierSessions) = remember(visibleSessions, todayDate) {
+        visibleSessions.partition { it.isFromToday(todayDate) }
+    }
+    val visibleFolders = remember(state.folders, state.query) { state.visibleFolders }
+    val searchMissed = state.query.isNotBlank() && visibleSessions.isEmpty() && visibleFolders.isEmpty()
     BackHandler(searching) { searching = false; onQueryChange("") }
     var actionsOpen by remember(state.bot?.id, state.tab) { mutableStateOf(false) }
     BackHandler(actionsOpen) { actionsOpen = false }
@@ -328,7 +336,7 @@ fun SessionsScreen(
                         }
                     }
 
-                    state.searchMissed -> {
+                    searchMissed -> {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "没有匹配的内容",
@@ -341,7 +349,7 @@ fun SessionsScreen(
                         }
                     }
 
-                    state.sessions.isEmpty() && state.visibleFolders.isEmpty() && state.error == null -> {
+                    state.sessions.isEmpty() && visibleFolders.isEmpty() && state.error == null -> {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "还没有会话",
@@ -350,7 +358,7 @@ fun SessionsScreen(
                         }
                     }
 
-                    state.sessions.isEmpty() && state.visibleFolders.isEmpty() -> {
+                    state.sessions.isEmpty() && visibleFolders.isEmpty() -> {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "加载失败",
@@ -363,6 +371,9 @@ fun SessionsScreen(
                     else -> {
                         SessionList(
                             state = state,
+                            today = todaySessions,
+                            earlier = earlierSessions,
+                            folders = visibleFolders,
                             onOpenSession = onOpenSession,
                             onBeginRename = onBeginRename,
                             onBeginDelete = onBeginDelete,
@@ -594,6 +605,9 @@ private fun SearchField(
 @Composable
 private fun SessionList(
     state: SessionsUiState,
+    today: List<Session>,
+    earlier: List<Session>,
+    folders: List<Workdir>,
     onOpenSession: (Session) -> Unit,
     onBeginRename: (Session) -> Unit,
     onBeginDelete: (Session) -> Unit,
@@ -618,20 +632,20 @@ private fun SessionList(
                 if (state.nextCursor != null) TextButton(if (state.searchingAllTitles) onStopTitleSearch else onSearchAllTitles, enabled = !state.loading && (!state.loadingMore || state.searchingAllTitles)) { Text(if (state.searchingAllTitles) "停止" else "全部标题") }
             }
         }
-        if (state.visibleFolders.isNotEmpty()) {
-            item(key = "header-folders") { SectionHeader("文件夹") }
-            itemsIndexed(state.visibleFolders, key = { _, folder -> "folder-${folder.id}" }) { index, folder ->
-                FolderRow(folder = folder, index = index, count = state.visibleFolders.size, onClick = { onOpenFolder(folder) })
+        if (folders.isNotEmpty()) {
+            item(key = "header-folders", contentType = "header") { SectionHeader("文件夹") }
+            itemsIndexed(folders, key = { _, folder -> "folder-${folder.id}" }, contentType = { _, _ -> "folder" }) { index, folder ->
+                FolderRow(folder = folder, index = index, count = folders.size, onClick = { onOpenFolder(folder) })
             }
         }
 
-        if (state.today.isNotEmpty()) {
-            item(key = "header-today") { SectionHeader("今天") }
-            itemsIndexed(state.today, key = { _, session -> session.id }) { index, session ->
+        if (today.isNotEmpty()) {
+            item(key = "header-today", contentType = "header") { SectionHeader("今天") }
+            itemsIndexed(today, key = { _, session -> session.id }, contentType = { _, _ -> "session" }) { index, session ->
                 SessionRow(
                     session = session,
                     index = index,
-                    count = state.today.size,
+                    count = today.size,
                     runtime = state.runStates[session.id],
                     compacting = session.id in state.compactingSessions,
                     onClick = { onOpenSession(session) },
@@ -643,13 +657,13 @@ private fun SessionList(
             }
         }
 
-        if (state.earlier.isNotEmpty()) {
-            item(key = "header-earlier") { SectionHeader("更早") }
-            itemsIndexed(state.earlier, key = { _, session -> session.id }) { index, session ->
+        if (earlier.isNotEmpty()) {
+            item(key = "header-earlier", contentType = "header") { SectionHeader("更早") }
+            itemsIndexed(earlier, key = { _, session -> session.id }, contentType = { _, _ -> "session" }) { index, session ->
                 SessionRow(
                     session = session,
                     index = index,
-                    count = state.earlier.size,
+                    count = earlier.size,
                     runtime = state.runStates[session.id],
                     compacting = session.id in state.compactingSessions,
                     onClick = { onOpenSession(session) },

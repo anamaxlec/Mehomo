@@ -9,10 +9,13 @@ data class ChatExample(val id: String, val category: String, val title: String, 
 
 // Official Memoh built-in catalog, adapted for the native Chinese interface.
 val chatExamples: List<ChatExample> = listOf(
+    ChatExample("personal-blog", "dev", "做一个个人博客", "在 /data/blog 下帮我做一个个人博客：前端用 Vite + Vue，后端用 Node.js，文章和评论存在 SQLite 里。写三篇示例文章，让后端在后台一直运行，然后在桌面浏览器里打开博客，带我看一遍。", listOf("workspace", "browser")),
+    ChatExample("github-trending-brief", "automation", "GitHub Trending 每日简报", "每天早上 9 点，在桌面浏览器里打开 GitHub Trending，逐个查看今天排名前 10 的仓库，值得细看的就点进去。然后发我一份简报：每个项目做什么、用什么语言、为什么受关注。现在先跑一次，让我看看过程。", listOf("browser", "schedule")),
+    ChatExample("build-open-source", "dev", "从源码编译 Redis", "从 GitHub 克隆 Redis，从源码编译两次：一次只用单核，一次用满全部 CPU 核心。对比两次的编译耗时，然后跑完整测试套件，告诉我通过了多少项。", listOf("workspace")),
+    ChatExample("local-docs-site", "research", "把 Vite 文档站搬到本地", "把 Vite 官方文档的源码克隆到 /data/docs/vite，构建成站点并在这台机器上跑起来。然后在桌面浏览器里打开，给我看配置参考里 server.proxy 那一节。文档留在存储里，下次还能直接用。", listOf("workspace", "browser")),
+    ChatExample("competitor-analysis", "research", "垂直领域竞品分析", "帮我的产品做一份竞品分析。找出同一细分领域的 5 到 8 个直接竞品，在浏览器里逐个访问官网和定价页，把功能、价格、目标客户和近期动态整理成表格存到 /data/reports，最后给出三个我们可以抓住的机会。我的产品和所在市场：", listOf("browser", "workspace")),
     ChatExample("morning-mail-digest", "automation", "早间邮件摘要", "每天早上 8 点，把昨晚收到的未读邮件按紧急程度整理成一份简短摘要发给我。", listOf("email", "schedule")),
-    ChatExample("tech-news-briefing", "research", "技术新闻速读", "打开 Hacker News 首页，挑出今天和 AI Agent 相关的 5 篇文章，读完后每篇用三句话总结。", listOf("browser")),
     ChatExample("research-brief", "research", "研究助理", "帮我研究一个主题。先问我想了解什么，然后找可靠的资料来源，最后写一页简报。", listOf("web_search")),
-    ChatExample("scaffold-project", "dev", "起一个新项目", "在工作区里新建一个 Vite + Vue 项目，把开发服务器跑起来，并告诉我怎么打开它。", listOf("workspace")),
     ChatExample("remember-preference", "memory", "记住我的偏好", "记住：我对花生过敏。以后推荐菜谱或帮我点外卖时都要避开。", listOf("memory")),
     ChatExample("weekly-report-reminder", "team", "周报提醒", "每周五下午 5 点提醒群里的成员填周报，晚上 8 点把还没交的人整理成名单发给我。", listOf("schedule", "channel")),
     ChatExample("price-drop-alert", "automation", "降价提醒", "每天看一次这款显示器的价格，降到 1500 元以下马上通知我：", listOf("browser", "schedule")),

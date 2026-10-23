@@ -598,6 +598,19 @@ data class SkillsList(
     val skills: List<InstalledSkill>? = null,
 )
 
+/** Chat-time catalogue; unlike the management list, contains no skill bodies or paths. */
+@Serializable
+data class SkillCatalog(val skills: List<SkillCatalogItem>? = null)
+
+@Serializable
+data class SkillCatalogItem(
+    val name: String = "",
+    @SerialName("display_name") val displayName: String? = null,
+    val description: String? = null,
+    @SerialName("source_kind") val sourceKind: String? = null,
+    val state: String? = null,
+)
+
 @Serializable
 data class InstalledSkill(
     @SerialName("app_id") val appId: String? = null,
@@ -644,6 +657,7 @@ data class RuntimeCommand(
     val kind: RuntimeCommandKind? = null,
     val name: String? = null,
     @SerialName("running_text") val runningText: String? = null,
+    val skill: Boolean = false,
 )
 
 typealias RuntimeCommandKind = String

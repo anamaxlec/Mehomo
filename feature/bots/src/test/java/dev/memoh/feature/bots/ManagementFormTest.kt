@@ -6,6 +6,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ManagementFormTest {
+    @Test fun `SearXNG custom headers from provider metadata round trip as an object`() {
+        val schema = Json.parseToJsonElement("""{"headers":{"type":"object","title":"HTTP headers","required":false}}""").jsonObject
+        val config = apiBody("headers" to apiBody("X-Test" to "native-client"))
+        val fields = schemaFields(schema, config, true)
+        assertEquals(FieldKind.Object, fields.single().kind)
+        assertEquals(config, formBody(fields, fields.associate { it.key to it.value }))
+    }
     @Test fun `Cloud names come from platform profile when the Bot service account is unnamed`() {
         val wire = Json.parseToJsonElement("""{"user":{"user_id":"u1","username":"login"},"user_profile":{"display_name":"Cloud name","timezone":"Asia/Singapore"}}""")
         val profile = cloudUserProfile(wire)

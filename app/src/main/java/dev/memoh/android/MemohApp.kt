@@ -392,6 +392,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onSelectAgent = viewModel::selectAgent,
                 onSelectEffort = viewModel::selectReasoningEffort,
                 onOpenControls = { controlsOpen = true },
+                onDismissCommandOutput = viewModel::dismissCommandOutput,
                 onPromoteQueue = viewModel::promoteQueue,
                 onRemoveQueued = viewModel::deleteQueue,
                 onNewSession = viewModel::newSession,
@@ -411,6 +412,8 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onCancelAttachments = viewModel::cancelAttachments,
                 onConfirmFolder = viewModel::confirmFolderChange,
                 onCancelFolder = viewModel::cancelFolderChange,
+                onRefreshSlashCatalog = viewModel::refreshSlashCatalog,
+                onQuickAction = viewModel::quickAction,
                 onOpenSurface = { navController.navigate(Routes.workspace(botId, it.name)) },
             ) }
             }

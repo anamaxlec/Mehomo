@@ -10,6 +10,7 @@ import org.commonmark.node.Link
 import org.commonmark.node.OrderedList
 import org.commonmark.node.StrongEmphasis
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,6 +21,15 @@ import org.junit.Test
  * renderer silently drops content — is testable here.
  */
 class MarkdownParseTest {
+    @Test fun `published images and failures are distinguished from code examples`() {
+        val image = "![image](/bots/b/media/${"a".repeat(64)})"
+        assertTrue(MemohMarkdown.hasPublishedMedia(image))
+        assertTrue(MemohMarkdown.hasPublishedMedia("![image](memoh-media-error:media.reference_unavailable)"))
+        assertFalse(MemohMarkdown.hasPublishedMedia("`$image`"))
+        assertFalse(MemohMarkdown.hasPublishedMedia("```markdown\n$image\n```"))
+        assertFalse(MemohMarkdown.hasPublishedMedia("![image](/data/image.png)"))
+        assertFalse(MemohMarkdown.hasPublishedMedia("[image](/bots/b/media/${"a".repeat(64)})"))
+    }
 
     @Test fun `unsafe link schemes remain readable without a launch action`() {
         val text = MemohMarkdown.inline(parse("[example](javascript:alert(1))").firstChild, null, androidx.compose.ui.graphics.Color.Blue)

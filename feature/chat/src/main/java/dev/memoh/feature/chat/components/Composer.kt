@@ -102,7 +102,7 @@ import kotlin.math.roundToInt
 fun Composer(
     text: String,
     onTextChange: (String) -> Unit,
-    onSend: () -> Unit,
+    onSend: (openModelMenu: () -> Unit) -> Unit,
     onStop: () -> Unit,
     isRunning: Boolean,
     /** Controls (attach, model, capability) are usable. */
@@ -121,7 +121,7 @@ fun Composer(
     /** Files are managed inside the same surface as the editor. */
     attachments: @Composable () -> Unit = {},
     /** Queue chips, decisions and run status above the composer. */
-    above: @Composable () -> Unit = {},
+    above: @Composable (openModelMenu: () -> Unit) -> Unit = {},
     onAttachClick: (() -> Unit)? = null,
     /** The model and reasoning effort in use, shown inside the field. */
     modelLabel: String? = null,
@@ -143,11 +143,15 @@ fun Composer(
     modelMenu: (@Composable (expanded: Boolean, dismiss: () -> Unit) -> Unit)? = null,
     sendDescription: String = "发送",
     textEnabled: Boolean = enabled,
+    showStop: Boolean = isRunning && text.isBlank() && !hasAttachments && !attachmentLoading,
+    /** Keep selector entry compact while the slash menu already supplies its controls. */
+    compactForSuggestions: Boolean = false,
 ) {
     var popupBounds by remember { mutableStateOf<IntRect?>(null) }
     var editorFocused by remember { mutableStateOf(false) }
     var plusOpen by remember { mutableStateOf(false) }
     var modelOpen by remember { mutableStateOf(false) }
+    val openModelMenu = { plusOpen = false; modelOpen = true }
     val imeVisible = WindowInsets.isImeVisible
     val focusManager = LocalFocusManager.current
     // A hidden keyboard must not reopen just because the window regains focus.
@@ -160,7 +164,8 @@ fun Composer(
         else if (imeVisible) imeWasVisible = true
     }
     val hasAttachmentArea = hasAttachments || attachmentLoading
-    val editorExpanded = hasAttachmentArea || text.isNotBlank() || editorFocused && (imeVisible || !imeWasVisible)
+    val editorExpanded = hasAttachmentArea || !compactForSuggestions &&
+        (text.isNotBlank() || editorFocused && (imeVisible || !imeWasVisible))
     val animatedExpansion by animateFloatAsState(if (editorExpanded) 1f else 0f,
         MaterialTheme.motionScheme.defaultSpatialSpec(), label = "composerExpansion")
     val expansion = animatedExpansion.coerceIn(0f, 1f)
@@ -180,7 +185,9 @@ fun Composer(
             },
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            above()
+            // Measure the editor and its controls first. The menu gets the
+            // remaining height when the keyboard or large text reduces space.
+            Box(Modifier.weight(1f, fill = false)) { above(openModelMenu) }
 
             MemohComposerSurface(Modifier.fillMaxWidth(), contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) {
                 AnimatedVisibility(
@@ -234,7 +241,6 @@ fun Composer(
                             Spacer(Modifier.width(6.dp))
                         } else Spacer(Modifier.weight(1f))
 
-                        val showStop = isRunning && text.isBlank() && !hasAttachments
                         val canPressSend = sendEnabled && (showStop || text.isNotBlank() || hasAttachments)
                         MemohComposerIconButton(
                             icon = if (showStop) Icons.Filled.Stop else Icons.Filled.ArrowUpward,
@@ -242,7 +248,7 @@ fun Composer(
                             enabled = canPressSend,
                             filled = true,
                             danger = showStop,
-                            onClick = { if (showStop) onStop() else onSend() },
+                            onClick = { if (showStop) onStop() else onSend(openModelMenu) },
                         )
                     }
                 }

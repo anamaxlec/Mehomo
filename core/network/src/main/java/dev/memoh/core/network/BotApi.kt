@@ -92,6 +92,8 @@ suspend fun MemohApi.marketApp(registryId: String, appId: String): JsonObject = 
 suspend fun MemohApi.checkAppUpdates(botId: String): JsonElement = change("${botPath(botId)}/apps/check-updates", "POST")
 suspend fun MemohApi.appRemovalPreview(botId: String, id: String): JsonObject = get("${botPath(botId)}/apps/${segment(id)}/removal-preview")
 suspend fun MemohApi.skills(botId: String): List<InstalledSkill> = get<SkillsList>("${botPath(botId)}/container/skills").skills.orEmpty()
+suspend fun MemohApi.skillCatalog(botId: String): List<SkillCatalogItem> =
+    get<SkillCatalog>("${botPath(botId)}/skills/catalog").skills.orEmpty()
 suspend fun MemohApi.saveSkill(botId: String, raw: String, sourcePath: String? = null): Unit =
     change("${botPath(botId)}/container/skills", "POST", apiBody("skills" to listOf(raw), "source_path" to sourcePath))
 suspend fun MemohApi.deleteSkill(botId: String, sourcePath: String): Unit = change("${botPath(botId)}/container/skills", "DELETE", apiBody("source_paths" to listOf(sourcePath)))
@@ -113,6 +115,8 @@ suspend fun MemohApi.reorderQueue(botId: String, sessionId: String, itemId: Stri
         apiBody("item" to apiBody("item_id" to itemId), "before" to apiBody("item_id" to beforeId)))
 suspend fun MemohApi.promoteQueueItem(botId: String, sessionId: String, id: String): Unit = change("${sessionPath(botId, sessionId)}/follow-up-queue/${segment(id)}/steer", "POST")
 suspend fun MemohApi.runtimeControls(botId: String, sessionId: String): RuntimeControls = get("${sessionPath(botId, sessionId)}/runtime-controls")
+suspend fun MemohApi.agentRuntimeControls(botId: String, agentId: String, workdirId: String? = null): RuntimeControls =
+    get("${botPath(botId)}/agents/${segment(agentId)}/runtime-controls${query("workdir_id" to workdirId?.takeIf(String::isNotBlank))}")
 suspend fun MemohApi.sessionInfo(botId: String, sessionId: String, modelId: String? = null): SessionInfo =
     get("${sessionPath(botId, sessionId)}/status${query("model_id" to modelId?.takeIf(String::isNotBlank))}")
 suspend fun MemohApi.files(botId: String, path: String = "/data"): WorkspaceListing =

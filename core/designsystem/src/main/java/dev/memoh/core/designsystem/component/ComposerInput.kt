@@ -13,6 +13,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -22,6 +25,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
 
 /** The shared capsule used by chat and compact workspace input. */
@@ -40,7 +45,15 @@ fun MemohComposerTextField(value: String, onValueChange: (String) -> Unit, place
     enabled: Boolean, modifier: Modifier = Modifier, singleLine: Boolean = false,
     maxLines: Int = if (singleLine) 1 else 8, onSend: () -> Unit = {}) {
     val interaction = remember { MutableInteractionSource() }
-    BasicTextField(value, onValueChange, enabled = enabled, singleLine = singleLine,
+    var editorValue by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    // Keep IME composition and user selection during edits. An external replacement
+    // (for example selecting /skill) starts writing after the completed selector.
+    val fieldValue = if (editorValue.text == value) editorValue else TextFieldValue(value, TextRange(value.length))
+    SideEffect { if (editorValue.text != value) editorValue = fieldValue }
+    BasicTextField(fieldValue, { next ->
+        editorValue = next
+        if (next.text != value) onValueChange(next.text)
+    }, enabled = enabled, singleLine = singleLine,
         interactionSource = interaction,
         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),

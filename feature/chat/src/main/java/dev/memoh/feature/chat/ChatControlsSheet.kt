@@ -103,21 +103,26 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
                     }
                     }
                 }
-                if (!controls.commands.isNullOrEmpty()) ControlCard("运行命令", Icons.Filled.Terminal) {
+                listOf(false, true).forEach { skill ->
+                val commands = controls.commands.orEmpty().filter { it.skill == skill }
+                if (commands.isNotEmpty()) ControlCard(if (skill) "Skills" else "运行命令",
+                    if (skill) Icons.Filled.Extension else Icons.Filled.Terminal) {
                     Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                        controls.commands.orEmpty().forEachIndexed { index, item ->
+                        commands.forEachIndexed { index, item ->
                             SegmentedListItem(onClick = {
-                                if (item.inputHint.isNullOrBlank()) item.name?.let(viewModel::command)
+                                if (item.kind == "turn") { viewModel.setDraft("/${item.name} "); onDismiss() }
+                                else if (item.inputHint.isNullOrBlank()) item.name?.let { viewModel.command(it) }
                                 else { command = item.name; commandArgs = "" }
                             }, enabled = state.runtimeCommandsAvailable && item.name != null,
-                                shapes = ListItemDefaults.segmentedShapes(index, controls.commands.orEmpty().size),
-                                leadingContent = { Icon(Icons.Filled.Terminal, null, Modifier.size(18.dp)) },
+                                shapes = ListItemDefaults.segmentedShapes(index, commands.size),
+                                leadingContent = { Icon(if (skill) Icons.Filled.Extension else Icons.Filled.Terminal, null, Modifier.size(18.dp)) },
                                 supportingContent = item.description?.takeIf { it.isNotBlank() }?.let { description -> { Text(description, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis) } },
                                 trailingContent = { Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary) }) {
                                 Text(item.name.orEmpty(), style = MaterialTheme.typography.bodyMedium)
                             }
                         }
                     }
+                }
                 }
             }
             val forkTurn = state.settledHistory.lastOrNull { it.isAssistant && it.runtimeForkable != false }?.turnId

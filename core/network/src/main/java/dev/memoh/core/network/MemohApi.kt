@@ -238,12 +238,12 @@ class MemohApi(
 
     /** Images/files use the same account headers as REST only on this server. */
     suspend fun media(location: String): ByteArray = withContext(Dispatchers.IO) {
-        val maxBytes = 16 * 1024 * 1024L
+        val maxBytes = 20 * 1024 * 1024L
         if (location.startsWith("data:")) {
             require(location.substringBefore(',').contains(";base64")) { "不支持这种内嵌图片" }
-            require(location.length <= maxBytes * 4 / 3 + 512) { "图片超过 16 MB" }
+            require(location.length <= maxBytes * 4 / 3 + 512) { "图片超过 20 MB" }
             return@withContext java.util.Base64.getMimeDecoder().decode(location.substringAfter(',')).also {
-                require(it.size <= maxBytes) { "图片超过 16 MB" }
+                require(it.size <= maxBytes) { "图片超过 20 MB" }
             }
         }
         val url = when {
@@ -287,10 +287,10 @@ class MemohApi(
         response.use {
             if (!it.isSuccessful) throw ApiException(it.code, null, "文件加载失败（HTTP ${it.code}）")
             val body = it.body ?: error("文件内容为空")
-            require(body.contentLength() <= maxBytes) { "文件超过 16 MB" }
+            require(body.contentLength() <= maxBytes) { "文件超过 20 MB" }
             val source = body.source()
             source.request(maxBytes + 1)
-            require(source.buffer.size <= maxBytes) { "文件超过 16 MB" }
+            require(source.buffer.size <= maxBytes) { "文件超过 20 MB" }
             source.readByteArray()
         }
     }

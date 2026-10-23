@@ -128,6 +128,23 @@ object MemohMarkdown {
 
     fun parse(markdown: String): Node = parser.parse(markdown)
 
+    /** Publication rewrites image nodes, never examples inside code spans or fences. */
+    fun hasPublishedMedia(markdown: String): Boolean {
+        if (!markdown.contains("/media/") && !markdown.contains("memoh-media-error:")) return false
+        val nodes = ArrayDeque<Node>()
+        nodes.add(parse(markdown))
+        while (nodes.isNotEmpty()) {
+            val node = nodes.removeLast()
+            if (node is Image && (publishedImagePath.matches(node.destination) ||
+                    node.destination.startsWith("memoh-media-error:"))) return true
+            var child = node.firstChild
+            while (child != null) { nodes.add(child); child = child.next }
+        }
+        return false
+    }
+
+    private val publishedImagePath = Regex("^/bots/[0-9a-f-]+/media/[0-9a-f]{64}$", RegexOption.IGNORE_CASE)
+
     @Composable
     fun Code(code: String, language: String = "") { CodeBlock(code, language) }
 
@@ -141,8 +158,10 @@ object MemohMarkdown {
         markdown: String,
         modifier: Modifier = Modifier,
         onLinkClick: ((String) -> Unit)? = null,
+        singleDollarMath: Boolean = true,
+        workspaceImagesAsLinks: Boolean = false,
     ) {
-        val math = remember(markdown) { protectMath(markdown) }
+        val math = remember(markdown, singleDollarMath) { protectMath(markdown, singleDollarMath) }
         val document = remember(math.markdown) { parse(math.markdown) }
         val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
         val workspaceHandler = LocalWorkspaceLinkHandler.current
@@ -154,7 +173,8 @@ object MemohMarkdown {
                 null -> Unit
             }
         }
-        androidx.compose.runtime.CompositionLocalProvider(inlineMath provides math.expressions) {
+        androidx.compose.runtime.CompositionLocalProvider(inlineMath provides math.expressions,
+            LocalMarkdownWorkspaceImagesAsLinks provides workspaceImagesAsLinks) {
         SelectionContainer {
             Column(
                 modifier = modifier.fillMaxWidth(),
@@ -214,20 +234,24 @@ object MemohMarkdown {
     private fun ParagraphBlock(node: Paragraph, onLinkClick: ((String) -> Unit)?) {
         val expressions = inlineMath.current
         val html = remember(node) { htmlRenderer.render(node) }
-        if (expressions.keys.any { it in html } && generateSequence(node.firstChild) { it.next }.none { it is Image }) {
+        if (expressions.keys.any { it in html } && generateSequence(node.firstChild) { it.next }.none { paragraphImage(it) != null }) {
             RichContent(RichFormat.Paragraph, html, expressions = expressions, onLinkClick = onLinkClick)
             return
         }
         // Images are block surfaces; split only their containing paragraph so
         // prose before/after an inline image is still visible and selectable.
         var child = node.firstChild
-        if (generateSequence(child) { it.next }.any { it is Image }) {
+        if (generateSequence(child) { it.next }.any { paragraphImage(it) != null }) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 var start = child
                 while (child != null) {
-                    if (child is Image) {
+                    val image = paragraphImage(child)
+                    if (image != null) {
                         if (start != child) InlineRange(node, onLinkClick, start, child)
-                        MarkdownImage(child.destination.orEmpty(), plainText(child))
+                        val destination = (child as? Link)?.destination
+                            ?.takeIf { classifyWorkspaceLink(it) != null && onLinkClick != null }
+                        MarkdownImage(image.destination.orEmpty(), plainText(image),
+                            onImageClick = destination?.let { url -> { onLinkClick?.invoke(url) } })
                         start = child.next
                     }
                     child = child.next
@@ -237,6 +261,12 @@ object MemohMarkdown {
             return
         }
         InlineRange(node, onLinkClick, node.firstChild, null)
+    }
+
+    private fun paragraphImage(node: Node?): Image? = when (node) {
+        is Image -> node
+        is Link -> (node.firstChild as? Image)?.takeIf { it.next == null }
+        else -> null
     }
 
     @Composable

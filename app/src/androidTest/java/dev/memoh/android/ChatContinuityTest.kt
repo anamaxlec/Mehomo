@@ -453,6 +453,7 @@ class ChatContinuityTest {
             val root = File(context.cacheDir, "continuity-${System.nanoTime()}")
             lateinit var vm: ChatViewModel
             var vmCreated = false
+            var testNavigation: androidx.navigation.NavHostController? = null
             val factory = object : ViewModelProvider.Factory {
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     vm = ChatViewModel(repository, json, ChatSocketFactory(OkHttpClient(), json, CloudAuth(OkHttpClient(), json)),
@@ -464,6 +465,7 @@ class ChatContinuityTest {
             }
             compose.setContent { MemohTheme {
                 val navigation = rememberNavController()
+                SideEffect { testNavigation = navigation }
                 NavHost(navigation, startDestination = "home") {
                     composable("home") { TextButton({ navigation.navigate("chat") }) { Text("打开测试会话") } }
                     composable("chat") { entry ->
@@ -484,7 +486,7 @@ class ChatContinuityTest {
             compose.onNodeWithText("打开测试会话").performClick()
             try {
                 compose.waitUntil(8_000) { vmCreated && vm.state.value.isRunning && !vm.state.value.historyLoading }
-                compose.onNodeWithText("运行中").assertIsDisplayed()
+                compose.onNodeWithText("探索中").assertIsDisplayed()
                 compose.onNodeWithText("正在处理…").assertDoesNotExist()
                 repeat(3) {
                     compose.onNodeWithText("探索中").performClick()
@@ -492,11 +494,24 @@ class ChatContinuityTest {
                     compose.onNodeWithText("fixture tool output").assertIsDisplayed()
                     compose.onNodeWithContentDescription("返回").performClick()
                     compose.onNodeWithText("打开测试会话").performClick()
-                    compose.onNodeWithText("运行中").assertIsDisplayed()
+                    compose.onNodeWithText("探索中").assertIsDisplayed()
                 }
                 assertEquals("Reentry must reuse the active transport", 1, server.connections.get())
+                // Visible content can precede the end of the navigation transition.
+                // Context polling is deliberately scoped to the resumed destination.
+                compose.waitUntil(8_000) { testNavigation?.currentBackStackEntry?.lifecycle?.currentState == Lifecycle.State.RESUMED }
                 server.tokens.set(21_000)
-                compose.waitUntil(8_000) { vm.state.value.sessionInfo?.contextUsage?.tokens == 21_000L }
+                val infoReads = server.infoReads.get()
+                val clockStart = compose.mainClock.currentTime
+                // Drive the foreground poll timer, then await its real HTTP I/O.
+                compose.mainClock.advanceTimeBy(5_100)
+                try { compose.waitUntil(8_000) { vm.state.value.sessionInfo?.contextUsage?.tokens == 21_000L } }
+                catch (e: androidx.compose.ui.test.ComposeTimeoutException) {
+                    throw AssertionError("Context refresh: lifecycle=${testNavigation?.currentBackStackEntry?.lifecycle?.currentState}, " +
+                        "running=${vm.state.value.isRunning}, reads=$infoReads->${server.infoReads.get()}, " +
+                        "clock=$clockStart->${compose.mainClock.currentTime}, " +
+                        "loading=${vm.state.value.sessionInfoLoading}, error=${vm.state.value.sessionInfoError}", e)
+                }
                 compose.onNodeWithContentDescription("会话信息，上下文已用 21%").assertIsDisplayed()
                 compose.onNodeWithContentDescription("上下文检查器").assertDoesNotExist()
                 val receivedRun = vm.state.value.runtime
@@ -513,7 +528,7 @@ class ChatContinuityTest {
                     compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
                 }
                 compose.mainClock.autoAdvance = true
-                compose.onNodeWithText("运行中").assertIsDisplayed()
+                compose.onNodeWithText("探索中").assertIsDisplayed()
                 compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
                 compose.onNodeWithText("探索中").performClick()
                 compose.onNodeWithText("读取 Main.kt").performClick()
@@ -555,7 +570,7 @@ class ChatContinuityTest {
     }
 }
 
-private class ContinuityFixture(private val json: Json) : AutoCloseable {
+internal class ContinuityFixture(private val json: Json) : AutoCloseable {
     private val server = ServerSocket(0, 20, InetAddress.getByName("127.0.0.1"))
     private val clients = CopyOnWriteArrayList<Socket>()
     val origin = "http://localhost:${server.localPort}"
@@ -570,6 +585,32 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
     val sessionReads = AtomicInteger()
     val starterPromptReads = AtomicInteger()
     val capabilityReads = AtomicInteger()
+    val botListReads = AtomicInteger()
+    val sessionListReads = AtomicInteger()
+    val sessionCreates = AtomicInteger()
+    val folderReads = AtomicInteger()
+    @Volatile var botsBlock: CountDownLatch? = null
+    @Volatile var botsBody: String? = null
+    @Volatile var foldersBlock: CountDownLatch? = null
+    @Volatile var laterSessionsBlock: CountDownLatch? = null
+    @Volatile var sessionsBody: String? = null
+    @Volatile var laterSessionsBody = """{"items":[]}"""
+    @Volatile var createSessionBody: String? = null
+    @Volatile var createSessionBlock: CountDownLatch? = null
+    val quickActions = CopyOnWriteArrayList<String>()
+    @Volatile var quickActionFailureCode: String? = null
+    val skillCatalogReads = AtomicInteger()
+    val runtimeControlRequests = CopyOnWriteArrayList<String>()
+    val sentMessages = CopyOnWriteArrayList<WSClientMessage>()
+    @Volatile var messageFailureCode: String? = null
+    @Volatile var messageCommandResult: CommandActionResult? = null
+    @Volatile var skillCatalogBody = """{"skills":[]}"""
+    @Volatile var skillCatalogStatus = 200
+    @Volatile var skillCatalogBlock: CountDownLatch? = null
+    @Volatile var controlsBody = """{"session_id":"s","commands":[{"name":"status","kind":"read"}]}"""
+    @Volatile var controlsBlock: CountDownLatch? = null
+    @Volatile var infoBlock: CountDownLatch? = null
+    @Volatile var agentControlsBody = """{"commands":[]}"""
     @Volatile var historyBlock: CountDownLatch? = null
     @Volatile var capabilitiesBlock: CountDownLatch? = null
     @Volatile var sessionBlock: CountDownLatch? = null
@@ -628,7 +669,20 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
                     val frame = json.decodeFromString<WSClientMessage>(bytes.toString(Charsets.UTF_8))
                     if (frame.type == WSClientMessage.RETRY_MESSAGE) retryRequests.incrementAndGet()
                     if (frame.type == WSClientMessage.MESSAGE) {
+                        sentMessages += frame
                         messageRequests.incrementAndGet()
+                        val failureCode = messageFailureCode
+                        if (failureCode != null) {
+                            sendEvent(client, UIStreamEvent(type = UIStreamEvent.COMMAND_ERROR, invocationId = frame.invocationId,
+                                sessionId = frame.sessionId, terminal = true, code = failureCode))
+                            continue
+                        }
+                        val commandResult = messageCommandResult
+                        if (commandResult != null) {
+                            sendEvent(client, UIStreamEvent(type = UIStreamEvent.COMMAND_RESULT, invocationId = frame.invocationId,
+                                sessionId = frame.sessionId, terminal = true, result = commandResult))
+                            continue
+                        }
                         if (historyCleared) {
                             historyCleared = false
                             val user = UIUserTurn("turn", id = "first-user", text = frame.text.orEmpty())
@@ -677,13 +731,42 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
                 sessionBlock?.await(15, TimeUnit.SECONDS)
             }
             if (path == "/models") modelsBlock?.await(15, TimeUnit.SECONDS)
+            if (path == "/bots") { botListReads.incrementAndGet(); botsBlock?.await(15, TimeUnit.SECONDS) }
+            if (path == "/bots/b/workdirs") { folderReads.incrementAndGet(); foldersBlock?.await(15, TimeUnit.SECONDS) }
+            if (path == "/bots/b/sessions") {
+                if (method == "POST") {
+                    sessionCreates.incrementAndGet()
+                    createSessionBlock?.await(15, TimeUnit.SECONDS)
+                } else {
+                    sessionListReads.incrementAndGet()
+                    if (requestTarget.contains("cursor=")) laterSessionsBlock?.await(15, TimeUnit.SECONDS)
+                }
+            }
+            if (path == "/bots/b/quick-actions/execute") {
+                quickActions += json.parseToJsonElement(requestBody).jsonObject["action_id"]!!.jsonPrimitive.content
+            }
+            if (path == "/bots/b/skills/catalog") {
+                skillCatalogReads.incrementAndGet()
+                skillCatalogBlock?.await(15, TimeUnit.SECONDS)
+            }
+            if (path.endsWith("/runtime-controls")) {
+                runtimeControlRequests += requestTarget
+                controlsBlock?.await(15, TimeUnit.SECONDS)
+            }
             val body = when (path) {
-                "/bots" -> """{"items":[$bot]}"""
+                "/bots" -> botsBody ?: """{"items":[$bot]}"""
                 "/bots/b" -> bot
-                "/bots/b/sessions" -> """{"items":[$session]}"""
+                "/bots/b/sessions" -> if (method == "POST") createSessionBody ?: session
+                    else if (requestTarget.contains("cursor=")) laterSessionsBody else sessionsBody ?: """{"items":[$session]}"""
+                "/bots/b/quick-actions/execute" -> quickActionFailureCode?.let { code -> json.encodeToString(UIStreamEvent(
+                    type = UIStreamEvent.COMMAND_ERROR, code = code, terminal = true)) }
+                    ?: json.encodeToString(UIStreamEvent(type = UIStreamEvent.COMMAND_RESULT,
+                        terminal = true, result = messageCommandResult ?: CommandActionResult(kind = "help", title = "快捷操作帮助", text = "选择快捷操作或 Skill")))
                 "/bots/b/sessions/s" -> session
                 "/bots/b/sessions/other" -> session.replace("\"s\"", "\"other\"")
-                "/bots/b/sessions/s/runtime-controls" -> """{"session_id":"s","commands":[{"name":"status","kind":"read"}]}"""
+                "/bots/b/sessions/s/runtime-controls" -> controlsBody
+                "/bots/b/agents/claude/runtime-controls", "/bots/b/sessions/other/runtime-controls" -> agentControlsBody
+                "/bots/b/skills/catalog" -> skillCatalogBody
                 "/bots/b/sessions/s/queue" -> json.encodeToString(SessionQueueResponse(steerSupported = true,
                     followUp = enqueued.mapIndexedNotNull { index, (steer, text) -> if (!steer) QueueItem("q-$index", text = text) else null },
                     steer = enqueued.mapIndexedNotNull { index, (steer, text) -> if (steer) QueueItem("q-$index", text = text) else null }))
@@ -691,6 +774,7 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
                 "/bots/b/agents" -> """{"items":[]}"""
                 "/bots/b/sessions/s/status" -> {
                     infoReads.incrementAndGet()
+                    infoBlock?.await(15, TimeUnit.SECONDS)
                     """{"context_usage":{"used_tokens":${tokens.get()},"context_window":100000}}"""
                 }
                 "/models" -> modelsBody
@@ -699,7 +783,8 @@ private class ContinuityFixture(private val json: Json) : AutoCloseable {
                 "/bots/b/workspace-targets" -> """{"targets":[]}"""
                 else -> "{}"
             }.toByteArray()
-            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray())
+            val status = if (path == "/bots/b/skills/catalog") skillCatalogStatus else 200
+            output.write("HTTP/1.1 $status Fixture\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray())
             output.write(body); output.flush()
         } catch (_: java.io.IOException) { /* A cancelled test subscription closes its client. */ }
     }

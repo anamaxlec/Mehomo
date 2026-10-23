@@ -115,6 +115,10 @@ data class ChatUiState(
     val busy: Boolean = false,
     val queue: SessionQueueResponse = SessionQueueResponse(),
     val controls: RuntimeControls? = null,
+    val controlsLoading: Boolean = false,
+    val skillCatalog: List<SkillCatalogItem> = emptyList(),
+    val skillCatalogLoading: Boolean = false,
+    val skillCatalogError: String? = null,
     val goal: RuntimeGoal? = null,
     val controlsError: String? = null,
     val codexUsage: CodexUsage? = null,
@@ -251,6 +255,8 @@ data class ChatUiState(
      */
     val canEditDraft: Boolean get() = !draftRestoring && !sessionLoading && session != null && session.isLocal
     val canCompose: Boolean get() = !busy && canEditDraft
+    val nativeSkillsEnabled: Boolean get() = !sessionLoading && session?.isLocal == true &&
+        session.runtimeType in listOf(null, "model")
 
     /** An idle ledger snapshot may have no blocks; it must never erase persisted output. */
     val liveMessages: List<UIMessage>
@@ -317,7 +323,15 @@ data class ChatUiState(
             retained.addAll(insertAt, missingUsers)
             val assistantIndex = retained.indexOfFirst { it.isAssistant && it.turnId == outgoing.turnId }
             if (assistantIndex >= 0) {
-                retained[assistantIndex] = retained[assistantIndex].copy(messages = outgoing.safeMessages)
+                val persisted = retained[assistantIndex]
+                // Completed snapshots contain original model text; persisted history
+                // already includes archived image URLs and publication failures.
+                if (!(outgoing.status == "completed" && outgoing.operation == null &&
+                        !persisted.id.isNullOrBlank() && persisted.safeMessages.any { message ->
+                            message.type == "text" && dev.memoh.core.markdown.MemohMarkdown.hasPublishedMedia(message.content)
+                        })) {
+                    retained[assistantIndex] = persisted.copy(messages = outgoing.safeMessages)
+                }
             } else {
                 retained += UITurn(turnId = outgoing.turnId, turnPosition = outgoing.turnPosition,
                     role = "assistant", messages = outgoing.safeMessages, timestamp = outgoing.updatedAt.orEmpty())
@@ -369,6 +383,7 @@ class ChatViewModel @Inject constructor(
     private var capabilitiesJob: Job? = null
     private var operationJob: Job? = null
     private var controlsJob: Job? = null
+    private var skillCatalogJob: Job? = null
     private var queueJob: Job? = null
     private var attachmentJob: Job? = null
     private var draftAddress: Triple<String, String, String>? = null
@@ -414,6 +429,7 @@ class ChatViewModel @Inject constructor(
         capabilitiesJob?.cancel()
         operationJob?.cancel()
         controlsJob?.cancel()
+        skillCatalogJob?.cancel()
         queueJob?.cancel()
         contextLifecycleJob?.cancel()
         sessionInfoJob?.cancel()
@@ -435,6 +451,7 @@ class ChatViewModel @Inject constructor(
             agents = previous?.agents.orEmpty(), exampleCapabilities = previous?.exampleCapabilities.orEmpty(),
             starterPrompts = previous?.starterPrompts ?: StarterPromptsResponse(items = sampleChatExamples()),
             botPermissions = previous?.botPermissions,
+            skillCatalog = previous?.skillCatalog.orEmpty(),
             selectedModelId = seed?.preferredChatModelId, reasoningEffort = seed?.preferredReasoningEffort,
             selectedWorkdirId = seed?.workdirId, selectedAgentId = seed?.botAgentId)
         openJob = viewModelScope.launch {
@@ -494,6 +511,7 @@ class ChatViewModel @Inject constructor(
                 )
             }
             loadCapabilities(botId, resolved)
+            refreshSkillCatalog()
             refreshControls()
             refreshSessionInfo()
             val current = state.value
@@ -642,7 +660,7 @@ class ChatViewModel @Inject constructor(
                 if (acceptedDraft) { draftInvocationId = null; persistDraft() }
             }
 
-            UIStreamEvent.RUN_REJECTED -> {
+            UIStreamEvent.RUN_REJECTED, UIStreamEvent.COMMAND_ERROR -> {
                 val invocationId = event.invocationId
                 _state.update { current ->
                     val rejected = current.pending.firstOrNull { it.invocationId == invocationId }
@@ -667,7 +685,20 @@ class ChatViewModel @Inject constructor(
                 else if (event.applied == true) _state.update { it.copy(notice = "操作已提交") }
             }
 
-            UIStreamEvent.ERROR, UIStreamEvent.COMMAND_ERROR -> {
+            UIStreamEvent.COMMAND_RESULT -> {
+                val result = event.result
+                val output = listOfNotNull(result?.title, result?.text,
+                    result?.items?.joinToString("\n") { listOfNotNull(it.title, it.description).joinToString(" · ") })
+                    .joinToString("\n").takeIf(String::isNotBlank)
+                _state.update { current -> current.copy(commandOutput = output ?: current.commandOutput,
+                    pending = if (event.terminal != false) current.pending.filterNot { it.invocationId == event.invocationId } else current.pending) }
+                if (event.terminal != false && draftInvocationId == event.invocationId) {
+                    draftInvocationId = null
+                    persistDraft()
+                }
+            }
+
+            UIStreamEvent.ERROR -> {
                 // An in-stream error must not clear what is already rendered.
                 val message = event.problem.text().takeIf(String::isNotBlank)
                 _state.update { it.copy(error = message, errorProblem = event.problem,
@@ -856,11 +887,16 @@ class ChatViewModel @Inject constructor(
         check(!current.isRunning) { "请等当前任务结束后切换 Agent" }
         val updated = api.updateSession(current.botId, session.id, apiBody("bot_agent_id" to (agentId ?: ""),
             "runtime_type" to if (agentId == null) "model" else null))
+        skillCatalogJob?.cancel()
         _state.update { it.copy(session = updated, selectedAgentId = updated.botAgentId,
             codexUsageLoading = false, codexUsage = null, codexUsageError = null, codexUsageAgentId = null,
+            controls = null, controlsError = null, controlsLoading = false,
+            skillCatalog = emptyList(), skillCatalogLoading = false, skillCatalogError = null,
             selectedModelId = updated.preferredChatModelId, models = emptyList(), modelCatalogLoading = true, modelProviders = emptyList(), reasoningEffort = updated.preferredReasoningEffort, awaitingSnapshot = true) }
         connectSocket(current.botId, updated)
         loadCapabilities(current.botId, updated)
+        refreshSkillCatalog()
+        refreshControls()
     }
 
     fun refreshQueue(force: Boolean = false) {
@@ -888,19 +924,54 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /** Native Memoh skills and external runtime commands have separate upstream catalogues. */
+    fun refreshSlashCatalog() {
+        if (state.value.nativeSkillsEnabled) refreshSkillCatalog()
+        else if (controlsJob?.isActive != true) refreshControls()
+    }
+
+    private fun refreshSkillCatalog() {
+        val current = state.value
+        if (!current.nativeSkillsEnabled || skillCatalogJob?.isActive == true) return
+        val generation = repository.generation
+        fun matches(target: ChatUiState) = repository.generation == generation && target.botId == current.botId &&
+            target.session?.id == current.session?.id && target.selectedAgentId == current.selectedAgentId && target.nativeSkillsEnabled
+        skillCatalogJob = viewModelScope.launch {
+            _state.update { it.copy(skillCatalogLoading = true, skillCatalogError = null) }
+            try {
+                val skills = (repository.api() ?: throw SessionExpiredException()).skillCatalog(current.botId)
+                    .map { it.copy(name = it.name.trim()) }.filter { it.name.isNotEmpty() }.distinctBy { it.name }
+                _state.update { if (matches(it)) it.copy(skillCatalog = skills, skillCatalogLoading = false) else it }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                _state.update { if (matches(it)) it.copy(skillCatalogLoading = false,
+                    skillCatalogError = e.userMessage("Skill 加载失败")) else it }
+            }
+        }
+    }
+
     fun refreshControls() {
         refreshQueue()
         val current = state.value
         val session = current.session ?: return
+        val generation = repository.generation
+        fun matches(target: ChatUiState) = repository.generation == generation && target.botId == current.botId &&
+            target.session?.id == session.id && target.selectedAgentId == current.selectedAgentId &&
+            target.selectedWorkdirId == current.selectedWorkdirId
         controlsJob?.cancel()
         controlsJob = viewModelScope.launch {
             val api = repository.api() ?: return@launch
+            _state.update { it.copy(controlsLoading = true) }
             try {
-                val controls = api.runtimeControls(current.botId, session.id)
+                val agentId = current.selectedAgentId ?: session.botAgentId
+                val direct = session.isAcpRuntime || DirectAgentRuntime.fromId(session.runtimeType) != null
+                val controls = if (direct && current.hasResolvedHistory && current.isEmptyConversation && agentId != null)
+                    api.agentRuntimeControls(current.botId, agentId, current.selectedWorkdirId)
+                else api.runtimeControls(current.botId, session.id)
                 val goal = if (controls.capabilities?.goal == true) api.runtimeGoal(current.botId, session.id)["goal"]?.takeIf { it !is JsonNull }?.let { json.decodeFromJsonElement(RuntimeGoal.serializer(), it) } else null
-                _state.update { it.copy(controls = controls, goal = goal, controlsError = null) }
+                _state.update { if (matches(it)) it.copy(controls = controls, goal = goal, controlsError = null, controlsLoading = false) else it }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { _state.update { it.copy(controlsError = "运行控制：${e.userMessage()}") } }
+            catch (e: Exception) { _state.update { if (matches(it)) it.copy(controlsError = "运行控制：${e.userMessage()}", controlsLoading = false) else it } }
         }
     }
     fun enqueue(text: String, steer: Boolean, onSuccess: () -> Unit = {}) {
@@ -935,14 +1006,16 @@ class ChatViewModel @Inject constructor(
     fun goalAction(action: String) = operation { api, current, session ->
         api.controlRuntimeGoal(current.botId, session.id, action); refreshControls()
     }
-    fun command(value: String) {
+    fun command(value: String, onSuccess: () -> Unit = {}) {
         if (!state.value.runtimeCommandsAvailable) return
         operation { api, current, session ->
             val result = api.runtimeCommand(current.botId, session.id, apiBody("command" to value))
             val message = (result as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
             _state.update { it.copy(commandOutput = message, notice = "命令已执行") }; refreshControls()
+            onSuccess()
         }
     }
+    fun dismissCommandOutput() { _state.update { it.copy(commandOutput = null) } }
     fun compact() = operation { api, current, session ->
         api.compactSession(current.botId, session.id)
         _state.update { it.copy(notice = "会话已压缩") }; loadHistory(current.botId, session, replace = true); refreshControls()
@@ -954,7 +1027,13 @@ class ChatViewModel @Inject constructor(
     }
     fun quickAction(id: String) = operation { api, current, session ->
         val result = api.quickAction(current.botId, apiBody("action_id" to id, "session_id" to session.id,
-            "invocation_id" to UUID.randomUUID().toString())) as? JsonObject
+            "invocation_id" to UUID.randomUUID().toString(),
+            "params" to if (!current.nativeSkillsEnabled) buildJsonObject { put("skill_activation_allowed", false) } else null)) as? JsonObject
+        if (result?.get("type")?.jsonPrimitive?.contentOrNull == UIStreamEvent.COMMAND_ERROR) {
+            val event = json.decodeFromJsonElement(UIStreamEvent.serializer(), result)
+            _state.update { it.copy(error = event.problem.text(), errorProblem = event.problem, notice = null) }
+            return@operation
+        }
         val failure = result?.get("error")?.takeIf { it !is JsonNull }
         check(failure == null) { "快捷操作失败：$failure" }
         val payload = result?.get("result")?.takeIf { it !is JsonNull }?.let { json.decodeFromJsonElement(CommandActionResult.serializer(), it) }
@@ -973,12 +1052,15 @@ class ChatViewModel @Inject constructor(
         }
         while (true) {
             val observed = state.value
+            val commandsOpen = slashMenuQuery(observed.draft) != null
             refreshQueue()
+            if (commandsOpen && !observed.nativeSkillsEnabled) refreshControls()
             refreshSessionInfo()
             sessionInfoJob?.join()
             // Task/model changes refresh context promptly without re-subscribing the transport.
-            withTimeoutOrNull(if (observed.isRunning) 5_000L else 30_000L) {
-                state.first { it.isRunning != observed.isRunning || it.selectedModelId != observed.selectedModelId }
+            withTimeoutOrNull(if (observed.isRunning || commandsOpen) 5_000L else 30_000L) {
+                state.first { it.isRunning != observed.isRunning || it.selectedModelId != observed.selectedModelId ||
+                    (slashMenuQuery(it.draft) != null) != commandsOpen || it.selectedAgentId != observed.selectedAgentId }
             }
         }
     }
@@ -1170,33 +1252,32 @@ class ChatViewModel @Inject constructor(
         val current = _state.value
         val session = current.session ?: return
         val trimmed = text.trim()
-        if (trimmed.isEmpty() && current.attachments.isEmpty()) return
-        if (current.attachmentLoading || current.draftRestoring) {
-            _state.update { it.copy(error = "请等待草稿和附件读取完成") }; return
-        }
-        if (!current.canSend || current.busy) {
+        val action = current.composerAction(text)
+        if (action.kind in listOf(ComposerActionKind.Idle, ComposerActionKind.Waiting, ComposerActionKind.Stop)) return
+        if (!action.enabled) {
             setDraft(text)
-            _state.update { it.copy(error = "会话正在连接，请稍后发送") }; return
-        }
-        if (!session.isLocal) {
-            _state.update { it.copy(error = "此会话来自外部渠道，只能查看") }
+            // Saving configuration temporarily disables submission; it is not a failed send.
+            if (!current.busy && !current.draftRestoring) _state.update { it.copy(error = action.blockedReason) }
             return
         }
-
-        val queueCommand = parseQueueCommand(trimmed, current.controls?.commands.orEmpty().mapNotNull { it.name })
-        if (current.isRunning || queueCommand != null) {
-            val selector = trimmed.takeIf { it.startsWith('/') }?.drop(1)?.takeWhile { !it.isWhitespace() }
-            val runtimeCommand = selector != null && current.controls?.commands.orEmpty().any { it.name == selector }
-            if (queueCommand == null && (runtimeCommand || selector != null &&
-                    session.runtimeType !in listOf(null, "model") && current.controls == null)) {
-                _state.update { it.copy(error = "请在会话控制中执行运行命令") }
-                return
+        if (action.kind == ComposerActionKind.QuickAction) {
+            // Menus and configuration panels are dispatched by ChatScreen.
+            // Non-UI callers must never submit these selectors as skill names.
+            when (current.composerQuickAction(text)) {
+                ComposerQuickAction.Help -> { setDraft(""); quickAction("help") }
+                ComposerQuickAction.Skills -> { setDraft(""); quickAction("skill.list") }
+                ComposerQuickAction.New -> newSession()
+                else -> Unit
             }
-            if (current.attachments.isNotEmpty()) {
-                _state.update { it.copy(error = "排队和插话仅支持文字，请在当前任务结束后发送附件") }
-                return
-            }
-            enqueue(queueCommand?.text ?: trimmed, queueCommand?.steer == true)
+            return
+        }
+        if (action.kind == ComposerActionKind.RuntimeCommand) {
+            val revision = draftRevision
+            command(action.text) { if (draftRevision == revision) setDraft("") }
+            return
+        }
+        if (action.kind == ComposerActionKind.Enqueue) {
+            enqueue(action.text, action.steer)
             return
         }
 
@@ -1338,7 +1419,16 @@ class ChatViewModel @Inject constructor(
         attach(context, uris)
     }
 
-    fun setDraft(text: String) { draftRevision++; _state.update { it.copy(draft = text) }; persistDraft() }
+    fun setDraft(text: String) {
+        val menuWasOpen = slashMenuQuery(state.value.draft) != null
+        draftRevision++
+        _state.update { it.copy(draft = text) }
+        // Native skills are prefetched when binding. Opening / reuses that
+        // catalogue; an explicit refresh can discover newly installed skills.
+        if (!menuWasOpen && slashMenuQuery(text) != null && !state.value.nativeSkillsEnabled && state.value.controls == null)
+            refreshSlashCatalog()
+        persistDraft()
+    }
 
     private fun persistDraft() {
         draftAddress?.let { settings.saveDraft(it.first, it.second, it.third, state.value.draft) }

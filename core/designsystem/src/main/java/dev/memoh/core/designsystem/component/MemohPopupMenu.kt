@@ -76,13 +76,16 @@ fun MemohPopupMenu(
     aboveAnchor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
+    val visibility = remember { MutableTransitionState(false) }
+    // Lists contain many menu triggers. A closed menu needs no position provider,
+    // geometry, effects or animation tracks until the user actually opens it.
+    if (!expanded && visibility.isIdle && !visibility.currentState && !visibility.targetState) return
     val density = androidx.compose.ui.platform.LocalDensity.current
     val bounds = LocalMemohPopupBounds.current
     val preferredWidth = width ?: 248.dp
     val maxWidth = with(density) { bounds?.width?.toDp() }?.coerceAtMost(preferredWidth) ?: preferredWidth
     val shadowSpace = 12.dp
     var geometry by remember { mutableStateOf<MemohMenuGeometry?>(null) }
-    val visibility = remember { MutableTransitionState(false) }
     visibility.targetState = expanded && geometry != null
     val positionProvider = remember(alignment, bounds, density, aboveAnchor) {
         MemohMenuPositionProvider(
@@ -103,7 +106,7 @@ fun MemohPopupMenu(
     LaunchedEffect(expanded, visibility.isIdle) {
         if (!expanded && visibility.isIdle) geometry = null
     }
-    if (expanded || visibility.currentState || visibility.targetState) {
+    if (expanded || !visibility.isIdle || visibility.currentState || visibility.targetState) {
         val menuShape = MenuDefaults.groupShape(0, 1).shape
         val measured = geometry
         val reveal = progress.coerceIn(0f, 1f)
