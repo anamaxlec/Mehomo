@@ -168,7 +168,7 @@ data class ChatModel(
     @SerialName("default_reasoning_effort") val defaultReasoningEffort: String? = null,
     val config: ChatModelConfig? = null,
 ) {
-    val isSelectable: Boolean get() = type == "chat" && enable != false
+    val isSelectable: Boolean get() = type == "chat" && enable != false && config?.catalogAvailable != false
     val label: String get() = displayName?.takeIf(String::isNotBlank) ?: name?.takeIf(String::isNotBlank)
         ?: modelId?.takeIf(String::isNotBlank) ?: id
     val efforts: List<String> get() = reasoning?.selectableEfforts
@@ -182,7 +182,7 @@ data class ChatModel(
             val normalized = if (stored == "none") "disable" else stored
             if (!options.canDisable && options.efforts.isNullOrEmpty()) return normalized?.takeIf(String::isNotBlank)
             return normalized?.takeIf { it in options.selectableEfforts }
-                ?: options.defaultEffort?.takeIf(String::isNotBlank)
+                ?: if (options.defaultOff && options.canDisable) "disable" else options.defaultEffort?.takeIf(String::isNotBlank)
         }
         return stored?.takeIf { it in efforts } ?: defaultReasoningEffort?.takeIf { it in efforts }
             ?: efforts.firstOrNull()
@@ -194,6 +194,7 @@ data class ChatModelConfig(
     @SerialName("context_window") val contextWindow: Long? = null,
     @SerialName("max_output_tokens") val maxOutputTokens: Long? = null,
     @SerialName("thinking_mode") val thinkingMode: String? = null,
+    @SerialName("catalog_available") val catalogAvailable: Boolean? = null,
 )
 
 @Serializable
@@ -203,6 +204,7 @@ data class ReasoningOptions(
     @SerialName("default_effort") val defaultEffort: String? = null,
     val efforts: List<String>? = null,
     @SerialName("efforts_without_off") val effortsWithoutOff: List<String>? = null,
+    @SerialName("default_off") val defaultOff: Boolean = false,
 ) {
     val selectableEfforts: List<String> get() = if (!supported) emptyList()
         else ((if (canDisable) listOf("disable") else emptyList()) + efforts.orEmpty()).distinct()

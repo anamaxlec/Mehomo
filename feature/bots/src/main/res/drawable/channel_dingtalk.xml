@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Source: felinics/Memoh, 110635b, packages/icons/icons/dingtalk.svg. AGPL-3.0. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="28dp" android:height="28dp" android:viewportWidth="1024" android:viewportHeight="1024">
+    <group android:translateX="0" android:translateY="0">
+        <path android:fillColor="#3296FA" android:fillType="nonZero" android:pathData="M 512 512 m -512 0 a 512 512 0 1 0 1024 0 a 512 512 0 1 0 -1024 0 Z" />
+        <path android:fillColor="#FFFFFF" android:fillType="nonZero" android:pathData="M 772.064 431.2 c -1.376 5.44 -4.096 10.944 -8.192 20.48 v 1.376 c -23.264 47.872 -83.424 140.864 -83.424 140.864 l -17.792 30.08 h 84.8 l -161.376 207.872 l 36.928 -142.208 h -67.008 l 23.232 -94.4 c -19.136 4.128 -41.024 10.976 -67.008 19.2 c 0 0 -35.52 20.48 -101.184 -38.304 c 0 0 -45.12 -38.304 -19.136 -47.872 c 10.944 -4.096 53.312 -9.6 87.52 -13.696 c 45.12 -5.44 73.856 -9.568 73.856 -9.568 s -139.52 1.376 -172.32 -2.72 c -32.832 -5.472 -75.2 -58.816 -84.8 -106.656 c 0 0 -13.664 -25.984 30.08 -13.696 c 43.776 12.32 224.32 47.872 224.32 47.872 S 313.92 358.72 298.88 340.928 c -16.416 -16.416 -46.496 -92.992 -42.4 -139.488 c 0 0 1.376 -12.288 13.664 -8.192 c 0 0 173.696 77.952 292.672 120.32 c 118.976 41.024 222.88 62.912 209.216 117.632 z" />
+    </group>
+</vector>

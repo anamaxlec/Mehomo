@@ -8,7 +8,9 @@
 
 Mehomo brings conversations and an agent's cloud workspace into one Android app. It connects to **official Memoh Cloud** and **self-hosted Memoh**. This is an independent, unofficial client.
 
-The current release is **[v0.1.18](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.18)**, improving conversation loading and recovery, settings organization and M3E motion, fixing long-conversation crashes and tall images, and adding HTML file and cloud website previews. [Release notes](docs/releases/v0.1.18.md)
+The current release is **[v0.1.20](https://github.com/anamaxlec/Mehomo/releases/tag/v0.1.20)**, adding a guided provider connection and model selection flow, model configuration v2, server-managed model catalogs and compaction records, and refined channel cards, icons and switches. [Release notes](docs/releases/v0.1.20.md)
+
+The new model catalog and compaction records require matching server support. Older model configurations remain supported.
 
 ## Material 3 Expressive, throughout
 

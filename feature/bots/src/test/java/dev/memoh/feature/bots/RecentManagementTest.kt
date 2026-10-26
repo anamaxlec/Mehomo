@@ -26,18 +26,23 @@ class RecentManagementTest {
             "reasoning_efforts" to JsonArray(listOf(JsonPrimitive("none"), JsonPrimitive("adaptive"), JsonPrimitive("max"))),
             "config" to apiBody("reasoning_dialect" to "anthropic", "future_field" to "kept"))
         val config = modelFormBody(body)["config"]!!.jsonObject
-        assertEquals("adaptive", config["thinking_mode"]!!.jsonPrimitive.content)
+        assertEquals("adaptive", config["reasoning"]!!.jsonObject["dialect"]!!.jsonPrimitive.content)
+        assertEquals(2, config["schema_version"]!!.jsonPrimitive.int)
+        assertFalse("thinking_mode" in config)
         assertEquals(8192, config["max_output_tokens"]!!.jsonPrimitive.int)
         assertEquals("kept", config["future_field"]!!.jsonPrimitive.content)
-        assertEquals(listOf("disable", "max"), config["reasoning_efforts"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("max"), config["reasoning"]!!.jsonObject["efforts"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(config["reasoning"]!!.jsonObject["toggle"]!!.jsonPrimitive.boolean)
     }
     @Test fun clearingCapabilitiesAndEmbeddingDoNotLeaveActiveThinkingBehind() {
         val advanced = apiBody("thinking_mode" to "adaptive", "reasoning_efforts" to JsonArray(listOf(JsonPrimitive("high"))), "max_output_tokens" to 8192, "dimensions" to 768, "future" to true)
         val off = modelFormBody(apiBody("type" to "chat", "compatibilities" to JsonArray(emptyList()), "max_output_tokens" to JsonNull, "config" to advanced))["config"]!!.jsonObject
         assertFalse("thinking_mode" in off); assertFalse("reasoning_efforts" in off); assertFalse("max_output_tokens" in off)
+        assertFalse("reasoning" in off)
         assertEquals(JsonPrimitive(true), off["future"])
         val embedding = modelFormBody(apiBody("type" to "embedding", "config" to advanced))["config"]!!.jsonObject
         assertFalse("thinking_mode" in embedding); assertFalse("max_output_tokens" in embedding)
+        assertFalse("reasoning" in embedding); assertFalse("modalities" in embedding)
         assertEquals(768, embedding["dimensions"]!!.jsonPrimitive.int)
     }
     @Test fun defaultBotEffortsComeFromTheSameResolvedModelAsChat() {

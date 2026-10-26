@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Source: felinics/Memoh, 110635b, packages/icons/icons/slack.svg. AGPL-3.0. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="28dp" android:height="28dp" android:viewportWidth="24" android:viewportHeight="24">
+    <group android:translateX="0" android:translateY="0">
+        <path android:fillColor="#E01E5A" android:fillType="nonZero" android:pathData="M 5.042 15.165 a 2.528 2.528 0 0 1 -2.52 2.523 A 2.528 2.528 0 0 1 0 15.165 a 2.527 2.527 0 0 1 2.522 -2.52 h 2.52 v 2.52 z m 1.271 0 a 2.527 2.527 0 0 1 2.521 -2.52 a 2.527 2.527 0 0 1 2.521 2.52 v 6.313 A 2.528 2.528 0 0 1 8.834 24 a 2.528 2.528 0 0 1 -2.521 -2.522 v -6.313 z" />
+        <path android:fillColor="#36C5F0" android:fillType="nonZero" android:pathData="M 8.834 5.042 a 2.528 2.528 0 0 1 -2.521 -2.52 A 2.528 2.528 0 0 1 8.834 0 a 2.528 2.528 0 0 1 2.521 2.522 v 2.52 H 8.834 z m 0 1.271 a 2.528 2.528 0 0 1 2.521 2.521 a 2.528 2.528 0 0 1 -2.521 2.521 H 2.522 A 2.528 2.528 0 0 1 0 8.834 a 2.528 2.528 0 0 1 2.522 -2.521 h 6.312 z" />
+        <path android:fillColor="#2EB67D" android:fillType="nonZero" android:pathData="M 18.956 8.834 a 2.528 2.528 0 0 1 2.522 -2.521 A 2.528 2.528 0 0 1 24 8.834 a 2.528 2.528 0 0 1 -2.522 2.521 h -2.522 V 8.834 z m -1.271 0 a 2.528 2.528 0 0 1 -2.523 2.521 a 2.527 2.527 0 0 1 -2.52 -2.521 V 2.522 A 2.527 2.527 0 0 1 15.165 0 a 2.528 2.528 0 0 1 2.523 2.522 v 6.312 z" />
+        <path android:fillColor="#ECB22E" android:fillType="nonZero" android:pathData="M 15.165 18.956 a 2.528 2.528 0 0 1 2.523 2.522 A 2.528 2.528 0 0 1 15.165 24 a 2.527 2.527 0 0 1 -2.52 -2.522 v -2.522 h 2.52 z m 0 -1.268 a 2.527 2.527 0 0 1 -2.52 -2.523 a 2.526 2.526 0 0 1 2.52 -2.52 h 6.313 A 2.527 2.527 0 0 1 24 15.165 a 2.528 2.528 0 0 1 -2.522 2.523 h -6.313 z" />
+    </group>
+</vector>

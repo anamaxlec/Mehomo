@@ -61,8 +61,13 @@ internal fun agentEditor(state: ManagementState, agent: JsonObject?, vm: Managem
     }
 }
 
-internal fun modelUpdate(model: JsonObject, enabled: Boolean): JsonObject =
-    JsonObject(model.filterKeys { it in setOf("name", "model_id", "provider_id", "type", "config") } + ("enable" to JsonPrimitive(enabled)))
+internal fun modelUpdate(model: JsonObject, enabled: Boolean): JsonObject {
+    val payload = model.filterKeys { it in setOf("name", "model_id", "provider_id", "type", "config") }.toMutableMap()
+    val config = model["config"].obj()
+    if (config["schema_version"] == JsonPrimitive(2)) payload["config"] = editableModelConfig(config)
+    payload["enable"] = JsonPrimitive(enabled)
+    return JsonObject(payload)
+}
 
 internal fun schemaFields(schema: JsonObject, current: JsonObject, configured: Boolean): List<FormField> =
     schema.entries.map { (key, value) ->

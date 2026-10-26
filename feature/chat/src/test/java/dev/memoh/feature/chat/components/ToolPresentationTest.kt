@@ -7,6 +7,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ToolPresentationTest {
+    @Test fun historicalExternalOutputsRemainReadableWithoutJsonWrappers() {
+        for ((raw, expected) in listOf(
+            """{"output":"old command output","exitCode":0}""" to "old command output",
+            "\"plain command output\"" to "plain command output",
+            """[{"type":"text","text":"block output"}]""" to "block output",
+            """{"content":"search source text","results":[]}""" to "search source text",
+            """{"isError":true,"content":[{"type":"text","text":"search failed"}]}""" to "search failed")) {
+            assertEquals(expected, toolOutputText(UIMessage(0, "tool", output = Json.parseToJsonElement(raw))))
+        }
+    }
     @Test fun descriptiveExecTitlesAndFileTargetsDoNotExposeRawJson() {
         val exec = UIMessage(0, "tool", name = "exec", input = Json.parseToJsonElement("""{"command":"git status --short","description":"检查工作区状态"}"""))
         assertEquals("检查工作区状态", toolDisplay(exec).label)

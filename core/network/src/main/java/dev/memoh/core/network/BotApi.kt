@@ -94,6 +94,10 @@ suspend fun MemohApi.appRemovalPreview(botId: String, id: String): JsonObject = 
 suspend fun MemohApi.skills(botId: String): List<InstalledSkill> = get<SkillsList>("${botPath(botId)}/container/skills").skills.orEmpty()
 suspend fun MemohApi.skillCatalog(botId: String): List<SkillCatalogItem> =
     get<SkillCatalog>("${botPath(botId)}/skills/catalog").skills.orEmpty()
+suspend fun MemohApi.providerModelCatalog(source: String, clientType: String): JsonObject =
+    get("/providers/catalog/models${query("source" to source, "client_type" to clientType)}")
+suspend fun MemohApi.compactionLogs(botId: String, limit: Int = 20, offset: Int = 0): JsonObject =
+    get("${botPath(botId)}/compaction/logs${query("limit" to limit.toString(), "offset" to offset.toString())}")
 suspend fun MemohApi.saveSkill(botId: String, raw: String, sourcePath: String? = null): Unit =
     change("${botPath(botId)}/container/skills", "POST", apiBody("skills" to listOf(raw), "source_path" to sourcePath))
 suspend fun MemohApi.deleteSkill(botId: String, sourcePath: String): Unit = change("${botPath(botId)}/container/skills", "DELETE", apiBody("source_paths" to listOf(sourcePath)))

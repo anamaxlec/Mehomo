@@ -1,6 +1,7 @@
 package dev.memoh.feature.bots
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -9,6 +10,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -17,7 +21,7 @@ import androidx.compose.ui.unit.dp
 import dev.memoh.core.designsystem.component.*
 import kotlinx.serialization.json.*
 
-internal enum class FieldKind { Text, Number, Decimal, Object, Array, StringSet, Toggle }
+internal enum class FieldKind { Text, Number, Decimal, Object, Array, StringSet, Toggle, Disclosure }
 internal data class FormField(
     val key: String, val label: String, val value: String = "", val kind: FieldKind = FieldKind.Text,
     val choices: List<Pair<String, String>> = emptyList(), val multiline: Boolean = false,
@@ -25,16 +29,20 @@ internal data class FormField(
     val choicesFor: ((Map<String, String>) -> List<Pair<String, String>>)? = null,
     val visible: (Map<String, String>) -> Boolean = { true },
     val min: Long? = null, val max: Long? = null,
+    val fixedChoices: Set<String> = emptySet(),
 )
-internal data class ManagementEditor(val title: String, val fields: List<FormField>, val confirmLabel: String = "保存", val save: (JsonObject, () -> Unit) -> Unit)
+internal data class ManagementEditor(val title: String, val fields: List<FormField>, val confirmLabel: String = "保存",
+    val confirmIcon: ImageVector = Icons.Filled.Save, val save: (JsonObject, () -> Unit) -> Unit)
 
 internal fun formBody(fields: List<FormField>, values: Map<String, String>): JsonObject = buildJsonObject {
     fields.forEach { field ->
+        if (field.kind == FieldKind.Disclosure) return@forEach
         if (!field.visible(values)) return@forEach
         val value = values.getValue(field.key).trim()
         require(!field.required || value.isNotBlank()) { "请填写${field.label}" }
         if (field.omitBlank && value.isBlank()) return@forEach
         val parsed = when (field.kind) {
+            FieldKind.Disclosure -> return@forEach
             FieldKind.Text -> JsonPrimitive(value)
             FieldKind.Toggle -> JsonPrimitive(value.toBooleanStrict())
             FieldKind.Number -> if (value.isEmpty()) JsonNull else {
@@ -69,18 +77,33 @@ internal fun ManagementForm(editor: ManagementEditor, busy: Boolean, serverError
     val values = remember(editor) { mutableStateMapOf<String, String>().apply { editor.fields.forEach { put(it.key, it.value) } } }
     var error by remember(editor) { mutableStateOf<String?>(null) }
     MemohFormDialog(editor.title, onDismissRequest = { if (!busy) onDismiss() },
-        confirmButton = { MemohActionButton(if (busy) "处理中" else editor.confirmLabel, Icons.Filled.Save, onClick = {
-            try { error = null; editor.save(formBody(editor.fields, values), onDismiss) }
-            catch (e: Exception) { error = e.message }
-        }, enabled = !busy, primary = true) },
+        confirmButton = {
+            val focus = LocalFocusManager.current
+            val keyboard = LocalSoftwareKeyboardController.current
+            MemohActionButton(if (busy) "处理中" else editor.confirmLabel, editor.confirmIcon, onClick = {
+                try {
+                    error = null
+                    val body = formBody(editor.fields, values)
+                    focus.clearFocus(); keyboard?.hide()
+                    editor.save(body, onDismiss)
+                }
+                catch (e: Exception) { error = e.message }
+            }, enabled = !busy, primary = true)
+        },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") } },
         text = {
-            Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(Modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec()).heightIn(max = 520.dp)
+                .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 editor.fields.forEach { field ->
                     if (!field.visible(values)) return@forEach
                     val value = values.getValue(field.key)
                     val choices = field.choicesFor?.invoke(values) ?: field.choices
                     when {
+                        field.kind == FieldKind.Disclosure -> TextButton({ values[field.key] = (value != "true").toString() },
+                            Modifier.fillMaxWidth(), enabled = !busy) {
+                            Text(field.label, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                            Icon(if (value == "true") Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, null)
+                        }
                         field.kind == FieldKind.StringSet -> {
                             val selected = (runCatching { Json.parseToJsonElement(value) }.getOrNull() as? JsonArray)?.map { it.jsonPrimitive.content }.orEmpty()
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -88,7 +111,7 @@ internal fun ManagementForm(editor: ManagementEditor, busy: Boolean, serverError
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     (choices + selected.filter { value -> choices.none { it.first == value } }.map { it to it }).forEach { (id, label) ->
                                         FilterChip(id in selected, { values[field.key] = JsonArray((if (id in selected) selected - id else selected + id).map(::JsonPrimitive)).toString() },
-                                            label = { Text(label) }, enabled = !busy)
+                                            label = { Text(label) }, enabled = !busy && id !in field.fixedChoices)
                                     }
                                 }
                             }

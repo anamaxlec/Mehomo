@@ -32,7 +32,7 @@ import androidx.compose.ui.window.DialogProperties
 import kotlinx.serialization.json.*
 
 internal data class MenuAction(val label: String, val icon: ImageVector = Icons.Filled.Edit, val run: () -> Unit)
-internal data class ConfirmAction(val title: String, val message: String, val run: () -> Unit)
+internal data class ConfirmAction(val title: String, val message: String, val typedConfirmation: String? = null, val run: () -> Unit)
 private val pretty = Json { prettyPrint = true }
 internal fun formatted(value: JsonElement) = pretty.encodeToString(JsonElement.serializer(), value)
 
@@ -47,6 +47,11 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     var importLinkOpen by remember { mutableStateOf(false) }
     var importLink by remember { mutableStateOf("") }
     var importLinkError by remember { mutableStateOf<String?>(null) }
+    var sourcePickerOpen by remember { mutableStateOf(false) }
+    var catalogProvider by remember { mutableStateOf<JsonObject?>(null) }
+    var modelsProvider by remember { mutableStateOf<JsonObject?>(null) }
+    var modelsExpanded by remember { mutableStateOf(false) }
+    var compactionOpen by remember(state.botId) { mutableStateOf(false) }
     if (importLinkOpen) MemohFormDialog("导入供应商链接", { importLinkOpen = false; importLink = ""; importLinkError = null },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(importLink, { importLink = it }, Modifier.fillMaxWidth(), label = { Text("粘贴 Memoh 导入链接") },
@@ -76,6 +81,9 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     LaunchedEffect(state.page, state.botId, removalState) { vm.observeWorkspaceRemoval() }
     DisposableEffect(vm) { onDispose { vm.stopWorkspaceObservation() } }
     val context = LocalContext.current
+    val sources = remember(context, displayPage == ManagementPage.Models) {
+        if (displayPage == ManagementPage.Models) loadProviderSources(context) else emptyList()
+    }
     val uriHandler = LocalUriHandler.current
     var transcriptionModel by remember { mutableStateOf<JsonObject?>(null) }
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -91,6 +99,8 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     }
     val settings = state.data["settings"].obj()
     val models = state.data["models"].objects()
+    val enabledModelCounts = remember(models) { models.filter { it.flag("enable", true) && it["config"].obj()["catalog_available"] != JsonPrimitive(false) }
+        .groupingBy { it.text("provider_id") }.eachCount() }
     val agents = state.data["agents"].objects("items")
     fun edit(title: String, fields: List<FormField>, path: List<String>, method: String = "PUT", result: Boolean = false, transform: (JsonObject) -> JsonObject = { it }) {
         vm.dismiss()
@@ -100,44 +110,60 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
         FormField(key, label, if (kind == FieldKind.Object) settings[key]?.toString() ?: "{}" else settings.text(key), kind, choices, multiline)
     fun modelChoices(type: String = "chat") = listOf("" to "未设置") + (when (type) {
         "chat" -> models.filter { it.text("type") == type }
-        "image" -> models.filter { JsonPrimitive("image-output") in (it["config"].obj()["compatibilities"] as? JsonArray).orEmpty() }
+        "image" -> models.filter(::modelProducesImage)
         else -> state.data["$type-models"].objects()
     }).map { it.text("id") to it.text("name").ifBlank { it.text("model_id") } }
-    fun providerEditor(provider: JsonObject? = null, media: Boolean = false) {
-        val config = provider?.get("config").obj()
-        edit(if (provider == null) "添加供应商" else "编辑供应商", listOf(
-            FormField("name", "名称", provider?.text("name").orEmpty(), required = true),
-            FormField("client_type", "接口类型", provider?.text("client_type") ?: "openai-completions", choices = (if (media) listOf(provider?.text("client_type").orEmpty()) else listOf("openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai", "openai-codex", "github-copilot")).map { it to it }),
-            FormField("base_url", "API 地址", config.text("base_url")),
-            FormField("api_key", "API key（留空保留）", secret = true, omitBlank = true),
-            FormField("config", "高级配置", formatted(JsonObject(config.filterKeys { it != "api_key" })), FieldKind.Object, multiline = true),
-        ), if (provider == null) listOf("providers") else listOf("providers", provider.text("id")), if (provider == null) "POST" else "PUT") { body ->
-            buildJsonObject {
-                put("name", body.getValue("name")); put("client_type", body.getValue("client_type"))
-                put("config", JsonObject(body["config"].obj() + mapOf("base_url" to body.getValue("base_url")) + body.filterKeys { it == "api_key" }))
+    fun providerEditor(provider: JsonObject? = null, media: Boolean = false, source: JsonObject? = null) {
+        val definition = source ?: sources.firstOrNull { entry -> entry.text("id") == provider?.get("metadata").obj().text("catalog") }
+        val config = provider?.get("config").obj().let { if (provider != null || definition == null) it else JsonObject(it + ("base_url" to JsonPrimitive(definition.text("base_url")))) }
+        val metadata = JsonObject(provider?.get("metadata").obj() + (source?.let(::sourceMetadata) ?: JsonObject(emptyMap())))
+        val clientType = provider?.text("client_type") ?: definition?.text("client_type") ?: "openai-completions"
+        val advanced: (Map<String, String>) -> Boolean = { it["_connection_settings"] == "true" }
+        val fields = listOf(
+            FormField("name", "名称", provider?.text("name") ?: definition?.text("name").orEmpty(), required = true),
+            FormField("client_type", "接口类型", clientType, choices = (if (media) listOf(clientType) else listOf("openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai", "openai-codex", "github-copilot", "opencode-go")).map { it to providerProtocolLabel(it) }, visible = { definition == null || advanced(it) }),
+            FormField("api_key", if (provider == null) "API key" else "API key（留空保留）", secret = true, omitBlank = true,
+                required = provider == null && definition?.let(::providerNeedsApiKey) == true, visible = { !providerUsesOAuth(it["client_type"] ?: clientType) }),
+            FormField("base_url", "API 地址", config.text("base_url"), visible = { definition == null || '<' in config.text("base_url") || advanced(it) }),
+            FormField("_connection_settings", "连接设置", "false", FieldKind.Disclosure),
+            FormField("_source", "模型目录来源（可选）", metadata.text("source"), visible = { !media && definition?.flag("subscription") != true && advanced(it) }),
+            FormField("config", "高级配置", formatted(JsonObject(config.filterKeys { it != "api_key" })), FieldKind.Object, multiline = true, visible = advanced),
+        )
+        fun payload(body: JsonObject): JsonObject {
+            val baseUrl = body["base_url"] ?: JsonPrimitive(config.text("base_url"))
+            require('<' !in baseUrl.jsonPrimitive.content) { "请补全 API 地址中的账号信息" }
+            return buildJsonObject {
+                put("name", body.getValue("name")); put("client_type", body["client_type"] ?: JsonPrimitive(clientType))
+                put("config", JsonObject(config.filterKeys { it != "api_key" } + body["config"].obj() + mapOf("base_url" to baseUrl) + body.filterKeys { it == "api_key" }))
+                put("metadata", JsonObject(metadata.toMutableMap().apply {
+                    if ("_source" in body) { if (body.text("_source").isBlank()) remove("source") else put("source", body.getValue("_source")) }
+                }))
             }
+        }
+        if (provider == null && !media) {
+            vm.dismiss()
+            editor = ManagementEditor(definition?.text("name")?.let { "接入 $it" } ?: "自定义服务商", fields,
+                confirmLabel = "继续", confirmIcon = Icons.Filled.ArrowForward) { body, saved ->
+                vm.write(listOf("providers"), "POST", payload(body), onSaved = saved, onResult = { response ->
+                    val created = response.obj()
+                    if (created.text("id").isBlank()) throw dev.memoh.core.network.UserFacingException("服务商已提交，但没有返回 ID。请刷新列表确认结果，避免重复添加。")
+                    if (providerUsesOAuth(created.text("client_type"))) vm.providerAuthorization(created.text("id")) {
+                        modelsProvider = created; vm.prepareProviderModels(created, verifyConnection = false)
+                    } else { modelsProvider = created; vm.prepareProviderModels(created) }
+                })
+            }
+        } else edit(if (provider == null) "添加供应商" else "连接设置", fields,
+            if (provider == null) listOf("providers") else listOf("providers", provider.text("id")), if (provider == null) "POST" else "PUT") { body ->
+            payload(body)
         }
     }
     fun modelEditor(model: JsonObject? = null) {
         val config = model?.get("config").obj()
-        edit(if (model == null) "添加模型" else "编辑模型", listOf(
-            FormField("name", "显示名称（空白使用模型 ID）", model?.text("name").orEmpty()),
-            FormField("model_id", "模型 ID", model?.text("model_id").orEmpty(), required = true),
-            FormField("provider_id", "供应商", model?.text("provider_id").orEmpty(), choices = state.data["providers"].objects().map { it.text("id") to it.text("name") }, required = true),
-            FormField("type", "模型类型", model?.text("type") ?: "chat", choices = listOf("chat" to "对话", "embedding" to "Embedding", "speech" to "语音", "transcription" to "转录", "video" to "视频")),
-            FormField("enable", "启用", (model?.flag("enable", true) ?: true).toString(), FieldKind.Toggle),
-            FormField("context_window", "上下文窗口（tokens）", config.text("context_window"), FieldKind.Number, min = 1),
-            FormField("max_output_tokens", "最大输出（tokens，留空为未知）", config.text("max_output_tokens"), FieldKind.Number, min = 1, visible = { it["type"] == "chat" }),
-            FormField("thinking_mode", "思考机制", config.text("thinking_mode").let { if (it == "only_adaptive") "adaptive" else it },
-                choices = listOf("" to "由模型目录声明", "adaptive" to "自适应", "toggle" to "可开关", "always" to "始终开启", "none" to "无思考能力"), visible = { it["type"] == "chat" }),
-            FormField("reasoning_efforts", "支持的思考强度", config["reasoning_efforts"]?.toString() ?: "[]", FieldKind.StringSet,
-                choices = listOf("disable", "minimal", "low", "medium", "high", "xhigh", "max").map { it to dev.memoh.core.model.reasoningEffortLabel(it) }),
-            FormField("compatibilities", "模型能力", config["compatibilities"]?.toString() ?: "[]", FieldKind.StringSet,
-                choices = listOf("vision" to "识别图片", "tool-call" to "工具调用", "image-output" to "生成图片", "reasoning" to "推理")),
-            FormField("description", "说明", config.text("description"), multiline = true),
-            FormField("config", "高级模型能力", formatted(JsonObject(config.filterKeys { it !in modelConfigFields })), FieldKind.Object, multiline = true),
-        ), if (model == null) listOf("models") else listOf("models", model.text("id")), if (model == null) "POST" else "PUT") { body ->
-            modelFormBody(body)
+        val v2 = useModelConfigV2(model, models, state.data["model-catalog"] as? JsonObject)
+        val fields = if (v2) modelFields(model, state.data["providers"].objects()) else legacyModelFields(model, state.data["providers"].objects())
+        edit(if (model == null) "添加模型" else "编辑模型", fields,
+            if (model == null) listOf("models") else listOf("models", model.text("id")), if (model == null) "POST" else "PUT") { body ->
+            if (v2) modelFormBody(body, config) else legacyModelFormBody(body)
         }
     }
     fun agentEditor(agent: JsonObject? = null) { vm.dismiss(); editor = agentEditor(state, agent, vm) }
@@ -174,11 +200,12 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
             FilledTonalIconButton(vm::refresh, enabled = !state.busy && !state.loading, shapes = IconButtonDefaults.shapes()) { Icon(Icons.Filled.Refresh, "刷新") }
         }) }) { padding ->
         MemohRefreshBox(state.loading && state.loaded, vm::refresh, Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding(), enabled = !state.busy && !state.loading) {
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, maxOf(32.dp, LocalFloatingNavigationPadding.current)), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, maxOf(32.dp, LocalFloatingNavigationPadding.current)),
+                verticalArrangement = Arrangement.spacedBy(if (displayPage == ManagementPage.Channels) 8.dp else ListItemDefaults.SegmentedGap)) {
                 item {
                     Text(if (state.page.needsBot) state.bot?.displayName ?: state.bot?.name ?: "当前 Bot" else if (state.page == ManagementPage.Account) "当前账号" else if (state.cloud) "团队配置" else "服务配置", Modifier.padding(start = 12.dp, bottom = 12.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                     if (state.loaded && state.page.needsBot && !state.canManage) ManagementNotice("当前账号只能查看此 Bot，管理操作需要 manage 权限。")
-                    state.error?.let { ManagementNotice(it, true) }
+                    if (modelsProvider == null && catalogProvider == null) state.error?.let { ManagementNotice(it, true) }
                     state.notice?.let { ManagementNotice(it) }
                 }
                 if (state.loading && !state.loaded) item { MemohListSkeleton(leading = true, detailed = true) }
@@ -210,7 +237,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                                 listOf(bot.text("status"), if (bot.flag("is_active", true)) "已启用" else "已停用").filter(String::isNotBlank).joinToString(" · "),
                                 Icons.Filled.SmartToy, index, bots.size, onClick = { onOpenBot(bot.text("id")) },
                                 actions = if (manage) listOf(MenuAction("删除 Bot", Icons.Filled.Delete) {
-                                    confirmation = ConfirmAction("删除 Bot", "将删除 ${bot.text("name")} 及其会话和配置。") { vm.write(listOf("bots", bot.text("id")), "DELETE") }
+                                    confirmation = ConfirmAction("删除 Bot", "将删除 ${bot.text("name")} 及其会话和配置。", bot.text("name")) { vm.write(listOf("bots", bot.text("id")), "DELETE") }
                                 }) else emptyList())
                         }
                         if (bots.isEmpty()) item { ManagementNotice("尚未创建 Bot。") }
@@ -229,15 +256,20 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                                     val selected = models.firstOrNull { it.text("id") == values["chat_model_id"] }.obj()
                                     listOf("" to "模型默认") + managementChatModel(selected)?.efforts.orEmpty().map { it to dev.memoh.core.model.reasoningEffortLabel(it) }
                                 }),
+                                settingField("discuss_probe_model_id", "讨论探测模型", choices = modelChoices()),
                                 settingField("command_ui_language", "命令语言", choices = listOf("" to "默认", "zh" to "中文", "en" to "English"))), base + "settings") { body ->
                                 val selected = models.firstOrNull { it.text("id") == body.text("chat_model_id") }
                                 JsonObject(body + ("reasoning_effort" to JsonPrimitive(selected?.let(::managementChatModel)?.resolveEffort(body.text("reasoning_effort")).orEmpty())))
                             }
                         }) }
-                        item { ManagementRow("上下文压缩", "自动压缩、阈值与压缩模型", Icons.Filled.UnfoldLess, 1, 3, state.canManage && !state.busy, onClick = {
-                            edit("上下文压缩", listOf(settingField("compaction_enabled", "自动压缩", FieldKind.Toggle).copy(value = settings.flag("compaction_enabled").toString()),
-                                settingField("compaction_threshold", "触发阈值（tokens，0 为自动）", FieldKind.Number).copy(min = 0), settingField("compaction_target_percent", "压缩后占比（%）", FieldKind.Number).copy(min = 1, max = 100),
-                                settingField("compaction_model_id", "压缩模型", choices = modelChoices()), settingField("discuss_probe_model_id", "讨论探测模型", choices = modelChoices())), base + "settings")
+                        val legacyCompaction = settings.keys.any { it.startsWith("compaction_") }
+                        item { ManagementRow("上下文压缩", if (legacyCompaction) "自动压缩、阈值与压缩模型" else "按可用预算自动压缩 · 查看记录", Icons.Filled.UnfoldLess, 1, 3, !state.busy, onClick = {
+                            if (legacyCompaction) edit("上下文压缩", listOf(
+                                settingField("compaction_enabled", "自动压缩", FieldKind.Toggle).copy(value = settings.flag("compaction_enabled").toString()),
+                                settingField("compaction_threshold", "触发阈值（tokens，0 为自动）", FieldKind.Number).copy(min = 0),
+                                settingField("compaction_target_percent", "压缩后占比（%）", FieldKind.Number).copy(min = 1, max = 100),
+                                settingField("compaction_model_id", "压缩模型", choices = modelChoices())), base + "settings")
+                            else compactionOpen = true
                         }) }
                         item { ManagementRow("工具与审批", "执行策略与工具结果显示", Icons.Filled.Security, 2, 3, state.canManage && !state.busy, onClick = {
                             vm.dismiss(); editor = approvalEditor(state, vm)
@@ -284,9 +316,8 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         val providers = state.data["providers"].objects()
                         val templates = state.data["templates"].objects().filter { it.text("domain") == "llm" }
                         item { Actions {
-                            MemohActionButton("供应商", Icons.Filled.Add, { providerEditor() }, enabled = state.canManage && !state.busy, primary = true)
+                            MemohActionButton("接入服务商", Icons.Filled.Cloud, { sourcePickerOpen = true }, enabled = !state.busy, primary = true)
                             MemohActionButton("导入链接", Icons.Filled.Link, { importLinkOpen = true }, enabled = !state.busy)
-                            MemohActionButton("模型", Icons.Filled.Add, { modelEditor() }, enabled = state.canManage && !state.busy && providers.isNotEmpty())
                         } }
                         if (templates.isNotEmpty()) item { Actions {
                             CatalogAddButton("按模板接入", templates, !state.busy) { template ->
@@ -297,23 +328,30 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                             }
                         } }
                         item { OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth().padding(vertical = 8.dp), singleLine = true, label = { Text("查找供应商或模型") }, leadingIcon = { Icon(Icons.Filled.Search, null) }) }
-                        item { GroupLabel("供应商") }
                         val visibleProviders = providers.filter { filter.isBlank() || it.text("name").contains(filter, true) }
+                            .sortedByDescending { providerIsSubscription(it, sources) }
                         itemsIndexed(visibleProviders, key = { _, it -> "provider:${it.text("id")}" }) { index, provider ->
                             val id = provider.text("id")
-                            ManagementRow(provider.text("name"), provider.text("client_type"), Icons.Filled.Cloud, index, visibleProviders.size, state.canManage && !state.busy,
-                                onClick = { providerEditor(provider) }, checked = provider.flag("enable", true), onChecked = { vm.write(listOf("providers", id), "PUT", apiBody("enable" to it)) }, actions = listOf(
+                            val subscription = providerIsSubscription(provider, sources)
+                            if (index == 0 || providerIsSubscription(visibleProviders[index - 1], sources) != subscription) GroupLabel(if (subscription) "订阅服务" else "其他 LLM 服务商")
+                            ManagementRow(provider.text("name"), if (provider.flag("enable", true)) "已启用 ${enabledModelCounts[id] ?: 0} 个模型" else "已停用", if (subscription) Icons.Filled.AccountCircle else Icons.Filled.Cloud, index, visibleProviders.size, state.canManage && !state.busy,
+                                onClick = { modelsProvider = provider; vm.dismiss() }, checked = provider.flag("enable", true).takeUnless { providerManaged(provider) }, onChecked = { vm.write(listOf("providers", id), "PUT", apiBody("enable" to it)) }, actions = if (providerManaged(provider)) emptyList() else listOfNotNull(
+                                    MenuAction("连接设置", Icons.Filled.Settings) { providerEditor(provider) },
                                     MenuAction("测试连接", Icons.Filled.NetworkCheck) { vm.write(listOf("providers", id, "test"), "POST", result = true) },
-                                    MenuAction("导入模型", Icons.Filled.CloudDownload) { vm.write(listOf("providers", id, "import-models"), "POST", apiBody(), result = true) },
-                                    MenuAction("账号授权", Icons.Filled.Login) { vm.providerAuthorization(id) },
-                                    MenuAction("授权状态", Icons.Filled.Info) { vm.write(listOf("providers", id, "oauth", "status"), "GET", result = true) },
-                                    MenuAction("检查授权", Icons.Filled.Refresh) { vm.write(listOf("providers", id, "oauth", "poll"), "POST", result = true) },
-                                    MenuAction("撤销授权", Icons.Filled.LinkOff) { confirmation = ConfirmAction("撤销供应商授权", provider.text("name")) { vm.write(listOf("providers", id, "oauth", "token"), "DELETE") } },
+                                    providerCatalogSource(provider)?.let { MenuAction("查看模型目录", Icons.Filled.List) { catalogProvider = provider; vm.previewModelCatalog(provider) } },
+                                    MenuAction(if (providerCatalogSource(provider) != null) "导入目录模型" else "从接口发现模型", Icons.Filled.CloudDownload) { vm.importProviderModels(provider) },
+                                    providerCatalogSource(provider)?.let { MenuAction("从接口发现模型", Icons.Filled.Search) { vm.importProviderModels(provider, fromEndpoint = true) } },
+                                    if (providerUsesOAuth(provider.text("client_type"))) MenuAction("账号授权", Icons.Filled.Login) { vm.providerAuthorization(id) {
+                                        modelsProvider = provider; vm.prepareProviderModels(provider, verifyConnection = false)
+                                    } } else null,
+                                    if (providerUsesOAuth(provider.text("client_type"))) MenuAction("撤销授权", Icons.Filled.LinkOff) { confirmation = ConfirmAction("撤销供应商授权", provider.text("name")) { vm.write(listOf("providers", id, "oauth", "token"), "DELETE") } } else null,
                                     MenuAction("删除", Icons.Filled.Delete) { confirmation = ConfirmAction("删除供应商", "${provider.text("name")} 及其模型将不可用。") { vm.write(listOf("providers", id), "DELETE") } },
                                 ))
                         }
-                        item { GroupLabel("模型") }
-                        val visibleModels = models.filter { filter.isBlank() || (it.text("name") + it.text("model_id") + it.text("provider_name")).contains(filter, true) }
+                        item { ManagementRow("全部模型", "${models.size} 个模型", Icons.Filled.ModelTraining, onClick = { modelsExpanded = !modelsExpanded }) }
+                        if (modelsExpanded) item { Actions { MemohActionButton("添加模型", Icons.Filled.Add, { modelEditor() },
+                            enabled = state.canManage && !state.busy && providers.isNotEmpty()) } }
+                        val visibleModels = if (!modelsExpanded && filter.isBlank()) emptyList() else models.filter { filter.isBlank() || (it.text("name") + it.text("model_id") + it.text("provider_name")).contains(filter, true) }
                         itemsIndexed(visibleModels, key = { _, it -> "model:${it.text("id")}" }) { index, model ->
                             val providerName = providers.firstOrNull { it.text("id") == model.text("provider_id") }?.text("name").orEmpty()
                             ManagementRow(model.text("name").ifBlank { model.text("model_id") }, listOf(providerName, model.text("type"), model.text("model_id")).filter(String::isNotBlank).joinToString(" · "), Icons.Filled.ModelTraining,
@@ -493,23 +531,25 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                     ManagementPage.Channels -> {
                         val channels = state.data["channels"].objects()
                         val configs = state.data["configs"].obj()
-                        itemsIndexed(channels, key = { _, it -> it.text("type") }) { index, channel ->
+                        itemsIndexed(channels, key = { _, it -> it.text("type") }) { _, channel ->
                             val type = channel.text("type")
                             val config = configs[type].obj()
                             val configured = config.isNotEmpty()
                             val ownerOnly = channel.flag("owner_only")
-                            val editable = state.canManage && !state.busy && (!ownerOnly || state.bot?.ownerUserId == state.data["channel-current-user"].obj().text("id"))
+                            val canConfigure = state.canManage && (!ownerOnly || state.bot?.ownerUserId == state.data["channel-current-user"].obj().text("id"))
+                            val editable = canConfigure && !state.busy
                             val fields = channel["config_schema"].obj()["fields"].obj().entries.sortedBy { (it.value.obj()["order"] as? JsonPrimitive)?.intOrNull ?: 0 }
-                            ManagementRow(channel.text("display_name").ifBlank { type }, if (ownerOnly && !editable) "仅 Bot 所有者可配置" else if (configured) if (config.flag("disabled")) "已停用" else "已连接" else "待配置", Icons.Filled.Forum,
-                                index, channels.size, editable && !channel.flag("configless"), onClick = {
+                            ChannelRow(type, channel.text("display_name").ifBlank { type }, if (ownerOnly && !canConfigure) "仅 Bot 所有者可配置" else if (configured) if (config.flag("disabled")) "已停用" else "已连接" else "待配置",
+                                enabled = editable, onConfigure = if (channel.flag("configless")) null else ({
                                     val credentials = config["credentials"].obj()
                                     edit(channel.text("display_name").ifBlank { type }, schemaFields(JsonObject(fields.associate { it.key to it.value }), credentials, configured) + listOf(FormField("routing", "路由", formatted(config["routing"].obj()), FieldKind.Object, multiline = true)), base + listOf("channel", type)) { body ->
                                         apiBody("credentials" to JsonObject(credentials + body.filterKeys { it != "routing" }), "routing" to body.getValue("routing"), "disabled" to config.flag("disabled"))
                                     }
-                                }, checked = if (configured) !config.flag("disabled") else null,
-                                onChecked = { vm.write(base + listOf("channel", type, "status"), "PATCH", apiBody("disabled" to !it)) }, actions = if (configured && !channel.flag("configless")) listOf(
-                                    MenuAction("断开渠道", Icons.Filled.LinkOff) { confirmation = ConfirmAction("断开消息渠道", channel.text("display_name")) { vm.write(base + listOf("channel", type), "DELETE") } },
-                                ) else emptyList())
+                                }), checked = if (configured) !config.flag("disabled") else null,
+                                onChecked = { vm.write(base + listOf("channel", type, "status"), "PATCH", apiBody("disabled" to !it)) },
+                                onDisconnect = if (configured && !channel.flag("configless")) ({
+                                    confirmation = ConfirmAction("断开消息渠道", channel.text("display_name")) { vm.write(base + listOf("channel", type), "DELETE") }
+                                }) else null)
                         }
                     }
                 }
@@ -529,9 +569,29 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }, confirmButton = { if (!state.busy) TextButton(vm::dismissOperationLog) { Text("关闭") } }) }
-    confirmation?.let { action -> AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(action.title) }, text = { Text(action.message) },
-        confirmButton = { MemohActionButton("确认", Icons.Filled.Check, { confirmation = null; action.run() }, primary = true) },
-        dismissButton = { TextButton({ confirmation = null }) { Text("取消") } }) }
+    if (sourcePickerOpen) ProviderSourcePicker(sources, { source -> sourcePickerOpen = false; providerEditor(source = source) },
+        onCustom = { sourcePickerOpen = false; providerEditor() }, onDismiss = { sourcePickerOpen = false })
+    catalogProvider?.let { provider -> ProviderCatalogDialog(provider, state.data["model-catalog"] as? JsonObject, state.busy, state.error,
+        onRetry = { vm.previewModelCatalog(provider) }, onImport = { catalogProvider = null; vm.importProviderModels(provider) }, onDismiss = { catalogProvider = null }) }
+    modelsProvider?.let { provider -> ProviderModelsDialog(provider, models, state.busy, state.error, state.notice,
+        onSave = { choices, selected -> vm.saveModelSelection(choices, selected) { modelsProvider = null } },
+        onReload = { vm.prepareProviderModels(provider) }, onDiscover = { vm.prepareProviderModels(provider, fromEndpoint = true) },
+        onSettings = { modelsProvider = null; providerEditor(provider) }, onDismiss = { modelsProvider = null }) }
+    if (compactionOpen) CompactionLogsDialog(state.botId, vm::readCompactionLogs) { compactionOpen = false }
+    confirmation?.let { action ->
+        var typed by remember(action) { mutableStateOf("") }
+        val canConfirm = !state.busy && (action.typedConfirmation?.let { it.isNotEmpty() && typed == it } ?: true)
+        AlertDialog(onDismissRequest = { if (!state.busy) confirmation = null }, title = { Text(action.title) }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(action.message)
+                action.typedConfirmation?.let { expected -> OutlinedTextField(typed, { typed = it }, Modifier.fillMaxWidth(),
+                    label = { Text("输入 Bot URL 名称以确认") }, placeholder = { Text(expected) }, singleLine = true, enabled = !state.busy) }
+            }
+        }, confirmButton = { MemohActionButton("确认", Icons.Filled.Check, {
+            if (canConfirm) { confirmation = null; action.run() }
+        }, enabled = canConfirm, primary = true) },
+            dismissButton = { TextButton({ confirmation = null }, enabled = !state.busy) { Text("取消") } })
+    }
     state.authorization?.let { auth -> AlertDialog(onDismissRequest = {}, properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
         icon = { Icon(Icons.Filled.Devices, null) }, title = { Text("连接 Agent") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("打开授权页面，确认或输入以下代码，完成后会自动更新。")
@@ -569,6 +629,9 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         data.text("text").isNotBlank() -> data.text("text")
                         data.text("token").isNotBlank() -> "关联码 · ${data.text("token")}\n有效期至 ${data.text("expires_at")}"
                         data["imported"] is JsonObject -> "已恢复 " + data["imported"].obj().entries.joinToString("、") { "${it.value.jsonPrimitive.content} 项 ${it.key}" }
+                        listOf("created", "updated", "skipped").all { data[it] is JsonPrimitive } ->
+                            "已添加 ${data.text("created")} · 已更新 ${data.text("updated")} · 已跳过 ${data.text("skipped")}\n导入后选择需要启用的模型。" +
+                                if (data["catalog"].obj().flag("stale")) "\n本次使用缓存目录，稍后可重新同步。" else ""
                         data.text("status").isNotBlank() -> "状态 · ${data.text("status")}" + data.text("alias").takeIf(String::isNotBlank)?.let { "\n$it" }.orEmpty()
                         else -> "操作已完成，详情中可查看服务端返回结果。"
                     }

@@ -20,6 +20,29 @@ class UpstreamApiTest {
     @Before fun start() { server = MockWebServer(); server.start() }
     @After fun stop() { server.shutdown() }
     private fun api() = MemohApi(OkHttpClient(), ServerEndpoint(ServerKind.SelfHosted, server.url("/").toString().trimEnd('/'), "", ""), json, auth)
+    @Test fun modelCatalogPreviewUsesOnlyTheServerAndNeverFallsBackToDiscovery() = runTest {
+        server.enqueue(MockResponse().setBody("""{"source":"source +中文","stale":true,"models":[{"model_id":"m","type":"chat","config":{"schema_version":2,"modalities":{"input":["text"],"output":["text"]}}}]}"""))
+        val response = api().providerModelCatalog("source +中文", "openai-completions")
+        assertTrue(response["stale"]!!.jsonPrimitive.boolean)
+        val request = server.takeRequest()
+        assertEquals("/providers/catalog/models", request.requestUrl!!.encodedPath)
+        assertEquals("source +中文", request.requestUrl!!.queryParameter("source"))
+        assertEquals("openai-completions", request.requestUrl!!.queryParameter("client_type"))
+        assertNull(request.requestUrl!!.queryParameter("url"))
+        server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
+        assertTrue(runCatching { api().providerModelCatalog("source", "openai-completions") }.exceptionOrNull() is ApiException)
+        server.takeRequest()
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test fun compactionLogsUseEncodedBotIdsAndOffsetPagination() = runTest {
+        server.enqueue(MockResponse().setBody("""{"items":[{"id":"log","status":"pending","summary":""}],"total_count":21}"""))
+        assertEquals(21, api().compactionLogs("bot/1", offset = 20)["total_count"]!!.jsonPrimitive.int)
+        val request = server.takeRequest()
+        assertEquals("/bots/bot%2F1/compaction/logs", request.requestUrl!!.encodedPath)
+        assertEquals("20", request.requestUrl!!.queryParameter("limit"))
+        assertEquals("20", request.requestUrl!!.queryParameter("offset"))
+    }
     @Test fun nativeSkillCatalogueUsesTheChatEndpointRatherThanTheManagementList() = runTest {
         server.enqueue(MockResponse().setBody("""{"skills":[{"name":"dataviz","display_name":"图表助手","description":"绘制数据图表","source_kind":"user","state":"ready"}]}"""))
         val skill = api().skillCatalog("bot/1").single()

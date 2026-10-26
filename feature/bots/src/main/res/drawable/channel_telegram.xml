@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Source: felinics/Memoh, 110635b, packages/icons/icons/telegram.svg. AGPL-3.0. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="28dp" android:height="28dp" android:viewportWidth="24" android:viewportHeight="24">
+    <group android:translateX="0" android:translateY="0">
+        <path android:fillColor="#26A5E4" android:fillType="nonZero" android:pathData="M 11.944 0 A 12 12 0 0 0 0 12 a 12 12 0 0 0 12 12 a 12 12 0 0 0 12 -12 A 12 12 0 0 0 12 0 a 12 12 0 0 0 -.056 0 z m 4.962 7.224 c .1 -.002 .321 .023 .465 .14 a .506 .506 0 0 1 .171 .325 c .016 .093 .036 .306 .02 .472 c -.18 1.898 -.962 6.502 -1.36 8.627 c -.168 .9 -.499 1.201 -.82 1.23 c -.696 .065 -1.225 -.46 -1.9 -.902 c -1.056 -.693 -1.653 -1.124 -2.678 -1.8 c -1.185 -.78 -.417 -1.21 .258 -1.91 c .177 -.184 3.247 -2.977 3.307 -3.23 c .007 -.032 .014 -.15 -.056 -.212 s -.174 -.041 -.249 -.024 c -.106 .024 -1.793 1.14 -5.061 3.345 c -.48 .33 -.913 .49 -1.302 .48 c -.428 -.008 -1.252 -.241 -1.865 -.44 c -.752 -.245 -1.349 -.374 -1.297 -.789 c .027 -.216 .325 -.437 .893 -.663 c 3.498 -1.524 5.83 -2.529 6.998 -3.014 c 3.332 -1.386 4.025 -1.627 4.476 -1.635 z" />
+    </group>
+</vector>

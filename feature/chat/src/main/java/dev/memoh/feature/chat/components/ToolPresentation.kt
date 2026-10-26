@@ -118,9 +118,11 @@ private fun contentText(value: JsonElement?): String = when (value) {
 internal fun toolOutputText(message: UIMessage): String {
     val output = message.output ?: return ""
     if (output is JsonPrimitive) return renderToolValue(output)
+    if (output is JsonArray) return contentText(output).ifBlank { renderToolValue(output) }
     val result = toolResult(message)
     val text = contentText(message.output.objectValue()["content"]).ifBlank { contentText(result["content"]) }
-    val logs = listOf(result.string("stdout"), result.string("stderr")).filter(String::isNotBlank).joinToString("\n")
+    val logs = listOf(result.string("stdout").ifBlank { result.string("output") }, result.string("stderr"))
+        .filter(String::isNotBlank).joinToString("\n")
     if (toolResultFailed(message)) return listOf(logs, text).filter(String::isNotBlank).distinct().joinToString("\n")
         .ifBlank { renderToolValue(output) }
     return logs.ifBlank { text }.ifBlank { renderToolValue(output) }

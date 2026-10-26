@@ -277,7 +277,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
         return bot to data
     }
 
-    fun write(path: List<String>, method: String, body: JsonObject? = null, result: Boolean = false, onSaved: () -> Unit = {}) {
+    fun write(path: List<String>, method: String, body: JsonObject? = null, result: Boolean = false, onResult: ((JsonElement) -> Unit)? = null, onSaved: () -> Unit = {}) {
         val botWrite = path.firstOrNull() == "bots" && path.size > 1 && method != "GET"
         val allowed = if (state.value.page == ManagementPage.Bots) state.value.data["bots"].objects("items")
             .firstOrNull { it.text("id") == path.getOrNull(1) }?.get("current_user_permissions").let { it is JsonArray && JsonPrimitive("manage") in it }
@@ -290,18 +290,102 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
             _state.update { it.copy(busy = true, error = null, notice = null) }
             try {
                 val api = repository.api() ?: error("请先登录")
-                val response = if (result) api.managementResult(path, method, body) else { api.managementWrite(path, method, body); null }
+                val response = if (result || onResult != null) api.managementResult(path, method, body) else { api.managementWrite(path, method, body); null }
                 val loaded = try { load(api, current) } catch (e: CancellationException) { throw e }
                     catch (e: Exception) { null }
                 if (generation == repository.generation) {
                     _state.update { it.copy(busy = false, bot = loaded?.first ?: it.bot, data = loaded?.second ?: it.data,
-                        notice = if (loaded == null) "操作已完成，刷新页面可读取最新配置" else if (result) null else "已保存", result = response) }
+                        notice = if (loaded == null) "操作已完成，刷新页面可读取最新配置" else if (result || onResult != null) null else "已保存", result = if (onResult == null) response else null) }
                     onSaved()
+                    if (response != null) onResult?.invoke(response)
                     if (result && response.obj().text("connection_id").isNotBlank() && response.obj().text("authorization_url").isNotBlank()) watchConnector(response.obj().text("connection_id"))
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error = errorText(e)) } }
         }
+    }
+
+    fun previewModelCatalog(provider: JsonObject) {
+        val source = providerCatalogSource(provider) ?: return
+        if (state.value.busy || !state.value.canManage) return
+        val generation = repository.generation
+        job?.cancel()
+        job = viewModelScope.launch {
+            _state.update { it.copy(busy = true, error = null, result = null, data = it.data - "model-catalog") }
+            try {
+                val response = (repository.api() ?: throw SessionExpiredException()).providerModelCatalog(source, provider.text("client_type"))
+                if (generation == repository.generation) _state.update { it.copy(busy = false, data = it.data + ("model-catalog" to response)) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false,
+                error = if (e is ApiException && e.status == 404) "当前服务端不支持此模型目录，请升级 Memoh 后重试。" else errorText(e)) } }
+        }
+    }
+
+    fun importProviderModels(provider: JsonObject, fromEndpoint: Boolean = false) {
+        if (providerManaged(provider)) return
+        write(providerImportPath(provider, fromEndpoint), "POST", apiBody(), result = true)
+    }
+
+    fun prepareProviderModels(provider: JsonObject, verifyConnection: Boolean = true, fromEndpoint: Boolean = false) {
+        if (state.value.busy || providerManaged(provider)) return
+        val current = state.value
+        val generation = repository.generation
+        job?.cancel()
+        job = viewModelScope.launch {
+            _state.update { it.copy(busy = true, error = null, notice = null, result = null) }
+            try {
+                val api = repository.api() ?: throw SessionExpiredException()
+                val test = if (verifyConnection) api.managementResult(listOf("providers", provider.text("id"), "test")).obj() else null
+                if (test?.text("status") in listOf("auth_error", "error")) throw UserFacingException(test?.text("code")?.takeIf(String::isNotBlank)?.let {
+                    dev.memoh.core.model.errorMessage(it)
+                } ?: "连接验证失败，请检查 API key 和地址。")
+                val imported = api.managementResult(providerImportPath(provider, fromEndpoint), body = apiBody()).obj()
+                val loaded = load(api, current)
+                if (generation == repository.generation) _state.update { it.copy(busy = false, bot = loaded.first, data = loaded.second,
+                    notice = when {
+                        imported["catalog"].obj().flag("stale") -> "目录暂时无法刷新，本次使用缓存。"
+                        test?.text("status") == "unverified" -> "服务可访问，具体模型调用仍需验证。"
+                        test != null && test.text("status") != "ok" -> "已获取模型，连接状态尚未确认。"
+                        else -> null
+                    }) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error =
+                if (!fromEndpoint && e is ApiException && e.status == 404 && providerCatalogSource(provider) != null) "当前服务端不支持模型目录，请升级 Memoh 后重试。" else errorText(e)) } }
+        }
+    }
+
+    fun saveModelSelection(models: List<JsonObject>, selected: Set<String>, onSaved: () -> Unit) {
+        if (state.value.busy || !state.value.canManage) return
+        val current = state.value
+        val generation = repository.generation
+        val changes = models.filter { it.flag("enable", true) != (it.text("id") in selected) }
+        if (changes.isEmpty()) { onSaved(); return }
+        job?.cancel()
+        job = viewModelScope.launch {
+            _state.update { it.copy(busy = true, error = null, notice = null) }
+            var saved = 0
+            try {
+                val api = repository.api() ?: throw SessionExpiredException()
+                for (model in changes) {
+                    api.managementWrite(listOf("models", model.text("id")), "PUT", modelUpdate(model, model.text("id") in selected)); saved++
+                }
+                val loaded = load(api, current)
+                if (generation == repository.generation) {
+                    _state.update { it.copy(busy = false, bot = loaded.first, data = loaded.second, notice = "模型选择已保存") }
+                    onSaved()
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false,
+                error = (if (saved == changes.size) "模型已保存，刷新失败：" else if (saved > 0) "已保存 $saved 个模型，其余选择未完成。" else "") + errorText(e)) } }
+        }
+    }
+
+    suspend fun readCompactionLogs(offset: Int): JsonObject {
+        val generation = repository.generation
+        val botId = state.value.botId
+        val response = (repository.api() ?: throw SessionExpiredException()).compactionLogs(botId, offset = offset)
+        check(generation == repository.generation && botId == state.value.botId) { "账号或 Bot 已切换" }
+        return response
     }
 
     fun saveHooks(content: String, onSaved: () -> Unit) {
@@ -442,7 +526,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
         _state.update { it.copy(authorization = null, busy = if (wasAuthorizing) false else it.busy) }
     }
 
-    fun providerAuthorization(id: String) {
+    fun providerAuthorization(id: String, onConnected: (() -> Unit)? = null) {
         if (state.value.busy) return
         cancelAuthorization()
         val generation = repository.generation
@@ -460,7 +544,9 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                         else api.managementRead("providers", id, "oauth", "status").obj()
                     if (generation != repository.generation) break
                     if (result.flag("has_token") && !result.flag("expired")) {
-                        _state.update { it.copy(result = result, notice = "供应商已连接") }; refresh(); break
+                        _state.update { it.copy(result = if (onConnected == null) result else null, notice = "供应商已连接") }
+                        if (onConnected == null) refresh() else onConnected()
+                        break
                     }
                     _state.update { it.copy(result = JsonObject(it.result.obj() + result)) }
                     if (expires != null && System.currentTimeMillis() > expires * 1000) break

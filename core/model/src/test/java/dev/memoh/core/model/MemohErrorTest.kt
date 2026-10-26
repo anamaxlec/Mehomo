@@ -5,6 +5,10 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class MemohErrorTest {
+    @Test fun paymentRequiredIsNotReportedAsAnInvalidRequest() {
+        assertTrue(MemohError.parse("{}", 402).text().contains("余额或配额"))
+        assertEquals("模型服务账户的余额或配额已用尽。", MemohError.parse("""{"code":"agent.provider_quota_exhausted","status":402}""").text())
+    }
     @Test fun problemAndNestedLegacyFeedbackKeepArgsAndDiagnostics() {
         val problem = MemohError.parse("""{"type":"about:blank","status":422,"code":"request.field_invalid","args":{"field":"max_output_tokens"},"detail":"private upstream text","request_id":"request-1","trace_id":"trace-1"}""")
         assertEquals("max_output_tokens 的值无效。", problem.text())

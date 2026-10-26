@@ -16,11 +16,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import dagger.hilt.android.qualifiers.ApplicationContext
+import android.content.Context
+import kotlinx.serialization.json.JsonObject
 
 data class ProviderImportState(val busy: Boolean = false, val error: String? = null, val createdId: String? = null, val modelsImported: Boolean = true)
 
 @HiltViewModel
-class ProviderImportViewModel @Inject constructor(private val repository: SessionRepository) : ViewModel() {
+class ProviderImportViewModel @Inject constructor(private val repository: SessionRepository, @ApplicationContext private val context: Context) : ViewModel() {
     private val _state = MutableStateFlow(ProviderImportState())
     val state = _state.asStateFlow()
     private var job: Job? = null
@@ -32,7 +35,10 @@ class ProviderImportViewModel @Inject constructor(private val repository: Sessio
         job = viewModelScope.launch {
             try {
                 val api = repository.api() ?: throw SessionExpiredException()
-                val template = payload.template?.let { wanted ->
+                val source = payload.template?.let { wanted -> loadProviderSources(context).firstOrNull {
+                    it.text("id").equals(wanted, true) && it.text("client_type") == payload.clientType
+                } }
+                val template = if (source != null) null else payload.template?.let { wanted ->
                     api.managementRead("provider-templates").objects().firstOrNull {
                         (it.text("key").equals(wanted, true) || it.text("id") == wanted) &&
                             it.text("driver").ifBlank { "openai-completions" } == payload.clientType && it.text("domain").let { domain -> domain.isBlank() || domain == "llm" }
@@ -41,7 +47,8 @@ class ProviderImportViewModel @Inject constructor(private val repository: Sessio
                 if (generation != repository.generation) return@launch
                 val config = apiBody("base_url" to payload.baseUrl, "api_key" to payload.apiKey)
                 val created = if (template != null) api.managementResult(listOf("providers", "from-template"), body = apiBody("template_id" to template.text("id"), "domain" to "llm", "name" to payload.name, "config" to config))
-                    else api.managementResult(listOf("providers"), body = apiBody("name" to payload.name, "client_type" to payload.clientType, "config" to config))
+                    else api.managementResult(listOf("providers"), body = apiBody("name" to payload.name, "client_type" to payload.clientType,
+                        "config" to config, "metadata" to source?.let(::sourceMetadata)))
                 val id = created.obj().text("id")
                 if (id.isBlank()) {
                     if (generation == repository.generation) _state.value = ProviderImportState(createdId = "", modelsImported = false,
@@ -49,10 +56,18 @@ class ProviderImportViewModel @Inject constructor(private val repository: Sessio
                     return@launch
                 }
                 var imported = true
-                try { if (generation == repository.generation) api.managementResult(listOf("providers", id, "import-models")) }
+                var importError: String? = null
+                try { if (generation == repository.generation) {
+                    val verified = api.managementResult(listOf("providers", id, "test")).obj()
+                    if (verified.text("status") in listOf("auth_error", "error")) throw UserFacingException(verified.text("code").takeIf(String::isNotBlank)?.let {
+                        dev.memoh.core.model.errorMessage(it)
+                    } ?: "连接验证失败，请检查 API key 和地址。")
+                    api.managementResult(providerImportPath(JsonObject(created.obj() +
+                        (if (source != null) mapOf("metadata" to sourceMetadata(source)) else emptyMap()))))
+                } }
                 catch (e: CancellationException) { throw e }
-                catch (_: Exception) { imported = false }
-                if (generation == repository.generation) _state.value = ProviderImportState(createdId = id, modelsImported = imported)
+                catch (e: Exception) { imported = false; importError = e.userMessage() }
+                if (generation == repository.generation) _state.value = ProviderImportState(createdId = id, modelsImported = imported, error = importError)
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation) _state.value = ProviderImportState(error = e.userMessage()) }
         }

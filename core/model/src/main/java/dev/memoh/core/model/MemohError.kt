@@ -72,6 +72,7 @@ fun errorMessage(code: String?, args: Map<String, String>? = null, status: Int? 
 private fun statusCode(status: Int?): String = when (status) {
     400, 422 -> "http.bad_request"
     401 -> "http.unauthorized"
+    402 -> "http.payment_required"
     403 -> "http.forbidden"
     404 -> "http.not_found"
     405 -> "http.method_not_allowed"

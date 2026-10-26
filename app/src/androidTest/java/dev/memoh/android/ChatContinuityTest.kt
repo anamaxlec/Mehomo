@@ -571,6 +571,7 @@ class ChatContinuityTest {
 }
 
 internal class ContinuityFixture(private val json: Json) : AutoCloseable {
+    @Volatile var httpOverride: ((String, String, String) -> Pair<Int, String>?)? = null
     private val server = ServerSocket(0, 20, InetAddress.getByName("127.0.0.1"))
     private val clients = CopyOnWriteArrayList<Socket>()
     val origin = "http://localhost:${server.localPort}"
@@ -650,6 +651,11 @@ internal class ContinuityFixture(private val json: Json) : AutoCloseable {
                 ?.substringAfter(':')?.trim()?.toInt() ?: 0
             val requestBody = ByteArray(contentLength).also(input::readFully).toString(Charsets.UTF_8)
             val output = client.getOutputStream()
+            httpOverride?.invoke(method, requestTarget, requestBody)?.let { (status, payload) ->
+                val bytes = payload.toByteArray(Charsets.UTF_8)
+                output.write("HTTP/1.1 $status Fixture\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                output.write(bytes); output.flush(); return
+            }
             if (path.endsWith("/web/ws")) {
                 val key = lines.first { it.startsWith("Sec-WebSocket-Key:", true) }.substringAfter(':').trim()
                 val accept = Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-1")

@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -23,6 +24,45 @@ import java.util.concurrent.atomic.AtomicInteger
  * retry, and the "give up and log out" path.
  */
 class MemohApiAuthTest {
+    @Test fun exhaustedQuotaDoesNotRefreshCredentialsOrSignOut() = runTest {
+        server.enqueue(MockResponse().setResponseCode(402)
+            .setBody("""{"code":"agent.provider_quota_exhausted","status":402,"fault":"dependency"}"""))
+        val auth = FakeAuth()
+        val failure = runCatching { api(auth).bots() }.exceptionOrNull()
+        assertTrue(failure is ApiException)
+        assertEquals(402, (failure as ApiException).status)
+        assertTrue(failure.userMessage().contains("余额或配额"))
+        assertEquals(1, server.requestCount)
+        assertEquals(0, auth.refreshCount.get())
+        assertEquals(0, auth.expiredCount.get())
+    }
+    @Test fun `JSON attachment contents are bytes even when they resemble API errors`() = runTest {
+        val auth = FakeAuth()
+        val bodies = listOf("[1,2,3]", """{"a":1}""", """{"code":"abc"}""", "42",
+            """{"code":99991663,"msg":"x"}""")
+        for (body in bodies) {
+            server.enqueue(MockResponse().setHeader("Content-Type", "application/json; charset=utf-8").setBody(body))
+            assertArrayEquals(body.toByteArray(Charsets.UTF_8), api(auth).media("/bots/b/media/file"))
+            assertEquals("/bots/b/media/file", server.takeRequest().path)
+        }
+        assertEquals(bodies.size, server.requestCount)
+        assertEquals(0, auth.refreshCount.get())
+        assertEquals(0, auth.expiredCount.get())
+    }
+
+    @Test fun `failed JSON attachment responses remain HTTP failures`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(400)
+            .setHeader("Content-Type", "application/json; charset=utf-8")
+            .setBody("""{"code":234003,"msg":"file not found"}"""))
+        val auth = FakeAuth()
+        val failure = runCatching { api(auth).media("/bots/b/media/file") }.exceptionOrNull()
+        assertTrue(failure is ApiException)
+        assertEquals(400, (failure as ApiException).status)
+        assertEquals(1, server.requestCount)
+        assertEquals(0, auth.refreshCount.get())
+        assertEquals(0, auth.expiredCount.get())
+    }
+
     @Test fun `published media supports upstream 20 MiB ceiling and rejects larger bodies`() = runTest {
         val bytes = ByteArray(17 * 1024 * 1024) { 7 }
         server.enqueue(MockResponse().setBody(okio.Buffer().write(bytes)))

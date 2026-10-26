@@ -119,7 +119,7 @@ class RecentUpdateIntegrationTest {
             "/providers/provider-1/import-models" -> Reply(503, """{"code":"agent.provider_overloaded"}""")
             else -> Reply()
         } }.use { server ->
-            val vm = ProviderImportViewModel(repository(server))
+            val vm = ProviderImportViewModel(repository(server), InstrumentationRegistry.getInstrumentation().targetContext)
             val payload = ProviderImport("导入测试", "https://provider.example.test/v1", "fixture-only-1234", "openai-responses", "newapi")
             compose.setContent { MemohTheme { val state by vm.state.collectAsState(); ProviderImportDialog(payload, "Fixture · 本地测试", state, { vm.confirm(payload) }, {}, {}) } }
             try {
