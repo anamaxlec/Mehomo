@@ -4,8 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.memoh.core.data.*
+import dev.memoh.core.model.ConversationMatch
+import dev.memoh.core.model.UITurn
+import dev.memoh.core.model.searchTurns
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -23,24 +28,35 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-data class OfflineHistoryState(val query: String = "", val chats: List<CachedChat> = emptyList(), val options: HistoryCacheOptions = HistoryCacheOptions(), val error: String? = null)
+data class OfflineHistoryMatch(val count: Int, val last: ConversationMatch)
+data class OfflineHistoryState(val query: String = "", val chats: List<CachedChat> = emptyList(), val options: HistoryCacheOptions = HistoryCacheOptions(),
+    val matches: Map<Pair<String, String>, OfflineHistoryMatch> = emptyMap(), val searching: Boolean = false, val error: String? = null)
 @HiltViewModel
 class OfflineHistoryViewModel @Inject constructor(private val repository: SessionRepository, private val store: ChatHistoryStore) : ViewModel() {
     private val _state = MutableStateFlow(OfflineHistoryState())
     val state = _state.asStateFlow()
     private var job: Job? = null
-    fun search(query: String) { _state.update { it.copy(query = query) }; refresh() }
+    fun search(query: String) { _state.update { it.copy(query = query, matches = emptyMap(), searching = true) }; refresh() }
     fun refresh() {
         job?.cancel()
         val account = repository.state.value.account ?: return
         val generation = repository.generation
+        val query = state.value.query
         job = viewModelScope.launch {
             try {
-                val chats = store.list(account.accountId, account.teamId.orEmpty(), state.value.query)
+                val chats = store.list(account.accountId, account.teamId.orEmpty(), query)
                 val options = store.options(account.accountId, account.teamId.orEmpty())
-                if (generation == repository.generation) _state.update { it.copy(chats = chats, options = options, error = null) }
+                val matches = withContext(Dispatchers.Default) {
+                    if (query.isBlank()) emptyMap() else chats.mapNotNull { chat ->
+                        val found = searchTurns(chat.turns, query)
+                        found.lastOrNull()?.let { (chat.botId to chat.session.id) to OfflineHistoryMatch(found.size, it) }
+                    }.toMap()
+                }
+                if (generation == repository.generation) _state.update {
+                    if (it.query == query) it.copy(chats = chats, options = options, matches = matches, searching = false, error = null) else it
+                }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(error = "缓存读取失败") } }
+            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(searching = false, error = "缓存读取失败") } }
         }
     }
     fun configure(enabled: Boolean = state.value.options.enabled, count: Int = state.value.options.sessions) {
@@ -64,7 +80,8 @@ class OfflineHistoryViewModel @Inject constructor(private val repository: Sessio
 }
 
 @Composable
-fun OfflineHistoryScreen(state: OfflineHistoryState, vm: OfflineHistoryViewModel, onBack: () -> Unit, onOpen: (String, String) -> Unit) {
+fun OfflineHistoryScreen(state: OfflineHistoryState, vm: OfflineHistoryViewModel, onBack: () -> Unit,
+    onOpen: (String, String, ConversationMatch?, UITurn?) -> Unit) {
     var confirm by remember { mutableStateOf(false) }
     Scaffold(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh, topBar = { MemohPageTopBar("离线历史", onBack) }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding(),
@@ -91,9 +108,16 @@ fun OfflineHistoryScreen(state: OfflineHistoryState, vm: OfflineHistoryViewModel
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
             itemsIndexed(state.chats, key = { _, chat -> "${chat.botId}:${chat.session.id}" }) { index, chat ->
-                SegmentedListItem(onClick = { onOpen(chat.botId, chat.session.id) }, shapes = ListItemDefaults.segmentedShapes(index, state.chats.size),
+                val summary = state.matches[chat.botId to chat.session.id]
+                val match = summary?.last
+                SegmentedListItem(onClick = { onOpen(chat.botId, chat.session.id, match,
+                    match?.let { hit -> chat.turns.firstOrNull { it.listKey == hit.turnKey } }) }, shapes = ListItemDefaults.segmentedShapes(index, state.chats.size),
+                    enabled = !state.searching,
                     colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
-                    leadingContent = { MemohListIcon(Icons.Filled.Chat) }, supportingContent = { Text("${chat.turns.size} 条 · 最后同步 " + DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(chat.syncedAt))) },
+                    leadingContent = { MemohListIcon(Icons.Filled.Chat) }, supportingContent = {
+                        if (match != null) Text("${summary.count} 条匹配 · ${match.snippet}", maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        else Text("${chat.turns.size} 条 · 最后同步 " + DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(chat.syncedAt)))
+                    },
                     trailingContent = { Icon(Icons.Filled.ChevronRight, null) }) { Text(chat.session.title?.takeIf(String::isNotBlank) ?: "未命名会话") }
             }
             if (state.chats.isEmpty()) item { Text(if (state.query.isBlank()) "打开会话后会在这里保存近期历史。" else "缓存中没有匹配内容。", Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium) }

@@ -14,6 +14,7 @@ import dev.memoh.core.data.SettingsStore
 import dev.memoh.core.data.ChatHistoryStore
 import dev.memoh.core.data.CachedChat
 import dev.memoh.core.data.AttachmentDraftStore
+import dev.memoh.core.data.SavedChatItem
 import dev.memoh.core.data.RuntimeMonitorEvents
 import dev.memoh.core.data.LocalRunAccepted
 import kotlinx.coroutines.Job
@@ -67,6 +68,8 @@ data class PendingRegeneration(val invocationId: String, val turnId: String, val
 
 /** Forks load their transcript; a newly created conversation can render immediately. */
 data class SessionNavigation(val session: Session, val isNew: Boolean)
+data class CachedSearchNavigation(val accountId: String, val botId: String, val sessionId: String,
+    val match: ConversationMatch, val turn: UITurn)
 
 data class ChatUiState(
     val botId: String = "",
@@ -75,6 +78,7 @@ data class ChatUiState(
     val sessionLoading: Boolean = false,
     /** Settled history, oldest first. */
     val history: List<UITurn> = emptyList(),
+    val savedItems: List<SavedChatItem> = emptyList(),
     val historyLoading: Boolean = true,
     val historyError: String? = null,
     val olderHistoryError: String? = null,
@@ -374,6 +378,15 @@ class ChatViewModel @Inject constructor(
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
+    private val _cachedSearchNavigation = MutableStateFlow<CachedSearchNavigation?>(null)
+    val cachedSearchNavigation = _cachedSearchNavigation.asStateFlow()
+
+    fun queueCachedSearchNavigation(botId: String, sessionId: String, match: ConversationMatch, turn: UITurn) {
+        val account = repository.state.value.account ?: return
+        if (turn.listKey == match.turnKey) _cachedSearchNavigation.value = CachedSearchNavigation(account.accountId, botId, sessionId, match, turn)
+    }
+
+    fun clearCachedSearchNavigation() { _cachedSearchNavigation.value = null }
 
     @Volatile private var socket: ChatSocket? = null
     private var historyJob: kotlinx.coroutines.Job? = null
@@ -386,6 +399,7 @@ class ChatViewModel @Inject constructor(
     private var skillCatalogJob: Job? = null
     private var queueJob: Job? = null
     private var attachmentJob: Job? = null
+    private var savedItemsJob: Job? = null
     private var draftAddress: Triple<String, String, String>? = null
     private var draftRevision = 0L
     private var attachmentReadId = 0L
@@ -434,6 +448,7 @@ class ChatViewModel @Inject constructor(
         contextLifecycleJob?.cancel()
         sessionInfoJob?.cancel()
         attachmentJob?.cancel()
+        savedItemsJob?.cancel()
         attachmentReadId++
         socket?.close(); socket = null
         draftAddress = repository.state.value.account?.accountId?.let { Triple(it, botId, sessionId) }
@@ -454,6 +469,19 @@ class ChatViewModel @Inject constructor(
             skillCatalog = previous?.skillCatalog.orEmpty(),
             selectedModelId = seed?.preferredChatModelId, reasoningEffort = seed?.preferredReasoningEffort,
             selectedWorkdirId = seed?.workdirId, selectedAgentId = seed?.botAgentId)
+        repository.state.value.account?.let { stored ->
+            savedItemsJob = viewModelScope.launch {
+                try {
+                    settings.savedChatItems(stored.accountId, stored.teamId.orEmpty()).collect { items ->
+                        if (generation == repository.generation) _state.update { current ->
+                            if (current.botId == botId && current.session?.id == sessionId)
+                                current.copy(savedItems = items.filter { it.botId == botId && it.sessionId == sessionId }) else current
+                        }
+                    }
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { if (generation == repository.generation) _state.update { it.copy(notice = "收藏读取失败") } }
+            }
+        }
         openJob = viewModelScope.launch {
             val account = repository.state.value.account
             if (createdSession != null && account != null) {
@@ -1227,6 +1255,56 @@ class ChatViewModel @Inject constructor(
         loadHistory(current.botId, current.session ?: return)
     }
 
+    /** Search the existing cache without making an additional server request. */
+    suspend fun cachedSearchHistory(): List<UITurn> {
+        val account = repository.state.value.account ?: return emptyList()
+        val current = state.value
+        val sessionId = current.session?.id ?: return emptyList()
+        val generation = repository.generation
+        if (boundGeneration != generation || draftAddress?.first != account.accountId) return emptyList()
+        val cached = historyStore.read(account.accountId, account.teamId.orEmpty(), current.botId, sessionId)
+        return if (generation == repository.generation && boundGeneration == generation &&
+            state.value.botId == current.botId && state.value.session?.id == sessionId)
+            cached?.turns.orEmpty() else emptyList()
+    }
+
+    fun toggleSavedTurn(turn: UITurn) {
+        val account = repository.state.value.account ?: return
+        val current = state.value
+        val sessionId = current.session?.id ?: return
+        val generation = repository.generation
+        if (boundGeneration != generation || draftAddress?.first != account.accountId) return
+        val text = if (turn.isAssistant) turn.safeMessages.filter { it.type in setOf("text", "command", "error", "notice") }
+            .map { it.content }.filter(String::isNotBlank).joinToString("\n\n") else turn.text.orEmpty()
+        val attachments = turn.attachments.orEmpty() + turn.safeMessages.flatMap { it.attachments.orEmpty() }
+        val visibleTurns = current.turnsForSavedItems()
+        val existing = current.savedItems.firstOrNull {
+            dev.memoh.core.data.resolveSavedChatTurn(it, visibleTurns)?.listKey == turn.listKey
+        }
+        val item = SavedChatItem(current.botId, sessionId, turn.listKey, text, turn.timestamp, attachments,
+            provisionalTurnId = turn.turnId.takeIf { turn.id.isNullOrBlank() })
+        viewModelScope.launch {
+            try {
+                if (existing == null) settings.toggleSavedChatItem(account.accountId, account.teamId.orEmpty(), item)
+                else settings.removeSavedChatItem(account.accountId, account.teamId.orEmpty(), existing)
+            }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { if (generation == repository.generation) _state.update { it.copy(notice = "收藏保存失败") } }
+        }
+    }
+
+    fun removeSavedItem(item: SavedChatItem) {
+        val account = repository.state.value.account ?: return
+        val generation = repository.generation
+        if (boundGeneration != generation || draftAddress?.first != account.accountId ||
+            item.botId != state.value.botId || item.sessionId != state.value.session?.id) return
+        viewModelScope.launch {
+            try { settings.removeSavedChatItem(account.accountId, account.teamId.orEmpty(), item) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { if (generation == repository.generation) _state.update { it.copy(notice = "收藏保存失败") } }
+        }
+    }
+
     // -- sending ------------------------------------------------------------
 
     /** Replaces the latest assistant reply through the server's retry admission protocol. */
@@ -1293,7 +1371,7 @@ class ChatViewModel @Inject constructor(
             )
         }
 
-        socket?.send(
+        val sendResult = socket?.send(
             WSClientMessage(
                 type = WSClientMessage.MESSAGE,
                 invocationId = invocationId,
@@ -1305,7 +1383,22 @@ class ChatViewModel @Inject constructor(
                     (current.models.firstOrNull { it.id == current.selectedModelId } ?: current.models.firstOrNull())?.resolveEffort(current.reasoningEffort),
                 workspaceTargetId = current.selectedTargetId,
             ),
-        )
+        ) ?: SocketSendResult.Closed
+        if (sendResult != SocketSendResult.Queued) {
+            if (draftInvocationId == invocationId) draftInvocationId = null
+            _state.update { current ->
+                val rejected = current.pending.firstOrNull { it.invocationId == invocationId }
+                current.copy(
+                    pending = current.pending.filterNot { it.invocationId == invocationId },
+                    draft = listOfNotNull(text.takeIf(String::isNotBlank), current.draft.takeIf(String::isNotBlank)).joinToString("\n"),
+                    attachments = rejected?.attachments.orEmpty() + current.attachments,
+                    error = if (sendResult == SocketSendResult.TooLarge) "消息或附件过大，请减少附件或缩短文字后重试。"
+                        else "连接已断开，请等待恢复后重试。",
+                    errorProblem = null,
+                )
+            }
+            persistDraft()
+        }
     }
 
     fun abort() {
@@ -1427,11 +1520,15 @@ class ChatViewModel @Inject constructor(
         // catalogue; an explicit refresh can discover newly installed skills.
         if (!menuWasOpen && slashMenuQuery(text) != null && !state.value.nativeSkillsEnabled && state.value.controls == null)
             refreshSlashCatalog()
-        persistDraft()
+        persistTextDraft()
+    }
+
+    private fun persistTextDraft() {
+        draftAddress?.let { settings.saveDraft(it.first, it.second, it.third, state.value.draft) }
     }
 
     private fun persistDraft() {
-        draftAddress?.let { settings.saveDraft(it.first, it.second, it.third, state.value.draft) }
+        persistTextDraft()
         persistAttachments()
     }
 

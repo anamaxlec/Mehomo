@@ -30,7 +30,7 @@ class TaskTrackerTest {
 
     @Test fun `a locally admitted short run alerts even if its first snapshot is already terminal`() {
         val tracker = TaskTracker()
-        tracker.accepted("run-1")
+        tracker.accepted("session-1", "run-1")
         assertTrue(tracker.apply(snapshot(RunStatus.COMPLETED))!!.alert)
     }
 

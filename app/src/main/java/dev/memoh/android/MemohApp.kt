@@ -104,7 +104,9 @@ import kotlinx.coroutines.launch
 @Composable
 fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit = {},
     chatTarget: ChatTarget? = null, onTargetConsumed: () -> Unit = {},
-    providerImport: dev.memoh.core.model.ProviderImport? = null, onProviderImportConsumed: () -> Unit = {}) {
+    providerImport: dev.memoh.core.model.ProviderImport? = null, onProviderImportConsumed: () -> Unit = {},
+    newChatRequest: String? = null, onNewChatConsumed: () -> Unit = {},
+    recentChatRequest: String? = null, onRecentChatConsumed: () -> Unit = {}) {
     val navController = rememberNavController()
     val settings: SettingsViewModel = hiltViewModel()
     val updates: AppUpdateViewModel = hiltViewModel()
@@ -132,8 +134,9 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             navController.navigate(Routes.chat(bot, id))
         }
     }
-    if (session.loggedIn && sharedContent != null) ShareTargetDialog(onShareConsumed) { bot, id ->
-        selectedShare = ChatTarget(session.account!!.accountId, bot, id) to sharedContent
+    if (session.loggedIn && sharedContent != null) ShareTargetDialog(session.account!!.accountId, session.account!!.teamId.orEmpty(), onShareConsumed) { bot, id, prompt ->
+        val content = sharedContent.copy(text = listOf(prompt, sharedContent.text).filter(String::isNotBlank).joinToString("\n\n"))
+        selectedShare = ChatTarget(session.account!!.accountId, bot, id) to content
         onShareConsumed()
         navController.navigate(Routes.chat(bot, id))
     }
@@ -141,7 +144,21 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
         if (session.loggedIn && chatTarget != null) {
             if (session.account?.accountId == chatTarget.accountId)
                 navController.navigate(Routes.chat(chatTarget.botId, chatTarget.sessionId)) { launchSingleTop = true }
+            else Toast.makeText(navController.context, "此会话属于其他账号，请先切换账号", Toast.LENGTH_SHORT).show()
             onTargetConsumed()
+        }
+    }
+    LaunchedEffect(newChatRequest, session.loggedIn) {
+        if (newChatRequest != null && session.loggedIn && navController.currentDestination?.route != Routes.MAIN)
+            navController.navigate(Routes.MAIN) { popUpTo(Routes.MAIN) { inclusive = false }; launchSingleTop = true }
+    }
+    LaunchedEffect(recentChatRequest, session.loggedIn, session.account?.accountId) {
+        val account = session.account
+        if (recentChatRequest != null && session.loggedIn && account != null) {
+            val target = LauncherShortcuts.recent(navController.context, account.accountId, account.teamId.orEmpty())
+            if (target == null) Toast.makeText(navController.context, "还没有最近访问的会话", Toast.LENGTH_SHORT).show()
+            else navController.navigate(Routes.chat(target.botId, target.sessionId)) { launchSingleTop = true }
+            onRecentChatConsumed()
         }
     }
     var previousAccount by remember { mutableStateOf(session.account?.accountId) }
@@ -213,7 +230,24 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             } }
         }
 
-        memohComposable(Routes.MAIN) {
+        memohComposable(Routes.MAIN) { entry ->
+            val shortcutsSessions: SessionsViewModel = hiltViewModel(entry)
+            val shortcutsState by shortcutsSessions.state.collectAsState()
+            val shortcutsChat: ChatViewModel = hiltViewModel(entry)
+            val shortcutsContext = LocalContext.current
+            LaunchedEffect(newChatRequest, shortcutsState.initialized, shortcutsState.loading, shortcutsState.creating,
+                shortcutsState.deletingSelected, shortcutsState.bot?.id) {
+                if (newChatRequest != null && session.loggedIn && shortcutsState.initialized && !shortcutsState.loading &&
+                    !shortcutsState.creating && !shortcutsState.deletingSelected) {
+                    val bot = shortcutsState.bot
+                    onNewChatConsumed()
+                    if (bot == null) Toast.makeText(shortcutsContext, "没有可用的 Bot", Toast.LENGTH_SHORT).show()
+                    else shortcutsSessions.createSession { created ->
+                        shortcutsChat.open(bot.id, created.id, created)
+                        navController.navigate(Routes.chat(bot.id, created.id))
+                    }
+                }
+            }
             MainShell(
                 navigation = navigation,
                 updates = updates,
@@ -243,10 +277,16 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
 
         memohComposable(Routes.HISTORY) {
             val vm: OfflineHistoryViewModel = hiltViewModel()
+            val owner = remember { navController.getBackStackEntry(Routes.MAIN) }
+            val historyChat: ChatViewModel = hiltViewModel(owner)
             val state by vm.state.collectAsState()
             LaunchedEffect(Unit) { vm.refresh() }
             OfflineHistoryScreen(state, vm, onBack = { navController.popBackStack() },
-                onOpen = { bot, id -> navController.navigate(Routes.chat(bot, id)) })
+                onOpen = { bot, id, match, turn ->
+                    if (match != null && turn != null) historyChat.queueCachedSearchNavigation(bot, id, match, turn)
+                    else historyChat.clearCachedSearchNavigation()
+                    navController.navigate(Routes.chat(bot, id))
+                })
         }
 
         memohComposable(Routes.MANAGEMENT, arguments = listOf(navArgument("botId") { type = NavType.StringType }, navArgument("page") { type = NavType.StringType })) { entry ->
@@ -301,14 +341,34 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
             val chatOwner = remember(entry) { navController.getBackStackEntry(Routes.MAIN) }
             val viewModel: ChatViewModel = hiltViewModel(chatOwner)
             val observedState by viewModel.state.collectAsState()
+            val cachedSearchNavigation by viewModel.cachedSearchNavigation.collectAsState()
             val initialState = remember(botId, sessionId) { dev.memoh.feature.chat.ChatUiState(botId = botId) }
             val state = observedState.takeIf { it.botId == botId && it.session?.id == sessionId }
                 ?: initialState
             ChatSessionLifecycle(viewModel, state.session?.id)
             val context = LocalContext.current
+            LaunchedEffect(session.account?.accountId, session.account?.teamId, botId, sessionId, state.session?.id) {
+                val account = session.account
+                if (session.loggedIn && account != null && state.session?.id == sessionId)
+                    LauncherShortcuts.record(context, account.accountId, account.teamId.orEmpty(), botId, sessionId)
+            }
             var controlsOpen by remember { mutableStateOf(false) }
             var pendingImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
             var capturePath by rememberSaveable { mutableStateOf<String?>(null) }
+            var voiceAccount by rememberSaveable { mutableStateOf<String?>(null) }
+            var voiceBot by rememberSaveable { mutableStateOf<String?>(null) }
+            var voiceSession by rememberSaveable { mutableStateOf<String?>(null) }
+            val voiceInput = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+                val spoken = if (result.resultCode == android.app.Activity.RESULT_OK)
+                    result.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.trim().orEmpty() else ""
+                if (spoken.isNotBlank()) {
+                    val current = viewModel.state.value
+                    if (voiceAccount == session.account?.accountId && voiceBot == current.botId && voiceSession == current.session?.id) {
+                        viewModel.setDraft(listOf(current.draft, spoken).filter(String::isNotBlank).joinToString(" "))
+                    } else Toast.makeText(context, "会话已切换，未插入语音结果", Toast.LENGTH_SHORT).show()
+                }
+                voiceAccount = null; voiceBot = null; voiceSession = null
+            }
             val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
                 if (uris.any { context.contentResolver.getType(it)?.startsWith("image/") == true }) pendingImages = uris
                 else viewModel.attach(context, uris)
@@ -398,10 +458,26 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onNewSession = viewModel::newSession,
                 onRefreshContext = viewModel::refreshSessionInfo,
                 onInspectContext = viewModel::openContextInspector,
+                onPinShortcut = {
+                    val account = session.account
+                    val requested = account != null && LauncherShortcuts.pin(context, account.accountId, botId, sessionId,
+                        state.session?.title.orEmpty())
+                    if (!requested) Toast.makeText(context, "当前启动器不支持固定快捷方式", Toast.LENGTH_SHORT).show()
+                },
                 onOpenFeature = { navController.navigate(Routes.feature(botId, it)) },
                 onRefreshSuggestions = viewModel::refreshSuggestions,
                 onConfigureExample = { navController.navigate(Routes.management(botId, exampleSettingsPage(it).name)) },
                 onPickAttachment = { images -> attachmentPicker.launch(if (images) arrayOf("image/*") else arrayOf("*/*")) },
+                onVoiceInput = {
+                    voiceAccount = session.account?.accountId; voiceBot = botId; voiceSession = sessionId
+                    try {
+                        voiceInput.launch(android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM))
+                    } catch (_: android.content.ActivityNotFoundException) {
+                        voiceAccount = null; voiceBot = null; voiceSession = null
+                        Toast.makeText(context, "设备没有可用的语音识别服务", Toast.LENGTH_SHORT).show()
+                    }
+                },
                 onTakePhoto = {
                     val file = java.io.File.createTempFile("photo-", ".jpg", java.io.File(context.cacheDir, "capture").apply { mkdirs() })
                     capturePath = file.absolutePath
@@ -414,6 +490,12 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onCancelFolder = viewModel::cancelFolderChange,
                 onRefreshSlashCatalog = viewModel::refreshSlashCatalog,
                 onQuickAction = viewModel::quickAction,
+                onToggleSavedTurn = viewModel::toggleSavedTurn,
+                onRemoveSavedItem = viewModel::removeSavedItem,
+                onLoadSearchCache = viewModel::cachedSearchHistory,
+                externalSearchHit = cachedSearchNavigation?.takeIf { it.accountId == session.account?.accountId && it.botId == botId && it.sessionId == sessionId }?.match,
+                externalCachedTurn = cachedSearchNavigation?.takeIf { it.accountId == session.account?.accountId && it.botId == botId && it.sessionId == sessionId }?.turn,
+                onExternalSearchConsumed = viewModel::clearCachedSearchNavigation,
                 onOpenSurface = { navController.navigate(Routes.workspace(botId, it.name)) },
             ) }
             }

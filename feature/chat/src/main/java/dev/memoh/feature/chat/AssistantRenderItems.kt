@@ -18,14 +18,27 @@ private val UIMessage.isProcessMessage: Boolean
 internal fun assistantRenderItems(turnId: String, messages: List<UIMessage>): List<AssistantRenderItem> {
     val keys = assistantBlockKeys(turnId, messages)
     val items = mutableListOf<AssistantRenderItem>()
+    var processMessages: MutableList<UIMessage>? = null
+    var processKey = ""
+    var processLastIndex = -1
+    fun finishProcess() {
+        processMessages?.let { items += AssistantRenderItem(processKey, it.toList(), processLastIndex) }
+        processMessages = null
+    }
     messages.forEachIndexed { index, message ->
         if (message.type == UIMessage.TYPE_STATUS && message.content.isBlank() && message.name.isNullOrBlank()) return@forEachIndexed
-        val previous = items.lastOrNull()
-        if (message.isProcessMessage && previous?.isProcess == true) {
-            items[items.lastIndex] = previous.copy(messages = previous.messages + message, lastIndex = index)
+        if (message.isProcessMessage) {
+            val group = processMessages ?: mutableListOf<UIMessage>().also {
+                processMessages = it
+                processKey = keys[index]
+            }
+            group += message
+            processLastIndex = index
         } else {
+            finishProcess()
             items += AssistantRenderItem(keys[index], listOf(message), index)
         }
     }
+    finishProcess()
     return items
 }

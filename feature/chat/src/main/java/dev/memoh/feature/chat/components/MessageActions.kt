@@ -9,6 +9,8 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ForkRight
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Replay
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -55,6 +57,8 @@ fun MessageActions(
     retryEnabled: Boolean = false,
     onRetry: () -> Unit = {},
     onFork: (() -> Unit)? = null,
+    isSaved: Boolean = false,
+    onSave: (() -> Unit)? = null,
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -100,6 +104,11 @@ fun MessageActions(
                 onFork?.let { fork ->
                     MemohMenuDivider()
                     MemohMenuRow("新分支", Icons.Outlined.ForkRight, { moreOpen = false; fork() }, enabled = enabled)
+                }
+                onSave?.let { save ->
+                    MemohMenuDivider()
+                    MemohMenuRow(if (isSaved) "取消收藏" else "收藏", if (isSaved) Icons.Outlined.BookmarkRemove else Icons.Outlined.Bookmark,
+                        { moreOpen = false; save() })
                 }
             }
         }

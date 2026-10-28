@@ -100,7 +100,7 @@ class CredentialStore(context: Context, private val json: Json) : CloudCookieSto
     }
 
     /** Stores an account and makes it active, bumping the generation. */
-    fun saveAccount(account: StoredAccount) {
+    @Synchronized fun saveAccount(account: StoredAccount) {
         val updated = accounts().filterNot { it.accountId == account.accountId } + account
         prefs.edit()
             .putString(
@@ -115,13 +115,15 @@ class CredentialStore(context: Context, private val json: Json) : CloudCookieSto
         bumpGeneration()
     }
 
-    fun setActiveAccount(accountId: String) {
+    @Synchronized fun setActiveAccount(accountId: String) {
+        if (activeAccountId() == accountId) return
         prefs.edit().putString(KEY_ACTIVE_ACCOUNT, accountId).apply()
         bumpGeneration()
     }
 
     /** Removes an account and its credentials; clears the active pointer if it matched. */
-    fun removeAccount(accountId: String) {
+    @Synchronized fun removeAccount(accountId: String) {
+        val wasActive = activeAccountId() == accountId
         val remaining = accounts().filterNot { it.accountId == accountId }
         val editor = prefs.edit()
             .putString(
@@ -133,9 +135,9 @@ class CredentialStore(context: Context, private val json: Json) : CloudCookieSto
             )
             .remove(tokenKey(accountId))
             .remove(expiresKey(accountId))
-        if (activeAccountId() == accountId) editor.remove(KEY_ACTIVE_ACCOUNT)
+        if (wasActive) editor.remove(KEY_ACTIVE_ACCOUNT)
         editor.apply()
-        bumpGeneration()
+        if (wasActive) bumpGeneration()
     }
 
     fun token(accountId: String): String? = prefs.getString(tokenKey(accountId), null)
@@ -143,29 +145,31 @@ class CredentialStore(context: Context, private val json: Json) : CloudCookieSto
     fun expiresAt(accountId: String): Long? =
         prefs.getLong(expiresKey(accountId), 0L).takeIf { it > 0L }
 
-    fun saveToken(accountId: String, token: String, expiresAtMillis: Long?) {
+    @Synchronized fun saveToken(accountId: String, token: String, expiresAtMillis: Long?) {
         prefs.edit()
             .putString(tokenKey(accountId), token)
             .putLong(expiresKey(accountId), expiresAtMillis ?: 0L)
             .apply()
     }
 
-    fun clearToken(accountId: String) {
+    @Synchronized fun clearToken(accountId: String) {
         prefs.edit().remove(tokenKey(accountId)).remove(expiresKey(accountId)).apply()
+        if (activeAccountId() == accountId) bumpGeneration()
     }
 
     /** Lease for the active account, or null when signed out. */
-    fun lease(): AuthLease? {
+    @Synchronized fun lease(): AuthLease? {
         val id = activeAccountId() ?: return null
         val token = token(id) ?: return null
         return AuthLease(token = token, expiresAtMillis = expiresAt(id), generation = _generation.value)
     }
 
     /** Wipes credentials for every account, keeping the account list metadata. */
-    fun clearAllTokens() {
+    @Synchronized fun clearAllTokens() {
         val editor = prefs.edit()
         accounts().forEach { editor.remove(tokenKey(it.accountId)).remove(expiresKey(it.accountId)) }
         editor.apply()
+        bumpGeneration()
     }
 
     private fun bumpGeneration() {

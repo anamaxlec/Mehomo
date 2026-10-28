@@ -22,6 +22,8 @@ import dev.memoh.core.model.StarterPromptsResponse
 import kotlinx.serialization.json.Json
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "memoh_settings")
+// Saved replies may contain attachment data; draft keystrokes must not rewrite them.
+private val Context.savedItemsDataStore: DataStore<Preferences> by preferencesDataStore(name = "memoh_saved_items")
 
 /**
  * User-visible preferences, drafts and server-issued starter suggestions.
@@ -152,6 +154,57 @@ class SettingsStore(private val context: Context) {
 
     suspend fun saveStarterPrompts(accountId: String, teamId: String, botId: String, locale: String, value: StarterPromptsResponse) {
         context.dataStore.edit { it[starterPromptsKey(accountId, teamId, botId, locale)] = Json.encodeToString(value) }
+    }
+
+    fun shareQuickTasks(accountId: String, teamId: String): Flow<List<ShareQuickTask>> = context.dataStore.data.map { prefs ->
+        prefs[conversationToolsKey("share_tasks", accountId, teamId)]?.let { Json.decodeFromString<List<ShareQuickTask>>(it) }.orEmpty()
+    }
+
+    suspend fun saveShareQuickTask(accountId: String, teamId: String, task: ShareQuickTask) {
+        require(task.id.isNotBlank() && task.name.isNotBlank() && task.prompt.isNotBlank() && task.botId.isNotBlank())
+        val key = conversationToolsKey("share_tasks", accountId, teamId)
+        context.dataStore.edit { prefs ->
+            val current = prefs[key]?.let { Json.decodeFromString<List<ShareQuickTask>>(it) }.orEmpty()
+            prefs[key] = Json.encodeToString(current.filterNot { it.id == task.id } + task)
+        }
+    }
+
+    suspend fun removeShareQuickTask(accountId: String, teamId: String, id: String) {
+        val key = conversationToolsKey("share_tasks", accountId, teamId)
+        context.dataStore.edit { prefs ->
+            val current = prefs[key]?.let { Json.decodeFromString<List<ShareQuickTask>>(it) }.orEmpty()
+            prefs[key] = Json.encodeToString(current.filterNot { it.id == id })
+        }
+    }
+
+    fun savedChatItems(accountId: String, teamId: String): Flow<List<SavedChatItem>> = context.savedItemsDataStore.data.map { prefs ->
+        prefs[conversationToolsKey("saved_chat_items", accountId, teamId)]?.let { Json.decodeFromString<List<SavedChatItem>>(it) }.orEmpty()
+    }
+
+    suspend fun toggleSavedChatItem(accountId: String, teamId: String, item: SavedChatItem) {
+        val key = conversationToolsKey("saved_chat_items", accountId, teamId)
+        context.savedItemsDataStore.edit { prefs ->
+            val current = prefs[key]?.let { Json.decodeFromString<List<SavedChatItem>>(it) }.orEmpty()
+            val exists = current.any { it.botId == item.botId && it.sessionId == item.sessionId && it.turnKey == item.turnKey }
+            val remaining = current.filterNot { it.botId == item.botId && it.sessionId == item.sessionId && it.turnKey == item.turnKey }
+            prefs[key] = Json.encodeToString(if (exists) remaining else remaining + item)
+        }
+    }
+
+    suspend fun removeSavedChatItem(accountId: String, teamId: String, item: SavedChatItem) {
+        val key = conversationToolsKey("saved_chat_items", accountId, teamId)
+        context.savedItemsDataStore.edit { prefs ->
+            val current = prefs[key]?.let { Json.decodeFromString<List<SavedChatItem>>(it) }.orEmpty()
+            prefs[key] = Json.encodeToString(current.filterNot {
+                it.botId == item.botId && it.sessionId == item.sessionId && it.turnKey == item.turnKey
+            })
+        }
+    }
+
+    private fun conversationToolsKey(prefix: String, accountId: String, teamId: String): Preferences.Key<String> {
+        fun segment(value: String) = android.util.Base64.encodeToString(value.toByteArray(),
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+        return stringPreferencesKey("${prefix}_${segment(accountId)}.${segment(teamId)}")
     }
 
     private fun starterPromptsKey(accountId: String, teamId: String, botId: String, locale: String) =

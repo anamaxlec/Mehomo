@@ -4,12 +4,14 @@ import dev.memoh.core.model.Bot
 import dev.memoh.core.model.Session
 import dev.memoh.core.network.AuthLease
 import dev.memoh.core.network.AuthProvider
+import dev.memoh.core.network.ApiException
 import dev.memoh.core.network.MemohApi
 import dev.memoh.core.network.ServerEndpoint
 import dev.memoh.core.network.CloudAuth
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -29,7 +31,7 @@ class SessionRepository(
     val state: StateFlow<SessionState> = _state.asStateFlow()
 
     /** Bumped whenever the account changes; callers snapshot it before a request. */
-    val generation: Long get() = credentials.generation.value
+    override val generation: Long get() = credentials.generation.value
 
     init {
         credentials.activeAccount()?.let { account ->
@@ -37,16 +39,24 @@ class SessionRepository(
             _state.value = SessionState(
                 loggedIn = if (account.kind == "cloud") cloudAuth.hasSession else credentials.token(account.accountId) != null,
                 account = account, endpoint = endpointFor(account),
+                generation = generation,
             )
         }
     }
 
     // -- AuthProvider -------------------------------------------------------
 
-    override fun currentLease(): AuthLease? = credentials.lease()
+    override fun currentLease(): AuthLease? = synchronized(credentials) {
+        credentials.lease().takeIf { state.value.generation == generation }
+    }
 
     override suspend fun refresh(previous: AuthLease): AuthLease? {
-        val account = credentials.activeAccount() ?: return null
+        val account = synchronized(credentials) {
+            requireGeneration(previous.generation)
+            val current = credentials.lease() ?: return null
+            if (current.token != previous.token) return current
+            credentials.activeAccount() ?: return null
+        }
         val endpoint = endpointFor(account)
         val api = MemohApi(
             client = httpClient,
@@ -56,36 +66,43 @@ class SessionRepository(
         )
         return try {
             val refreshed = api.refresh(previous.token)
-            credentials.saveToken(account.accountId, refreshed.accessToken, parseExpiry(refreshed.expiresAt))
-            AuthLease(
-                token = refreshed.accessToken,
-                expiresAtMillis = parseExpiry(refreshed.expiresAt),
-                generation = credentials.generation.value,
-            )
-        } catch (e: Exception) {
-            // A failed refresh is terminal for this account: there is no refresh
-            // token to fall back on.
-            null
+            synchronized(credentials) {
+                requireGeneration(previous.generation)
+                val current = credentials.lease() ?: return null
+                if (current.token != previous.token) return current
+                credentials.saveToken(account.accountId, refreshed.accessToken, parseExpiry(refreshed.expiresAt))
+                credentials.lease()
+            }
+        } catch (e: ApiException) {
+            requireGeneration(previous.generation)
+            // A transport failure is retryable; only rejected credentials expire the login.
+            if (e.isUnauthorized) null else throw e
         }
     }
 
-    override fun onSessionExpired() {
+    private fun requireGeneration(expected: Long) {
+        if (generation != expected) throw CancellationException("Account changed during token refresh")
+    }
+
+    override fun onSessionExpired(generation: Long) = synchronized(credentials) {
+        if (this.generation != generation) return
         val accountId = credentials.activeAccountId() ?: return
         if (credentials.activeAccount()?.kind == "cloud") cloudAuth.clearSession()
         credentials.clearToken(accountId)
-        _state.value = _state.value.copy(loggedIn = false, sessionExpired = true)
+        _state.value = _state.value.copy(loggedIn = false, sessionExpired = true, generation = this.generation)
     }
 
     // -- account switching --------------------------------------------------
 
     /** Points the repository at an account and rebuilds its API surface. */
-    fun activate(account: StoredAccount) {
+    fun activate(account: StoredAccount) = synchronized(credentials) {
         credentials.setActiveAccount(account.accountId)
         if (account.kind == "cloud") cloudAuth.teamId = account.teamId
         _state.value = SessionState(
             loggedIn = if (account.kind == "cloud") cloudAuth.hasSession else credentials.token(account.accountId) != null,
             account = account,
             endpoint = endpointFor(account),
+            generation = generation,
         )
     }
 
@@ -114,17 +131,17 @@ class SessionRepository(
         cloudTeams().firstNotNullOfOrNull { it.team }?.let(::selectCloudTeam)
     }
 
-    fun signOut() {
+    fun signOut() = synchronized(credentials) {
         if (credentials.activeAccount()?.kind == "cloud") cloudAuth.clearSession()
         credentials.activeAccountId()?.let { credentials.clearToken(it) }
-        _state.value = SessionState()
+        _state.value = SessionState(generation = generation)
     }
 
     /** Removes an account entirely, including its stored token. */
-    fun removeAccount(accountId: String) {
+    fun removeAccount(accountId: String) = synchronized(credentials) {
         credentials.removeAccount(accountId)
         if (credentials.activeAccountId() == null) {
-            _state.value = SessionState()
+            _state.value = SessionState(generation = generation)
         }
     }
 
@@ -133,9 +150,10 @@ class SessionRepository(
     }
 
     /** Builds an API client for the active account, or null when signed out. */
-    fun api(): MemohApi? {
+    fun api(): MemohApi? = synchronized(credentials) {
+        if (!state.value.loggedIn || state.value.generation != generation) return null
         val account = credentials.activeAccount() ?: return null
-        return MemohApi(
+        MemohApi(
             client = httpClient,
             endpoint = endpointFor(account),
             json = json,
@@ -144,14 +162,11 @@ class SessionRepository(
         )
     }
 
-    /** Builds an API client for an arbitrary account (used before activation). */
-    fun apiFor(account: StoredAccount): MemohApi = MemohApi(
-        client = httpClient,
-        endpoint = endpointFor(account),
-        json = json,
-        auth = this,
-        cloudAuth = cloudAuth,
-    )
+    /** A client must never pair another account's endpoint with the active credentials. */
+    fun apiFor(account: StoredAccount): MemohApi = synchronized(credentials) {
+        require(account.accountId == credentials.activeAccountId()) { "请先切换到这个账号" }
+        api() ?: throw dev.memoh.core.network.SessionExpiredException()
+    }
 
     fun endpointFor(account: StoredAccount): ServerEndpoint =
         if (account.kind == "cloud") {
@@ -204,6 +219,8 @@ data class SessionState(
     val endpoint: ServerEndpoint? = null,
     /** True when the server rejected our credentials and the user must re-auth. */
     val sessionExpired: Boolean = false,
+    /** Identity snapshot so re-authenticating the same account also rebuilds its clients. */
+    val generation: Long = 0L,
 )
 
 /** Convenience: the bot list for the active account. */

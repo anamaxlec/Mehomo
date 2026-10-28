@@ -42,6 +42,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.automirrored.filled.Chat
 import dev.memoh.feature.chat.components.SessionContextIndicator
@@ -125,12 +128,18 @@ private fun LazyListScope.assistantMessages(
     messages: List<dev.memoh.core.model.UIMessage>,
     isRunning: Boolean,
     onToggleDetails: () -> Unit,
+    focusMessageIndex: Int? = null,
+    focusRevision: Int = 0,
+    onFocusHandled: () -> Unit = {},
 ) {
     val renderItems = assistantRenderItems(turnId, messages)
+    val focusItem = focusMessageIndex?.let { target -> renderItems.indexOfFirst { it.lastIndex >= target } }
     itemsIndexed(renderItems, key = { _, item -> item.key }) { index, item ->
         Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
             AssistantMessageItem(item, isStreaming = isRunning && index == renderItems.lastIndex,
-                isRunActive = isRunning, onToggleDetails = onToggleDetails)
+                isRunActive = isRunning, onToggleDetails = onToggleDetails,
+                focusMessage = if (index == focusItem) focusMessageIndex?.let(messages::getOrNull) else null,
+                focusRevision = focusRevision, onFocusHandled = onFocusHandled)
         }
     }
 }
@@ -172,11 +181,13 @@ fun ChatScreen(
     onNewSession: () -> Unit = {},
     onRefreshContext: () -> Unit = {},
     onInspectContext: () -> Unit = {},
+    onPinShortcut: (() -> Unit)? = null,
     onOpenFeature: (String) -> Unit = {},
     onRefreshSuggestions: () -> Unit = {},
     onConfigureExample: (String) -> Unit = {},
     onPickAttachment: (Boolean) -> Unit = {},
     onTakePhoto: () -> Unit = {},
+    onVoiceInput: (() -> Unit)? = null,
     onRemoveAttachment: (Int) -> Unit = {},
     onCancelAttachments: () -> Unit = {},
     onConfirmFolder: () -> Unit = {},
@@ -184,9 +195,16 @@ fun ChatScreen(
     onDismissCommandOutput: () -> Unit = {},
     onRefreshSlashCatalog: () -> Unit = {},
     onQuickAction: (String) -> Unit = {},
+    onToggleSavedTurn: (dev.memoh.core.model.UITurn) -> Unit = {},
+    onRemoveSavedItem: (dev.memoh.core.data.SavedChatItem) -> Unit = {},
+    onLoadSearchCache: suspend () -> List<dev.memoh.core.model.UITurn> = { emptyList() },
+    externalSearchHit: dev.memoh.core.model.ConversationMatch? = null,
+    externalCachedTurn: dev.memoh.core.model.UITurn? = null,
+    onExternalSearchConsumed: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
+    val chatContext = androidx.compose.ui.platform.LocalContext.current
     val errorActionHandler = dev.memoh.core.designsystem.component.LocalErrorActionHandler.current
     val scope = rememberCoroutineScope()
 
@@ -197,6 +215,10 @@ fun ChatScreen(
     val liveMessages = state.liveMessages
     val liveUsers = state.liveUserTurns
     val run = state.runtime.run
+    val savedTurns = remember(settled, liveUsers, run, liveMessages) { state.turnsForSavedItems() }
+    val savedTurnKeys = remember(state.savedItems, savedTurns) {
+        state.savedItems.mapNotNull { dev.memoh.core.data.resolveSavedChatTurn(it, savedTurns)?.listKey }.toSet()
+    }
     val composerAction = state.composerAction()
     fun runShortcut(action: ComposerQuickAction, openModelMenu: () -> Unit) {
         if (!state.composerAction(action.command).enabled) return
@@ -218,6 +240,15 @@ fun ChatScreen(
     }
     historyPlaceholder.targetState = showHistoryPlaceholder
     var followingLatest by rememberSaveable(state.session?.id) { mutableStateOf(true) }
+    var searchOpen by remember(state.session?.id) { mutableStateOf(false) }
+    var savedOpen by remember(state.session?.id) { mutableStateOf(false) }
+    var searchFocus by remember(state.session?.id) { mutableStateOf<ConversationHit?>(null) }
+    var searchFocusRevision by remember(state.session?.id) { mutableIntStateOf(0) }
+    var searchCache by remember(state.session?.id) { mutableStateOf<List<dev.memoh.core.model.UITurn>>(emptyList()) }
+    var cachedPreview by remember(state.session?.id) { mutableStateOf<Pair<dev.memoh.core.model.UITurn, ConversationHit>?>(null) }
+    LaunchedEffect(searchOpen, savedOpen, state.session?.id) {
+        if (searchOpen || savedOpen) searchCache = onLoadSearchCache()
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     var resumed by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
@@ -236,6 +267,38 @@ fun ChatScreen(
         { loading: Boolean -> loadingHistoryImages += if (loading) 1 else -1 }
     }
     val latestState by androidx.compose.runtime.rememberUpdatedState(state)
+    fun jumpToHit(hit: ConversationHit) {
+        searchOpen = false; savedOpen = false; followingLatest = false
+        scope.launch {
+            if (latestState.settledHistory.none { it.listKey == hit.turnKey }) {
+                val current = latestState
+                val userIndex = current.liveUserTurns.indexOfFirst { it.listKey == hit.turnKey }
+                if (userIndex >= 0) {
+                    listState.scrollToItem(conversationHistoryRowCount(current.settledHistory) + userIndex)
+                    return@launch
+                }
+                val liveRun = current.runtime.run
+                if (liveRun != null && current.liveMessages.isNotEmpty() && hit.turnKey == "assistant:${liveRun.turnId}") {
+                    val block = hit.messageIndex?.let { target ->
+                        assistantRenderItems(liveRun.turnId, current.liveMessages).indexOfFirst { it.lastIndex >= target }
+                    } ?: 0
+                    searchFocus = hit; searchFocusRevision++
+                    listState.scrollToItem(conversationHistoryRowCount(current.settledHistory) +
+                        current.liveUserTurns.size + current.pending.size + block.coerceAtLeast(0))
+                    return@launch
+                }
+                val cached = searchCache.firstOrNull { it.listKey == hit.turnKey }
+                    ?: onLoadSearchCache().firstOrNull { it.listKey == hit.turnKey }
+                if (cached != null) cachedPreview = cached to hit
+                else android.widget.Toast.makeText(chatContext, "消息未在已加载历史或本地缓存中", android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            searchFocus = hit
+            searchFocusRevision++
+            androidx.compose.runtime.withFrameNanos { }
+            conversationHitIndex(latestState.settledHistory, hit)?.let { listState.scrollToItem(it) }
+        }
+    }
     val loadOlder by androidx.compose.runtime.rememberUpdatedState(onLoadOlder)
     val historyScroll = remember(listState) {
         object : NestedScrollConnection {
@@ -265,6 +328,16 @@ fun ChatScreen(
             val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
             last == null || (last.index == listState.layoutInfo.totalItemsCount - 1 &&
                 last.offset + last.size <= listState.layoutInfo.viewportEndOffset + 12)
+        }
+    }
+    LaunchedEffect(externalSearchHit, state.session?.id, initiallyPositioned) {
+        val hit = externalSearchHit
+        if (hit != null && state.session != null && initiallyPositioned) {
+            val loaded = state.settledHistory.firstOrNull { it.listKey == hit.turnKey }
+            if (loaded != null && (externalCachedTurn == null || sameCachedSearchTarget(hit, externalCachedTurn, loaded))) jumpToHit(hit)
+            else if (externalCachedTurn?.listKey == hit.turnKey) cachedPreview = externalCachedTurn to hit
+            else jumpToHit(hit)
+            onExternalSearchConsumed()
         }
     }
     LaunchedEffect(dragging) {
@@ -303,6 +376,17 @@ fun ChatScreen(
             }
         }
     }
+    if (searchOpen) ConversationSearchDialog(mergeLatestHistory(searchCache, savedTurns), { searchOpen = false }, ::jumpToHit)
+    if (savedOpen) SavedItemsDialog(state.savedItems, { savedOpen = false }, { saved ->
+        savedOpen = false
+        scope.launch {
+            val target = dev.memoh.core.data.resolveSavedChatTurn(saved, latestState.turnsForSavedItems())
+                ?: dev.memoh.core.data.resolveSavedChatTurn(saved, searchCache.ifEmpty { onLoadSearchCache() })
+            if (target != null) jumpToHit(ConversationHit(target.listKey, null, "", ""))
+            else android.widget.Toast.makeText(chatContext, "消息未在已加载历史或本地缓存中", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }, onRemoveSavedItem)
+    cachedPreview?.let { (turn, hit) -> CachedTurnSheet(turn, hit, { cachedPreview = null }) }
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -324,6 +408,7 @@ fun ChatScreen(
                     )
                 },
                 actions = {
+                    IconButton(onClick = { searchOpen = true }) { Icon(Icons.Filled.Search, "查找会话") }
                     var moreOpen by remember { mutableStateOf(false) }
                     Box {
                         IconButton(onClick = { moreOpen = !moreOpen }, modifier = Modifier.semantics {
@@ -364,7 +449,9 @@ fun ChatScreen(
                                 }
                             }
                             MemohMenuDivider()
+                            MemohMenuRow("收藏", Icons.Filled.Bookmark, { moreOpen = false; savedOpen = true })
                             MemohMenuRow("会话控制", Icons.Filled.Tune, { moreOpen = false; onOpenControls() })
+                            onPinShortcut?.let { pin -> MemohMenuRow("固定到主屏幕", Icons.Filled.PushPin, { moreOpen = false; pin() }) }
                             MemohMenuRow("记忆", Icons.Filled.Psychology, { moreOpen = false; onOpenFeature("Memory") })
                             MemohMenuRow("日程", Icons.Filled.CalendarMonth, { moreOpen = false; onOpenFeature("Schedules") })
                         }
@@ -431,20 +518,29 @@ fun ChatScreen(
                                 val assistantKey = assistantKeys[turn.listKey] ?: turn.turnId
                                 if (turn.isAssistant && turn.safeMessages.isNotEmpty()) {
                                     assistantMessages(assistantKey, turn.safeMessages, isRunning = false,
-                                        onToggleDetails = { followingLatest = false })
+                                        onToggleDetails = { followingLatest = false },
+                                        focusMessageIndex = searchFocus?.takeIf { it.turnKey == turn.listKey }?.messageIndex,
+                                        focusRevision = searchFocusRevision, onFocusHandled = { searchFocus = null })
                                 } else item(key = "turn-${turn.listKey}") {
-                                    TurnItem(turn, Modifier.padding(top = 10.dp))
+                                    TurnItem(turn, Modifier.padding(top = 10.dp),
+                                        isSaved = turn.listKey in savedTurnKeys,
+                                        onSave = if (turn.isUser) {{ onToggleSavedTurn(turn) }} else null)
                                 }
                                 if (turn.isAssistant) item(key = "assistant-$assistantKey:actions") {
                                     MessageActions(replyCopyText(turn.safeMessages), turn.timestamp, assistant = true,
                                         enabled = !state.busy && !state.isRunning,
                                         retryEnabled = retryableRowKey == turn.listKey,
                                         onRetry = { onRegenerate(turn.turnId) },
-                                        onFork = if (state.canFork(turn)) {{ onFork(turn.turnId) }} else null)
+                                        onFork = if (state.canFork(turn)) {{ onFork(turn.turnId) }} else null,
+                                        isSaved = turn.listKey in savedTurnKeys,
+                                        onSave = { onToggleSavedTurn(turn) })
                                 }
                             }
 
-                            items(liveUsers, key = { "turn-${it.listKey}" }) { turn -> TurnItem(turn, Modifier.padding(top = 10.dp)) }
+                            items(liveUsers, key = { "turn-${it.listKey}" }) { turn ->
+                                TurnItem(turn, Modifier.padding(top = 10.dp), isSaved = turn.listKey in savedTurnKeys,
+                                    onSave = { onToggleSavedTurn(turn) })
+                            }
 
                             state.pending.forEach { pending ->
                                 item(key = "pending-${pending.invocationId}") {
@@ -456,7 +552,9 @@ fun ChatScreen(
                             // authoritative while it is in flight.
                             if (liveMessages.isNotEmpty() && run != null) {
                                 assistantMessages(run.turnId, liveMessages, isRunning = !run.isTerminal,
-                                    onToggleDetails = { followingLatest = false })
+                                    onToggleDetails = { followingLatest = false },
+                                    focusMessageIndex = searchFocus?.takeIf { it.turnKey == "assistant:${run.turnId}" }?.messageIndex,
+                                    focusRevision = searchFocusRevision, onFocusHandled = { searchFocus = null })
                                 item(key = "assistant-${run.turnId}:actions") {
                                     if (!run.isTerminal) Spacer(Modifier.height(MessageActionsHeight)) else {
                                     val turn = dev.memoh.core.model.UITurn(turnId = run.turnId, role = "assistant",
@@ -465,7 +563,9 @@ fun ChatScreen(
                                         enabled = !state.busy && !state.isRunning,
                                         retryEnabled = retryableTurnId == run.turnId,
                                         onRetry = { onRegenerate(run.turnId) },
-                                        onFork = if (state.canFork(turn)) {{ onFork(run.turnId) }} else null)
+                                        onFork = if (state.canFork(turn)) {{ onFork(run.turnId) }} else null,
+                                        isSaved = turn.listKey in savedTurnKeys,
+                                        onSave = { onToggleSavedTurn(turn) })
                                     }
                                 }
                             }
@@ -573,6 +673,7 @@ fun ChatScreen(
                         Composer(
                             text = state.draft,
                             onTextChange = onDraftChange,
+                            onVoiceInput = onVoiceInput,
                             onSend = { openModelMenu ->
                                 val shortcut = state.composerQuickAction(state.draft)
                                 if (composerAction.kind == ComposerActionKind.QuickAction && shortcut != null)

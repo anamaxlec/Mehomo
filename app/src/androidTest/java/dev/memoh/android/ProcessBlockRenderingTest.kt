@@ -186,7 +186,7 @@ class ProcessBlockRenderingTest {
         restoration.emulateSavedInstanceStateRestore()
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithContentDescription("正在加载会话").assertDoesNotExist()
-        compose.onNodeWithText("运行中").assertIsDisplayed()
+        compose.onNodeWithText("执行中 · 3 秒").assertIsDisplayed()
         compose.onNodeWithText("fun main() = println(\"Hello\")").assertIsDisplayed()
         compose.mainClock.autoAdvance = true
     }

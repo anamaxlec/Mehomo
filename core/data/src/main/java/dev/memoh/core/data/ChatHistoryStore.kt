@@ -2,6 +2,7 @@ package dev.memoh.core.data
 
 import dev.memoh.core.model.Session
 import dev.memoh.core.model.UITurn
+import dev.memoh.core.model.searchTurns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -50,9 +51,8 @@ class ChatHistoryStore(private val root: File, private val json: Json) {
     suspend fun list(account: String, team: String, query: String = ""): List<CachedChat> = withContext(Dispatchers.IO) { lock.withLock {
         folder(account, team).listFiles().orEmpty().filter { it.extension == "json" }.mapNotNull {
             runCatching { json.decodeFromString<CachedChat>(it.readText()) }.getOrNull()
-        }.filter { chat -> query.isBlank() || chat.session.title.orEmpty().contains(query, true) || chat.turns.any { turn ->
-            turn.text.orEmpty().contains(query, true) || turn.messages.orEmpty().any { it.content.orEmpty().contains(query, true) }
-        } }.sortedByDescending { it.syncedAt }
+        }.filter { chat -> query.isBlank() || chat.session.title.orEmpty().contains(query, true) || searchTurns(chat.turns, query).isNotEmpty() }
+            .sortedByDescending { it.syncedAt }
     } }
     suspend fun clear(account: String, team: String) = withContext(Dispatchers.IO) { lock.withLock {
         folder(account, team).listFiles().orEmpty().filter { it.name != "options" }.forEach { it.delete() }

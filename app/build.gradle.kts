@@ -20,8 +20,8 @@ android {
     applicationId = "dev.memoh.android"
     minSdk = 26
     targetSdk = 36
-    versionCode = 44
-    versionName = "0.1.20"
+    versionCode = 47
+    versionName = "0.1.21"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     vectorDrawables { useSupportLibrary = true }
   }

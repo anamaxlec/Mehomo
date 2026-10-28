@@ -15,7 +15,7 @@ class ManagementApiTest {
     private val auth = object : AuthProvider {
         override fun currentLease() = AuthLease("test-token", null, 1)
         override suspend fun refresh(previous: AuthLease) = null
-        override fun onSessionExpired() = Unit
+        override fun onSessionExpired(generation: Long) = Unit
     }
     @Before fun setup() { server = MockWebServer(); server.start() }
     @After fun cleanup() { server.shutdown() }

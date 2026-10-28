@@ -16,6 +16,15 @@ internal fun assistantHistoryKeys(history: List<UITurn>): Map<String, String> {
     }
 }
 
+/** The live row can be saved before the corresponding REST history record arrives. */
+internal fun ChatUiState.turnsForSavedItems(): List<UITurn> = buildList {
+    addAll(settledHistory)
+    addAll(liveUserTurns)
+    runtime.run?.takeIf { liveMessages.isNotEmpty() }?.let { run ->
+        add(UITurn(run.turnId, role = "assistant", timestamp = run.updatedAt.orEmpty(), messages = liveMessages))
+    }
+}
+
 /** Refresh the newest page without removing pages the reader has already opened. */
 internal fun mergeLatestHistory(current: List<UITurn>, latest: List<UITurn>): List<UITurn> {
     if (latest.isEmpty()) return current

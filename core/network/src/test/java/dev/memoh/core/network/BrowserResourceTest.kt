@@ -215,7 +215,7 @@ class BrowserResourceTest {
             val auth = object : AuthProvider {
                 override fun currentLease() = AuthLease(token, null, 1)
                 override suspend fun refresh(previous: AuthLease): AuthLease { token = "new"; return currentLease() }
-                override fun onSessionExpired() { expired = true }
+                override fun onSessionExpired(generation: Long) { expired = true }
             }
             val api = MemohApi(OkHttpClient(), endpoint(server), json, auth)
             server.enqueue(MockResponse().setResponseCode(401))

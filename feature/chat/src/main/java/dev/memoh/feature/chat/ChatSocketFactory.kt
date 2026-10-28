@@ -45,7 +45,9 @@ class ChatSocketFactory @Inject constructor(
             json = json,
             scope = scope,
             buildRequest = {
-                if (resolved.isCloud) {
+                if (api != null) {
+                    api.chatSocketRequest(botId)
+                } else if (resolved.isCloud) {
                     try {
                         cloudAuth.authorize(Request.Builder().url(cloudAuth.webSocketUrl(botId))).build()
                     } catch (e: dev.memoh.core.network.ApiException) {

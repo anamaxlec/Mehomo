@@ -2,22 +2,33 @@ package dev.memoh.android.notifications
 
 import dev.memoh.core.model.*
 import dev.memoh.core.network.RuntimeReducer
+import kotlinx.serialization.Serializable
 
 data class TrackedTask(val runId: String, val phase: String, val terminal: Boolean,
     val startedAt: String?, val decisionId: String? = null)
 
 data class TaskUpdate(val task: TrackedTask?, val alert: Boolean = false)
 
+@Serializable
+data class TaskRunCheckpoint(val runId: String, val alerted: Set<String> = emptySet())
+
 /** Keeps server cursors and notification identities across transport reconnects. */
-class TaskTracker {
+class TaskTracker(checkpoint: Map<String, TaskRunCheckpoint> = emptyMap()) {
     val states = mutableMapOf<String, RuntimeState>()
-    private val activeRuns = mutableSetOf<String>()
-    private val alerted = mutableSetOf<String>()
+    private var tracked = checkpoint.toMap()
     private val displayed = mutableMapOf<String, TrackedTask>()
 
     fun disconnected() { states.replaceAll { _, state -> state.copy(needsSnapshot = true) }; displayed.clear() }
     fun activeTasks(): Map<String, TrackedTask> = displayed.filterValues { !it.terminal }
-    fun accepted(runId: String) { activeRuns.add(runId) }
+    fun checkpoint(): Map<String, TaskRunCheckpoint> = tracked
+    fun accepted(sessionId: String, runId: String) {
+        if (tracked[sessionId]?.runId != runId) tracked = tracked + (sessionId to TaskRunCheckpoint(runId))
+    }
+    fun forget(sessionId: String) {
+        states.remove(sessionId)
+        displayed.remove(sessionId)
+        tracked = tracked - sessionId
+    }
 
     fun apply(event: UIStreamEvent): TaskUpdate? {
         val session = event.sessionId ?: return null
@@ -56,9 +67,9 @@ class TaskTracker {
             else -> "执行中"
         }
         // Never announce historic terminal runs discovered on the first snapshot.
-        if (run.isTerminal && run.runId !in activeRuns)
+        if (run.isTerminal && tracked[session]?.runId != run.runId)
             return if (displayed.remove(session) != null) TaskUpdate(null) else null
-        if (!run.isTerminal) activeRuns.add(run.runId)
+        if (!run.isTerminal) accepted(session, run.runId)
         val task = TrackedTask(run.runId, phase, run.isTerminal, run.startedAt, decision)
         if (displayed[session] == task) return null
         displayed[session] = task
@@ -67,6 +78,9 @@ class TaskTracker {
             decision != null -> "${run.runId}:$decision"
             else -> null
         }
-        return TaskUpdate(task, alertKey != null && alerted.add(alertKey))
+        val known = tracked.getValue(session)
+        val alert = alertKey != null && alertKey !in known.alerted
+        if (alert) tracked = tracked + (session to known.copy(alerted = known.alerted + alertKey!!))
+        return TaskUpdate(task, alert)
     }
 }

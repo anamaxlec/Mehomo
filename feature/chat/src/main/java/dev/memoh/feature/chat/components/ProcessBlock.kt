@@ -71,6 +71,9 @@ fun ProcessBlock(
     isRunActive: Boolean,
     modifier: Modifier = Modifier,
     onToggleDetails: () -> Unit = {},
+    focusMessage: UIMessage? = null,
+    focusRevision: Int = 0,
+    onFocusHandled: () -> Unit = {},
 ) {
     if (messages.isEmpty()) return
     var expanded by rememberSaveable { mutableStateOf(false) }
@@ -80,6 +83,14 @@ fun ProcessBlock(
         val ordinal = ordinals.getOrDefault(message.type, 0)
         ordinals[message.type] = ordinal + 1
         message.toolCallId.takeIf(String::isNotBlank) ?: "${message.type}:$ordinal"
+    }
+    LaunchedEffect(focusRevision, focusMessage) {
+        val index = focusMessage?.let(messages::indexOf) ?: -1
+        if (focusMessage != null && index >= 0) {
+            expanded = true
+            if (messages.size > 1) openSteps = openSteps + (keys[index] to true)
+            onFocusHandled()
+        }
     }
     Column(modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
         if (messages.size == 1) {

@@ -82,7 +82,7 @@ class OffMainThreadTest {
         auth = object : AuthProvider {
             override fun currentLease() = AuthLease("token", null, generation = 1L)
             override suspend fun refresh(previous: AuthLease) = previous
-            override fun onSessionExpired() = Unit
+            override fun onSessionExpired(generation: Long) = Unit
         },
     )
 

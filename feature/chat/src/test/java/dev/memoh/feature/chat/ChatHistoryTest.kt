@@ -9,6 +9,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ChatHistoryTest {
+    @Test fun `a saved live reply resolves to the newest persisted record for its turn`() {
+        val provisional = dev.memoh.core.data.SavedChatItem("bot", "session", "assistant:turn", "回复", provisionalTurnId = "turn")
+        val older = UITurn("turn", id = "old", role = "assistant")
+        val latest = older.copy(id = "new")
+        assertEquals(latest, dev.memoh.core.data.resolveSavedChatTurn(provisional, listOf(older, latest)))
+        val exact = provisional.copy(turnKey = older.listKey, provisionalTurnId = null)
+        assertEquals(older, dev.memoh.core.data.resolveSavedChatTurn(exact, listOf(older, latest)))
+    }
+
     @Test fun `completed runtime cannot replace published history with original workspace image text`() {
         val archived = "![产物](/bots/b/media/${"a".repeat(64)})"
         val persisted = UITurn("turn", id = "persisted", role = "assistant",

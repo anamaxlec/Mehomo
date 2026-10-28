@@ -17,11 +17,13 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.utf8Size
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /** Connection lifecycle, surfaced to the UI as a status indicator. */
 enum class SocketStatus { Idle, Connecting, Connected, Reconnecting, Closed }
+enum class SocketSendResult { Queued, TooLarge, Closed }
 
 /**
  * The bot-level chat socket.
@@ -58,7 +60,8 @@ class ChatSocket(
     private var status: SocketStatus = SocketStatus.Idle
 
     /** Frames awaiting an ack, keyed by [WSClientMessage.reliableKey]. */
-    private val pending = ConcurrentHashMap<String, String>()
+    private class PendingFrame(val payload: String, var sentOn: WebSocket? = null)
+    private val pending = ConcurrentHashMap<String, PendingFrame>()
 
     /** Fire-and-forget frames queued while offline, flushed on connect. */
     private val sendQueue = Channel<String>(Channel.UNLIMITED)
@@ -172,26 +175,36 @@ class ChatSocket(
 
     // -- sending ------------------------------------------------------------
 
-    fun send(message: WSClientMessage) {
+    /** Reject frames that cannot fit in OkHttp's WebSocket queue before recording them. */
+    fun send(message: WSClientMessage): SocketSendResult {
+        if (closed) return SocketSendResult.Closed
         val payload = json.encodeToString(WSClientMessage.serializer(), message)
+        if (payload.utf8Size() > MAX_MESSAGE_BYTES) return SocketSendResult.TooLarge
         val key = message.reliableKey
-        if (key != null) {
+        val frame = key?.let {
             // Remember before sending: the ack can arrive before this returns.
-            pending[key] = payload
+            PendingFrame(payload).also { frame -> pending[it] = frame }
         }
-        scope.launch { deliver(payload, message.isReliable) }
+        scope.launch { deliver(payload, key, frame) }
+        return SocketSendResult.Queued
     }
 
-    private suspend fun deliver(payload: String, reliable: Boolean) {
-        val current = mutex.withLock { socket }
-        if (current != null && status == SocketStatus.Connected) {
-            current.send(payload)
-        } else if (!reliable) {
-            // Non-reliable frames are queued for the next connect. Reliable ones
-            // live in `pending` and are replayed from there, so queueing them
-            // too would double-send.
-            sendQueue.send(payload)
+    private suspend fun deliver(payload: String, key: String?, frame: PendingFrame?) {
+        mutex.withLock {
+            val current = socket
+            if (current != null && status == SocketStatus.Connected) {
+                if (key == null) current.send(payload)
+                else if (frame != null && pending[key] === frame) sendPending(current, frame)
+            } else if (key == null) {
+                // Reliable frames already live in `pending` for the next connect.
+                sendQueue.send(payload)
+            }
         }
+    }
+
+    /** Called under [mutex] so an onOpen replay and a queued delivery cannot race. */
+    private fun sendPending(webSocket: WebSocket, frame: PendingFrame) {
+        if (frame.sentOn !== webSocket && webSocket.send(frame.payload)) frame.sentOn = webSocket
     }
 
     /** Aborts the run currently occupying a session. */
@@ -262,7 +275,7 @@ class ChatSocket(
 
                     // 1. Replay unacknowledged reliable frames. The server
                     //    deduplicates on their ids.
-                    pending.values.forEach { webSocket.send(it) }
+                    pending.values.forEach { sendPending(webSocket, it) }
 
                     // 2. Flush queued fire-and-forget frames.
                     while (true) {
@@ -370,6 +383,8 @@ class ChatSocket(
 
     companion object {
         private const val NORMAL_CLOSURE = 1000
+        // OkHttp closes the WebSocket if its send queue grows beyond 16 MiB.
+        private const val MAX_MESSAGE_BYTES = 16L * 1024 * 1024
         private const val INITIAL_RECONNECT_MS = 1_000L
         private const val RECONNECT_BACKOFF = 1.5
         private const val MAX_RECONNECT_MS = 10_000L

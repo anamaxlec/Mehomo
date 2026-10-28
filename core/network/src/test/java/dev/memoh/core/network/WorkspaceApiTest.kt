@@ -18,7 +18,7 @@ class WorkspaceApiTest {
     private val auth = object : AuthProvider {
         override fun currentLease() = AuthLease("test-token", null, 1)
         override suspend fun refresh(previous: AuthLease) = null
-        override fun onSessionExpired() = Unit
+        override fun onSessionExpired(generation: Long) = Unit
     }
     private fun api(server: MockWebServer) = MemohApi(OkHttpClient(), ServerEndpoint(ServerKind.SelfHosted,
         server.url("/").toString().trimEnd('/'), "", ""), json, auth)

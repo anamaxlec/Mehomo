@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
@@ -123,6 +124,7 @@ fun Composer(
     /** Queue chips, decisions and run status above the composer. */
     above: @Composable (openModelMenu: () -> Unit) -> Unit = {},
     onAttachClick: (() -> Unit)? = null,
+    onVoiceInput: (() -> Unit)? = null,
     /** The model and reasoning effort in use, shown inside the field. */
     modelLabel: String? = null,
     modelLoading: Boolean = false,
@@ -202,7 +204,7 @@ fun Composer(
                 // One editor stays composed in both layouts, preserving text,
                 // selection and IME focus while controls move to the bottom row.
                 Box(Modifier.fillMaxWidth()) {
-                    val compactStart = if (onAttachClick != null) 48.dp else 0.dp
+                    val compactStart = (if (onAttachClick != null) 48.dp else 0.dp) + (if (onVoiceInput != null) 48.dp else 0.dp)
                     val compactEnd = if (onModelClick != null) 102.dp else 48.dp
                     MemohComposerTextField(
                         value = text, onValueChange = onTextChange, enabled = textEnabled,
@@ -225,6 +227,12 @@ fun Composer(
                             )
                             plusMenu?.invoke(plusOpen) { plusOpen = false }
                         }
+                        if (onVoiceInput != null) MemohComposerIconButton(
+                            icon = Icons.Filled.Mic,
+                            contentDescription = "语音输入",
+                            enabled = textEnabled,
+                            onClick = onVoiceInput,
+                        )
                         if (onModelClick != null) {
                             Box(Modifier.weight(1f).heightIn(min = 48.dp), contentAlignment = Alignment.CenterEnd) {
                                 Box {

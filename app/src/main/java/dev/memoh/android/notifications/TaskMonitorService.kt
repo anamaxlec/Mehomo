@@ -16,6 +16,11 @@ import dev.memoh.feature.chat.ChatSocketFactory
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
+import java.io.File
+import java.io.IOException
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -25,19 +30,24 @@ class TaskMonitorService : Service() {
     @Inject lateinit var socketFactory: ChatSocketFactory
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var notifications: TaskNotifications
+    private lateinit var checkpoints: TaskCheckpointStore
     private var started = false
     private val unpromotedRuns = mutableSetOf<String>()
     private val redraws = Channel<Unit>(Channel.CONFLATED)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onCreate() { super.onCreate(); notifications = TaskNotifications(this) }
+    override fun onCreate() {
+        super.onCreate()
+        notifications = TaskNotifications(this)
+        checkpoints = TaskCheckpointStore(File(noBackupFilesDir, "task-monitor"), Json { ignoreUnknownKeys = true })
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == UNPIN) {
             intent.getStringExtra("run_id")?.let { unpromotedRuns.add(it); redraws.trySend(Unit) }
             if (!started) stopSelf()
-            return START_NOT_STICKY
+            return if (started) START_STICKY else START_NOT_STICKY
         }
         if (intent?.action == STOP) {
             scope.launch { settings.setBackgroundMonitor(false); stopSelf() }
@@ -60,7 +70,7 @@ class TaskMonitorService : Service() {
                 }
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun status(text: String) {
@@ -73,7 +83,14 @@ class TaskMonitorService : Service() {
     private suspend fun monitor(account: String, bot: String) = coroutineScope {
         val generation = repository.generation
         val api = repository.api() ?: return@coroutineScope
-        val tracker = TaskTracker()
+        val tracker = TaskTracker(checkpoints.read(account, bot))
+        val updates = Mutex()
+        suspend fun saveCheckpoint(previous: Map<String, TaskRunCheckpoint>) {
+            val checkpoint = tracker.checkpoint()
+            if (checkpoint == previous) return
+            try { checkpoints.save(account, bot, checkpoint) }
+            catch (_: IOException) { status("任务监控正常，恢复记录暂未保存") }
+        }
         val sessions = mutableMapOf<String, Session>()
         val refreshes = Channel<Unit>(Channel.CONFLATED)
         var connected = false
@@ -105,10 +122,15 @@ class TaskMonitorService : Service() {
                 if (!notifications.allowed) { settings.setBackgroundMonitor(false); return@launch }
                 val id = event.sessionId ?: return@launch
                 if (id !in sessions) return@launch
-                val update = tracker.apply(event)
-                if (tracker.states[id]?.needsSnapshot == true)
-                    socket?.send(WSClientMessage(type = WSClientMessage.RUNTIME_SUBSCRIBE, sessionId = id))
-                update?.let { post(id, it.task, it.alert) }
+                updates.withLock {
+                    if (!current()) return@withLock
+                    val previous = tracker.checkpoint()
+                    val update = tracker.apply(event)
+                    if (tracker.states[id]?.needsSnapshot == true)
+                        socket?.send(WSClientMessage(type = WSClientMessage.RUNTIME_SUBSCRIBE, sessionId = id))
+                    saveCheckpoint(previous)
+                    if (current()) update?.let { post(id, it.task, it.alert) }
+                }
             } }, onStatus = { socketStatus -> launch {
                 if (!current()) return@launch
                 connected = socketStatus == SocketStatus.Connected
@@ -124,12 +146,18 @@ class TaskMonitorService : Service() {
             launch {
                 RuntimeMonitorEvents.accepted.collect { event ->
                     if (event.accountId == account && event.botId == bot && current()) {
-                        tracker.accepted(event.runId)
-                        admittedSessions.add(event.session.id)
-                        sessions.putIfAbsent(event.session.id, event.session)
-                        socket?.observeSessions(sessions.keys.toSet())
-                        // This also covers a completion arriving before sidebar discovery.
-                        socket?.send(WSClientMessage(type = WSClientMessage.RUNTIME_SUBSCRIBE, sessionId = event.session.id))
+                        updates.withLock {
+                            if (!current()) return@withLock
+                            val previous = tracker.checkpoint()
+                            tracker.accepted(event.session.id, event.runId)
+                            saveCheckpoint(previous)
+                            if (!current()) return@withLock
+                            admittedSessions.add(event.session.id)
+                            sessions.putIfAbsent(event.session.id, event.session)
+                            socket?.observeSessions(sessions.keys.toSet())
+                            // This also covers a completion arriving before sidebar discovery.
+                            socket?.send(WSClientMessage(type = WSClientMessage.RUNTIME_SUBSCRIBE, sessionId = event.session.id))
+                        }
                     }
                 }
             }
@@ -154,12 +182,20 @@ class TaskMonitorService : Service() {
                                 cursor = next
                             } while (cursor != null)
                             if (!current()) return@launch
-                            admittedSessions.removeAll(fetched.keys)
-                            admittedSessions.forEach { id -> sessions[id]?.let { fetched[id] = it } }
-                            (sessions.keys - fetched.keys).forEach { notifications.cancelTask(account, bot, it); tracker.states.remove(it) }
-                            sessions.clear(); sessions.putAll(fetched)
-                            indexed = true
-                            socket?.observeSessions(sessions.keys.toSet())
+                            updates.withLock {
+                                if (!current()) return@launch
+                                val previous = tracker.checkpoint()
+                                admittedSessions.removeAll(fetched.keys)
+                                admittedSessions.forEach { id -> sessions[id]?.let { fetched[id] = it } }
+                                (tracker.checkpoint().keys + sessions.keys - fetched.keys).forEach {
+                                    notifications.cancelTask(account, bot, it); tracker.forget(it)
+                                }
+                                sessions.clear(); sessions.putAll(fetched)
+                                saveCheckpoint(previous)
+                                if (!current()) return@launch
+                                indexed = true
+                                socket?.observeSessions(sessions.keys.toSet())
+                            }
                             report(); break
                         } catch (e: CancellationException) { throw e }
                         catch (_: Exception) { status("会话列表加载失败，正在重试"); delay(5000) }

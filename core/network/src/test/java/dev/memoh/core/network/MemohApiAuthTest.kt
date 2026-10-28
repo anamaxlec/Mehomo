@@ -115,19 +115,19 @@ class MemohApiAuthTest {
     ) : AuthProvider {
         val refreshCount = AtomicInteger(0)
         val expiredCount = AtomicInteger(0)
-        var lastLease: AuthLease? = AuthLease(token, expiresAt, generation = 1L)
+        @Volatile var lastLease: AuthLease? = AuthLease(token, expiresAt, generation = 1L)
 
         override fun currentLease(): AuthLease? = lastLease
 
         override suspend fun refresh(previous: AuthLease): AuthLease? {
             refreshCount.incrementAndGet()
             val next = refreshed ?: return null
-            val lease = AuthLease(next, null, previous.generation + 1)
+            val lease = AuthLease(next, null, previous.generation)
             lastLease = lease
             return lease
         }
 
-        override fun onSessionExpired() {
+        override fun onSessionExpired(generation: Long) {
             expiredCount.incrementAndGet()
         }
     }

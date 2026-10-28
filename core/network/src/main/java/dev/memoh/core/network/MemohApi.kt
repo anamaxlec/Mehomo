@@ -18,6 +18,7 @@ import dev.memoh.core.model.Workdir
 import dev.memoh.core.model.WorkdirsResponse
 import dev.memoh.core.model.WorkspaceTargetsResponse
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -79,6 +80,9 @@ data class AuthLease(
 
 /** Supplies and refreshes credentials. Implemented by the data layer. */
 interface AuthProvider {
+    /** Account identity, unchanged by a token refresh. Cloud sessions have no bearer lease. */
+    val generation: Long get() = currentLease()?.generation ?: 0L
+
     /** Current lease, or null when logged out. */
     fun currentLease(): AuthLease?
 
@@ -88,8 +92,8 @@ interface AuthProvider {
      */
     suspend fun refresh(previous: AuthLease): AuthLease?
 
-    /** Invoked when the session is definitively gone. */
-    fun onSessionExpired()
+    /** Expires only the account generation that sent the rejected request. */
+    fun onSessionExpired(generation: Long)
 }
 
 /**
@@ -112,14 +116,38 @@ class MemohApi(
     private val cloudAuth: CloudAuth? = null,
 ) {
     private val refreshMutex = Mutex()
+    private val authGeneration = auth?.generation
+
+    private fun requireCurrentAccount() {
+        if (auth != null && auth.generation != authGeneration) {
+            throw CancellationException("Account changed while the request was in flight")
+        }
+    }
+
+    private fun expireSession(): Nothing {
+        requireCurrentAccount()
+        invalidateSession()
+        throw SessionExpiredException()
+    }
+
+    /** Close a late response instead of letting it affect the next account. */
+    private fun Response.forCurrentAccount(): Response = try {
+        requireCurrentAccount()
+        this
+    } catch (e: CancellationException) {
+        close()
+        throw e
+    }
 
     /**
      * The bearer token for a WebSocket handshake. Headers are the only safe
      * carrier — a URL would leak the credential into logs.
      */
-    fun bearerToken(): String? = auth?.currentLease()?.token
+    fun bearerToken(): String? { requireCurrentAccount(); return auth?.currentLease()?.token }
 
     suspend fun freshBearerToken(): String = freshLease().token
+
+    suspend fun chatSocketRequest(botId: String): Request = socketRequest("/bots/$botId/web/ws")
 
     /** Refresh this long before expiry to stay ahead of clock skew. */
     private val refreshSkewMillis = 60_000L
@@ -259,6 +287,7 @@ class MemohApi(
         if (sameOrigin && endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
         var lease = if (sameOrigin && !endpoint.isCloud) freshLease() else null
         fun sendMedia(): Response {
+            requireCurrentAccount()
             val builder = Request.Builder().url(url).header("Accept", "image/*, application/octet-stream")
             if (sameOrigin) {
                 if (endpoint.isCloud) cloudAuth?.authorize(builder)
@@ -267,21 +296,19 @@ class MemohApi(
             val http = (if (sameOrigin) networkClient.newBuilder() else client.newBuilder()
                 .cookieJar(okhttp3.CookieJar.NO_COOKIES))
                 .followRedirects(false).followSslRedirects(false).build()
-            return http.newCall(builder.build()).execute()
+            return http.newCall(builder.build()).execute().forCurrentAccount()
         }
         var response = sendMedia()
         if (sameOrigin && response.code == 401) {
             response.close()
             if (endpoint.isCloud) {
-                auth?.onSessionExpired()
-                throw SessionExpiredException()
+                expireSession()
             }
             lease = refreshOnce(lease)
             response = sendMedia()
             if (response.code == 401) {
                 response.close()
-                auth?.onSessionExpired()
-                throw SessionExpiredException()
+                expireSession()
             }
         }
         response.use {
@@ -291,6 +318,7 @@ class MemohApi(
             val source = body.source()
             source.request(maxBytes + 1)
             require(source.buffer.size <= maxBytes) { "文件超过 20 MB" }
+            requireCurrentAccount()
             source.readByteArray()
         }
     }
@@ -317,6 +345,7 @@ class MemohApi(
         url: okhttp3.HttpUrl, method: String, headers: Map<String, String>, websiteCookies: okhttp3.CookieJar, includeAccount: Boolean,
         body: okhttp3.RequestBody?,
     ): Response = withContext(Dispatchers.IO) {
+        requireCurrentAccount()
         val origin = endpoint.origin.toHttpUrl()
         val authenticated = includeAccount && url.scheme == origin.scheme && url.host == origin.host && url.port == origin.port
         if (authenticated && endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
@@ -324,6 +353,7 @@ class MemohApi(
         val http = (if (authenticated && endpoint.isCloud) networkClient.newBuilder() else client.newBuilder().cookieJar(websiteCookies))
             .followRedirects(false).followSslRedirects(false).cache(null).build()
         fun sendResource(token: AuthLease?): Response {
+            requireCurrentAccount()
             val builder = Request.Builder().url(url).method(method, body)
             // WebView owns these request preferences; account and transport headers stay native.
             headers.filterKeys { it.lowercase() in setOf("accept", "accept-language", "user-agent", "range") ||
@@ -333,19 +363,17 @@ class MemohApi(
                 if (endpoint.isCloud) cloudAuth?.authorize(builder)
                 else token?.let { builder.header("Authorization", "Bearer ${it.token}") }
             }
-            return http.newCall(builder.build()).execute()
+            return http.newCall(builder.build()).execute().forCurrentAccount()
         }
         var response = sendResource(lease)
         if (authenticated && !endpoint.isCloud && response.code == 401) {
-            val refreshed = try { refreshMutex.withLock {
-                val current = auth?.currentLease()
-                if (current != null && current.token != lease?.token) current else current?.let { auth?.refresh(it) }
-            } } catch (e: Exception) { response.close(); throw e }
+            val refreshed = try { tryRefreshOnce(lease) }
+                catch (e: Exception) { response.close(); throw e }
             // A workspace website can return its own 401. Failed preview auth must
             // not invalidate an otherwise usable application login.
             if (refreshed != null) { response.close(); response = sendResource(refreshed) }
         }
-        response
+        response.forCurrentAccount()
     }
 
     /** Multipart uploads share the same refresh and account headers as JSON. */
@@ -353,17 +381,18 @@ class MemohApi(
         if (endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
         var lease = if (!endpoint.isCloud) freshLease() else null
         fun upload() = networkClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
-            .newCall(request(path, "POST", null, lease).newBuilder().post(body).build()).execute()
+            .newCall(request(path, "POST", null, lease).newBuilder().post(body).build()).execute().forCurrentAccount()
         var response = upload()
         if (response.code == 401) {
             response.close()
-            if (endpoint.isCloud) { auth?.onSessionExpired(); throw SessionExpiredException() }
+            if (endpoint.isCloud) expireSession()
             lease = refreshOnce(lease)
             response = upload()
-            if (response.code == 401) { response.close(); auth?.onSessionExpired(); throw SessionExpiredException() }
+            if (response.code == 401) { response.close(); expireSession() }
         }
         response.use {
             val text = it.body?.string().orEmpty()
+            requireCurrentAccount()
             if (!it.isSuccessful) throw ApiException(it.code, text, "上传失败（HTTP ${it.code}）")
             json.parseToJsonElement(text)
         }
@@ -373,19 +402,20 @@ class MemohApi(
         if (endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
         var lease = if (!endpoint.isCloud) freshLease() else null
         fun sendBody() = networkClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
-            .newCall(request(path, "POST", null, lease).newBuilder().post(body).build()).execute()
+            .newCall(request(path, "POST", null, lease).newBuilder().post(body).build()).execute().forCurrentAccount()
         var response = sendBody()
         if (response.code == 401) {
             response.close()
-            if (endpoint.isCloud) { auth?.onSessionExpired(); throw SessionExpiredException() }
+            if (endpoint.isCloud) expireSession()
             lease = refreshOnce(lease); response = sendBody()
-            if (response.code == 401) { response.close(); auth?.onSessionExpired(); throw SessionExpiredException() }
+            if (response.code == 401) { response.close(); expireSession() }
         }
         response.use {
             if (!it.isSuccessful) throw ApiException(it.code, it.body.string(), "请求失败（HTTP ${it.code}）")
             val source = it.body.source()
             source.request(limitBytes + 1)
             require(source.buffer.size <= limitBytes) { "返回的文件超过 ${limitBytes / 1024 / 1024} MB" }
+            requireCurrentAccount()
             it.body.contentType()?.toString().orEmpty().substringBefore(';').ifBlank { "audio/mpeg" } to source.readByteArray()
         }
     }
@@ -458,6 +488,7 @@ class MemohApi(
         authenticated: Boolean = true,
         deserializer: kotlinx.serialization.KSerializer<T>,
     ): T = withContext(Dispatchers.IO) {
+        requireCurrentAccount()
         if (authenticated && endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
         var lease = if (authenticated && !endpoint.isCloud) freshLease() else null
         var response = send(path, method, body, lease)
@@ -465,8 +496,7 @@ class MemohApi(
         if (authenticated && response.code == 401) {
             response.close()
             if (endpoint.isCloud) {
-                auth?.onSessionExpired()
-                throw SessionExpiredException()
+                expireSession()
             }
             // One refresh, then one retry. A second 401 means the credentials
             // are genuinely gone, not merely stale.
@@ -474,13 +504,13 @@ class MemohApi(
             response = send(path, method, body, lease)
             if (response.code == 401) {
                 response.close()
-                auth?.onSessionExpired()
-                throw SessionExpiredException()
+                expireSession()
             }
         }
 
         response.use {
             val text = it.body?.string().orEmpty()
+            requireCurrentAccount()
             if (!it.isSuccessful) {
                 throw ApiException(it.code, text, "$method $path failed: ${it.code}")
             }
@@ -491,8 +521,10 @@ class MemohApi(
 
     /** Returns a lease that is valid now, refreshing pre-emptively if needed. */
     private suspend fun freshLease(): AuthLease {
+        requireCurrentAccount()
         val provider = auth ?: throw SessionExpiredException()
         val current = provider.currentLease() ?: throw SessionExpiredException()
+        requireCurrentAccount()
         val expires = current.expiresAtMillis
         if (expires == null || expires - System.currentTimeMillis() > refreshSkewMillis) {
             return current
@@ -504,18 +536,25 @@ class MemohApi(
      * Serialises refresh: concurrent callers queue behind one refresh and then
      * reuse its result, rather than each firing their own.
      */
-    private suspend fun refreshOnce(previous: AuthLease?): AuthLease {
+    private suspend fun refreshOnce(previous: AuthLease?): AuthLease =
+        tryRefreshOnce(previous) ?: expireSession()
+
+    private suspend fun tryRefreshOnce(previous: AuthLease?): AuthLease? {
         val provider = auth ?: throw SessionExpiredException()
         return refreshMutex.withLock {
+            requireCurrentAccount()
             // Another coroutine may have refreshed while we waited.
             val latest = provider.currentLease()
+            requireCurrentAccount()
             if (previous != null && latest != null && latest.token != previous.token) {
                 return@withLock latest
             }
             val base = latest ?: previous ?: throw SessionExpiredException()
-            provider.refresh(base) ?: run {
-                provider.onSessionExpired()
-                throw SessionExpiredException()
+            provider.refresh(base).also { refreshed ->
+                requireCurrentAccount()
+                if (refreshed != null && refreshed.generation != authGeneration) {
+                    throw CancellationException("Account changed during token refresh")
+                }
             }
         }
     }
@@ -533,15 +572,20 @@ class MemohApi(
         body: String?,
         lease: AuthLease?,
     ): Response = withContext(Dispatchers.IO) {
-        networkClient.newCall(request(path, method, body, lease)).execute()
+        networkClient.newCall(request(path, method, body, lease)).execute().forCurrentAccount()
     }
 
     internal val networkClient: OkHttpClient get() = if (endpoint.isCloud) cloudAuth?.http ?: client else client
 
     internal suspend fun socketRequest(path: String): Request {
+        requireCurrentAccount()
         if (endpoint.isCloud) {
             val cloud = cloudAuth?.takeIf { it.hasSession } ?: throw SessionExpiredException()
-            try { return cloud.authorize(Request.Builder().url(cloud.ticketedSocketUrl(path))).build() }
+            try {
+                val url = cloud.ticketedSocketUrl(path)
+                requireCurrentAccount()
+                return cloud.authorize(Request.Builder().url(url)).build()
+            }
             catch (e: ApiException) {
                 if (e.status == 401) { invalidateSession(); throw SessionExpiredException() }
                 throw e
@@ -553,22 +597,25 @@ class MemohApi(
     internal val workspaceCandidateHost: String get() = endpoint.origin.toHttpUrl().host
     internal val runtimeDisplay: Boolean get() = endpoint.isCloud
     internal suspend fun runtimeDisplayRequest(session: dev.memoh.core.model.RuntimeDisplaySession): Request {
+        requireCurrentAccount()
         val cloud = cloudAuth?.takeIf { it.hasSession } ?: throw SessionExpiredException()
-        return cloud.runtimeDisplayRequest(session)
+        return cloud.runtimeDisplayRequest(session).also { requireCurrentAccount() }
     }
 
     internal suspend fun streamRequest(path: String, body: String? = null, method: String = if (body == null) "GET" else "POST"): Request {
+        requireCurrentAccount()
         if (endpoint.isCloud && cloudAuth?.hasSession != true) throw SessionExpiredException()
         val lease = if (!endpoint.isCloud) freshLease() else null
         return request(path, method, body, lease).newBuilder()
             .header("Accept", "text/event-stream").build()
     }
 
-    internal fun streamUnauthorized() { auth?.onSessionExpired() }
+    internal fun streamUnauthorized() { invalidateSession() }
 
-    fun invalidateSession() { auth?.onSessionExpired() }
+    fun invalidateSession() { authGeneration?.let { auth?.onSessionExpired(it) } }
 
     private fun request(path: String, method: String, body: String?, lease: AuthLease?): Request {
+        requireCurrentAccount()
         val builder = Request.Builder().url(endpoint.memoh(path)).header("Accept", "application/json")
         if (endpoint.isCloud) cloudAuth?.authorize(builder)
         else lease?.let { builder.header("Authorization", "Bearer ${it.token}") }

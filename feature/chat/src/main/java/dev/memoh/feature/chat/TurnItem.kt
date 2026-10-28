@@ -55,9 +55,9 @@ internal fun assistantBlockKeys(turnId: String, messages: List<UIMessage>): List
  * a question is an utterance to be recognised at a glance.
  */
 @Composable
-fun TurnItem(turn: UITurn, modifier: Modifier = Modifier) {
+fun TurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: Boolean = false, onSave: (() -> Unit)? = null) {
     when {
-        turn.isUser -> UserTurnItem(turn, modifier)
+        turn.isUser -> UserTurnItem(turn, modifier, isSaved, onSave)
         turn.isAssistant -> AssistantTurnItem(
             messages = turn.safeMessages,
             isStreaming = false,
@@ -70,7 +70,7 @@ fun TurnItem(turn: UITurn, modifier: Modifier = Modifier) {
 /** The user's own message, right-aligned. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun UserTurnItem(turn: UITurn, modifier: Modifier = Modifier) {
+private fun UserTurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: Boolean = false, onSave: (() -> Unit)? = null) {
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
@@ -120,7 +120,7 @@ private fun UserTurnItem(turn: UITurn, modifier: Modifier = Modifier) {
                     modifier = Modifier.padding(top = 4.dp, end = 4.dp),
                 )
             }
-            MessageActions(text, turn.timestamp, assistant = false)
+            MessageActions(text, turn.timestamp, assistant = false, isSaved = isSaved, onSave = onSave)
         }
     }
 }
@@ -153,8 +153,10 @@ fun AssistantTurnItem(
 
 @Composable
 internal fun AssistantMessageItem(item: AssistantRenderItem, isStreaming: Boolean, isRunActive: Boolean,
-    onToggleDetails: () -> Unit = {}) {
-    if (item.isProcess) ProcessBlock(item.messages, isStreaming, isRunActive, onToggleDetails = onToggleDetails)
+    onToggleDetails: () -> Unit = {}, focusMessage: UIMessage? = null, focusRevision: Int = 0,
+    onFocusHandled: () -> Unit = {}) {
+    if (item.isProcess) ProcessBlock(item.messages, isStreaming, isRunActive, onToggleDetails = onToggleDetails,
+        focusMessage = focusMessage, focusRevision = focusRevision, onFocusHandled = onFocusHandled)
     else MessageBlock(item.messages.single(), isStreaming, isRunActive, onToggleDetails)
 }
 

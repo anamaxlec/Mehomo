@@ -127,7 +127,7 @@ class LoginViewModel @Inject constructor(
                         displayName = response.displayName,
                     )
                     credentials.saveAccount(account)
-                    credentials.saveToken(account.accountId, response.accessToken, null)
+                    session.saveToken(account.accountId, response.accessToken, response.expiresAt)
                     session.activate(account)
                     _state.update {
                         it.copy(form = it.form.copy(busy = false, serverInfo = ping?.version))

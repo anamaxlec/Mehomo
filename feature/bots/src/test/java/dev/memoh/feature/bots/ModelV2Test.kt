@@ -105,6 +105,15 @@ class ModelV2Test {
         assertNull(providerCatalogSource(provider(apiBody("source" to "openai", "managed" to true))))
     }
 
+    @Test fun legacyOpenCodeGoSourceReportedByServerUsesCatalogImport() {
+        val provider = apiBody("id" to "legacy-go", "client_type" to "opencode-go",
+            "config" to apiBody("base_url" to "https://opencode.ai/zen/go/v1"),
+            "metadata" to apiBody("source" to "opencode-go"))
+        assertEquals("opencode-go", providerCatalogSource(provider))
+        assertEquals("import-catalog-models", providerImportPath(provider).last())
+        assertEquals("import-models", providerImportPath(provider, fromEndpoint = true).last())
+    }
+
     @Test fun subscriptionProtocolsPointingAtAProxyRemainCustomProviders() {
         val sources = listOf(apiBody("client_type" to "github-copilot", "base_url" to "https://api.githubcopilot.com", "subscription" to true))
         assertTrue(providerIsSubscription(apiBody("client_type" to "github-copilot", "config" to apiBody("base_url" to "https://api.githubcopilot.com/")), sources))

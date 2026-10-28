@@ -15,7 +15,7 @@ class UpstreamApiTest {
     private val auth = object : AuthProvider {
         override fun currentLease() = AuthLease("fixture", null, 1)
         override suspend fun refresh(previous: AuthLease) = null
-        override fun onSessionExpired() = Unit
+        override fun onSessionExpired(generation: Long) = Unit
     }
     @Before fun start() { server = MockWebServer(); server.start() }
     @After fun stop() { server.shutdown() }

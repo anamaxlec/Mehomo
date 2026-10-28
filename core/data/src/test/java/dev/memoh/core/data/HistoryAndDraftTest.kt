@@ -37,6 +37,14 @@ class HistoryAndDraftTest {
         assertTrue(store.list("a", "t").isEmpty())
         assertFalse(store.options("a", "t").enabled)
     }
+    @Test fun `cached history can be found by an attachment name`() = runBlocking {
+        val store = ChatHistoryStore(temp.newFolder(), json)
+        val turn = UITurn("turn", role = "assistant", messages = listOf(
+            UIMessage(0, "attachments", attachments = listOf(UIAttachment(name = "meeting-report.pdf")))))
+        store.save("account", "team", "bot", Session("session"), listOf(turn))
+        assertEquals("session", store.list("account", "team", "REPORT.PDF").single().session.id)
+        assertTrue(store.list("other", "team", "REPORT.PDF").isEmpty())
+    }
     @Test fun `attachment bytes survive URI loss and ordered clear does not restore sent files`() = runBlocking {
         val root = temp.newFolder()
         val store = AttachmentDraftStore(root, json)
