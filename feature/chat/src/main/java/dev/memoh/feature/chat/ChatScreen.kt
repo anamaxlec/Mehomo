@@ -201,6 +201,7 @@ fun ChatScreen(
     externalSearchHit: dev.memoh.core.model.ConversationMatch? = null,
     externalCachedTurn: dev.memoh.core.model.UITurn? = null,
     onExternalSearchConsumed: () -> Unit = {},
+    onEditMessage: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -212,6 +213,7 @@ fun ChatScreen(
     val assistantKeys = remember(settled) { assistantHistoryKeys(settled) }
     val retryableTurnId = state.retryableTurnId
     val retryableRowKey = if (retryableTurnId != null) state.history.lastOrNull { it.isAssistant }?.listKey else null
+    val editableRowKey = state.editableUserTurn?.listKey
     val liveMessages = state.liveMessages
     val liveUsers = state.liveUserTurns
     val run = state.runtime.run
@@ -240,6 +242,8 @@ fun ChatScreen(
     }
     historyPlaceholder.targetState = showHistoryPlaceholder
     var followingLatest by rememberSaveable(state.session?.id) { mutableStateOf(true) }
+    var editingMessageKey by rememberSaveable(state.botId, state.session?.id) { mutableStateOf<String?>(null) }
+    var editedMessage by rememberSaveable(state.botId, state.session?.id) { mutableStateOf("") }
     var searchOpen by remember(state.session?.id) { mutableStateOf(false) }
     var savedOpen by remember(state.session?.id) { mutableStateOf(false) }
     var searchFocus by remember(state.session?.id) { mutableStateOf<ConversationHit?>(null) }
@@ -522,9 +526,22 @@ fun ChatScreen(
                                         focusMessageIndex = searchFocus?.takeIf { it.turnKey == turn.listKey }?.messageIndex,
                                         focusRevision = searchFocusRevision, onFocusHandled = { searchFocus = null })
                                 } else item(key = "turn-${turn.listKey}") {
+                                    val edit = onEditMessage?.takeIf { turn.listKey == editableRowKey }
                                     TurnItem(turn, Modifier.padding(top = 10.dp),
                                         isSaved = turn.listKey in savedTurnKeys,
-                                        onSave = if (turn.isUser) {{ onToggleSavedTurn(turn) }} else null)
+                                        onSave = if (turn.isUser) {{ onToggleSavedTurn(turn) }} else null,
+                                        onEdit = edit?.let {{
+                                            editedMessage = turn.text.orEmpty()
+                                            editingMessageKey = turn.listKey
+                                            followingLatest = false
+                                        }},
+                                        editor = if (turn.isUser && turn.listKey == editingMessageKey) ({
+                                            UserMessageEditor(editedMessage, { editedMessage = it },
+                                                saving = state.regeneration?.editFromMessageId == turn.id,
+                                                canSubmit = edit != null,
+                                                onCancel = { editingMessageKey = null; editedMessage = "" },
+                                                onSubmit = { edit?.invoke(turn.turnId, editedMessage) })
+                                        }) else null)
                                 }
                                 if (turn.isAssistant) item(key = "assistant-$assistantKey:actions") {
                                     MessageActions(replyCopyText(turn.safeMessages), turn.timestamp, assistant = true,

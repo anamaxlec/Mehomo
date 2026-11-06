@@ -432,6 +432,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onLoadOlder = viewModel::loadOlder,
                 onRetryHistory = viewModel::retryHistory,
                 onRegenerate = viewModel::regenerate,
+                onEditMessage = viewModel::editMessage,
                 onFork = viewModel::fork,
                 onApprove = { runId, approvalId, optionId ->
                     viewModel.respondToApproval(runId, approvalId, approve = true, optionId = optionId)

@@ -51,4 +51,16 @@ class RecentManagementTest {
         assertEquals("enabled", model.resolveEffort("none"))
         assertEquals("enabled", model.resolveEffort("xhigh"))
     }
+    @Test fun anAgentKeptInItsOwnWorkspaceCountsAsConfiguredWithoutACredential() {
+        // A ChatGPT or Grok sign-in and Claude Code's workspace login live in the
+        // Agent's own workspace, so the server has no credential to point at.
+        assertTrue(apiBody("id" to "c", "runtime" to "codex", "metadata" to apiBody("auth" to "chatgpt")).agentConfigured())
+        assertTrue(apiBody("id" to "g", "runtime" to "grok-build", "metadata" to apiBody("auth" to "grok_account")).agentConfigured())
+        assertTrue(apiBody("id" to "cl", "runtime" to "claude-code", "metadata" to apiBody("auth" to "workspace")).agentConfigured())
+        assertTrue(apiBody("id" to "k", "runtime" to "codex", "metadata" to apiBody("auth" to "api_key"),
+            "agent_credential_id" to "cred").agentConfigured())
+        assertFalse(apiBody("id" to "k", "runtime" to "codex", "metadata" to apiBody("auth" to "api_key")).agentConfigured())
+        assertFalse(apiBody("id" to "a", "runtime" to "acp", "metadata" to apiBody("auth" to "api_key")).agentConfigured())
+        assertFalse(apiBody("id" to "k", "runtime" to "codex").agentConfigured())
+    }
 }

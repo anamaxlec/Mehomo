@@ -197,6 +197,30 @@ class LatestUpstreamIntegrationTest {
         assertEquals("补充中文说明", answers!!.single().customText)
     }
 
+    @Test fun codexChatGptQuotaComesFromTheGenericQuotaRoute() {
+        val chatgpt = apiBody("id" to "c", "name" to "Codex", "runtime" to "codex", "metadata" to apiBody("auth" to "chatgpt"))
+        UpstreamFixture { request -> when (request.path) {
+            "/bots/b/agents" -> UpstreamReply(body = apiBody("items" to JsonArray(listOf(chatgpt))).toString())
+            "/bots/b/agents/c/quota" -> UpstreamReply(body = """{"limit_reached":false,"windows":[{"used_percent":30,"window_minutes":300}]}""")
+            else -> base(request)
+        } }.use { server ->
+            val vm = ManagementViewModel(repository(server))
+            compose.setContent { MemohTheme { val state by vm.state.collectAsState(); ManagementScreen(state, vm, {}, {}, {}, {}) } }
+            try {
+                open(vm)
+                screenshot("codex-quota-agents")
+                // A ChatGPT sign-in lives in the Agent's workspace, so no credential
+                // points at it and the row must still read as connected.
+                compose.onNode(hasText("已连接", substring = true)).assertIsDisplayed()
+                compose.onNodeWithText("查看 Codex 的账号额度").assertIsDisplayed().performClick()
+                compose.waitUntil(8000) { server.requests.any { it.path == "/bots/b/agents/c/quota" } }
+                compose.waitUntil(8000) { vm.state.value.codexUsage["c"] != null }
+                assertEquals(30.0, vm.state.value.codexUsage.getValue("c").windows.single().usedPercent, .0)
+                assertFalse(server.requests.any { it.path.endsWith("/codex/usage") })
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
     @Test fun codexOnAnOlderServerFallsBackToItsExistingStagedAuthorization() {
         UpstreamFixture { request -> when {
             request.path.endsWith("/login/device/authorize") -> UpstreamReply(404)

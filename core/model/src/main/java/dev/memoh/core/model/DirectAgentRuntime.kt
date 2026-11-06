@@ -14,6 +14,14 @@ enum class DirectAgentRuntime(
 
     val defaultAuthMode: String get() = authModes.first().first
 
+    /**
+     * A Claude Code workspace login and the device-code sign-ins (a ChatGPT or
+     * Grok account) are kept by the runtime in the Agent's own workspace, so the
+     * server stores no credential for them.
+     */
+    fun storesCredential(authMode: String): Boolean =
+        authMode != deviceAuthMode && !(this == ClaudeCode && authMode == "workspace")
+
     companion object {
         fun fromId(id: String?): DirectAgentRuntime? = entries.firstOrNull { it.id == id }
     }

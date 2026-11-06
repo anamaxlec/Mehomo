@@ -79,8 +79,8 @@ class RecentApiTest {
         api().tokenRecords("b", "2026-10-01", "2026-10-14", sessionType = "memory")
         assertEquals("memory", server.takeRequest().requestUrl!!.queryParameter("session_type"))
         server.enqueue(MockResponse().setBody("""{"limit_reached":false,"windows":[{"used_percent":45,"window_minutes":300}]}"""))
-        assertEquals(45.0, api().codexUsage("b", "agent/1").windows.single().usedPercent, .0)
-        assertEquals("/bots/b/agents/agent%2F1/codex/usage", server.takeRequest().path)
+        assertEquals(45.0, api().agentQuota("b", "agent/1").windows.single().usedPercent, .0)
+        assertEquals("/bots/b/agents/agent%2F1/quota", server.takeRequest().path)
         server.enqueue(MockResponse().setBody("""{"turns":[],"has_more":true,"limit":200}"""))
         assertTrue(api().contextLifecycle("b", "s", 999).hasMore)
         assertEquals("/bots/b/sessions/s/context-lifecycle?limit=200", server.takeRequest().path)
@@ -93,5 +93,13 @@ class RecentApiTest {
         assertEquals("before", result.items?.last()?.lastCheckedAt)
         assertEquals("failed", result.items?.last()?.status)
         assertEquals("app.operation_failed", result.items?.last()?.lastErrorCode)
+    }
+
+    @Test fun quotaFallsBackToTheCodexRouteOnOlderServers() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse().setBody("""{"limit_reached":true,"windows":[]}"""))
+        assertTrue(api().agentQuota("b", "c").limitReached == true)
+        assertEquals("/bots/b/agents/c/quota", server.takeRequest().path)
+        assertEquals("/bots/b/agents/c/codex/usage", server.takeRequest().path)
     }
 }

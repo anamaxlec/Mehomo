@@ -26,5 +26,6 @@ data class CodexUsageWindow(
     }
 }
 
-val BotAgent.hasCodexUsage: Boolean get() = runtime == "codex" && !agentCredentialId.isNullOrBlank() &&
+/** A ChatGPT account signs in inside the Agent's workspace, so no credential is stored. */
+val BotAgent.hasCodexUsage: Boolean get() = runtime == "codex" &&
     (metadata?.get("auth") as? JsonPrimitive)?.contentOrNull == "chatgpt"

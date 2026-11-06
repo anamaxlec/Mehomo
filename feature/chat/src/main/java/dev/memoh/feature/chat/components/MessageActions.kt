@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ForkRight
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Replay
@@ -59,6 +60,7 @@ fun MessageActions(
     onFork: (() -> Unit)? = null,
     isSaved: Boolean = false,
     onSave: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null,
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -92,6 +94,11 @@ fun MessageActions(
                 colors = IconButtonDefaults.iconButtonColors(contentColor = retryTint, disabledContentColor = retryTint),
                 shapes = shapes) {
                 Icon(Icons.Outlined.Replay, "重新生成", Modifier.size(16.dp))
+            }
+        }
+        if (onEdit != null) {
+            IconButton(onClick = onEdit, modifier = buttonModifier, colors = colors, shapes = shapes) {
+                Icon(Icons.Outlined.Edit, "编辑消息", Modifier.size(16.dp))
             }
         }
         Box {

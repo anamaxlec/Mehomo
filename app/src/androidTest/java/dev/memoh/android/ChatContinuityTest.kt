@@ -80,6 +80,135 @@ class ChatContinuityTest {
             ChatHistoryStore(File(root, "history"), json), AttachmentDraftStore(File(root, "drafts"), json)), settings, repository)
     }
 
+    @Test fun inlineEditKeepsTheOriginalOnRejectionAndReplacesItAfterAdmission() {
+        ContinuityFixture(json).use { server ->
+            val first = UITurn("older", id = "older-user", role = "user", text = "更早的消息")
+            val original = UITurn("turn", id = "original-user", role = "user", text = "原始问题")
+            val reply = UITurn("turn", id = "original-reply", role = "assistant",
+                messages = listOf(UIMessage(0, "text", "原始回复")))
+            server.messagesBody = json.encodeToString(ListResponse(items = listOf(first, original, reply)))
+            server.finishRun(reply.safeMessages)
+            server.editAnchor = original.id
+            server.editFailure = "agent.provider_overloaded"
+            val (vm, _, _) = chat(server)
+            try {
+                compose.setContent { MemohTheme {
+                    val state by vm.state.collectAsState()
+                    ChatScreen(state, {}, vm::send, vm::abort, vm::setDraft, vm::loadOlder,
+                        onEditMessage = vm::editMessage, onApprove = { _, _, _ -> }, onReject = { _, _, _ -> },
+                        onUserInput = { _, _, _ -> }, onCancelUserInput = { _, _ -> }, onDismissError = vm::clearError)
+                } }
+                compose.runOnIdle { vm.open("b", "s") }
+                compose.waitUntil(8_000) { vm.state.value.editableUserTurn?.id == original.id }
+                compose.onAllNodesWithContentDescription("编辑消息").assertCountEquals(1)
+                compose.runOnIdle { vm.setDraft("输入框里的独立草稿") }
+                compose.onNodeWithContentDescription("编辑消息").performClick()
+                compose.onNode(hasSetTextAction() and hasText("原始问题")).performTextReplacement("修改后的问题")
+                compose.onNodeWithText("保存并重试").performClick()
+                compose.waitUntil(8_000) { server.edits.size == 1 && vm.state.value.error != null }
+                assertEquals(listOf(first, original, reply), vm.state.value.history)
+                assertEquals("输入框里的独立草稿", vm.state.value.draft)
+                compose.onNode(hasSetTextAction() and hasText("修改后的问题")).assertExists()
+
+                server.editFailure = null
+                compose.onNodeWithText("保存并重试").performClick()
+                compose.waitUntil(8_000) { vm.state.value.liveUserTurns.singleOrNull()?.text == "修改后的问题" }
+                assertEquals(original.turnId, server.edits.last().turnId)
+                assertEquals("修改后的问题", server.edits.last().text)
+                assertEquals(listOf(first), vm.state.value.history)
+                // Admission can still fail before the server commits the replacement.
+                server.finishRun(listOf(UIMessage(0, "error", "执行失败")), RunStatus.ERRORED)
+                compose.waitUntil(8_000) { vm.state.value.editableUserTurn?.id == original.id && vm.state.value.discardedRunId != null }
+                assertEquals(listOf(first, original, reply), vm.state.value.history)
+                assertEquals("未能保存修改，请重试", vm.state.value.error)
+                compose.onNode(hasSetTextAction() and hasText("修改后的问题")).assertExists()
+                compose.onNodeWithText("保存并重试").performClick()
+                compose.waitUntil(8_000) { server.edits.size == 3 && vm.state.value.liveUserTurns.singleOrNull()?.text == "修改后的问题" }
+                val edited = vm.state.value.liveUserTurns.single().copy(id = "replacement-user")
+                val answer = UITurn(edited.turnId, role = "assistant", id = "replacement-reply",
+                    messages = listOf(UIMessage(0, "text", "修改后生成的回复")))
+                server.messagesBody = json.encodeToString(ListResponse(items = listOf(first, edited, answer)))
+                server.finishRun(answer.safeMessages)
+                compose.waitUntil(8_000) { vm.state.value.history.lastOrNull()?.id == answer.id }
+                assertEquals(listOf(first, edited, answer), vm.state.value.history)
+                assertEquals("输入框里的独立草稿", vm.state.value.draft)
+                assertEquals(0, server.messageRequests.get())
+            } finally { compose.runOnIdle { vm.viewModelScope.cancel() } }
+        }
+    }
+
+    @Test fun stopBeforeOutputRestoresDraftAndAttachmentOnlyAfterHistoryConfirmsRemoval() = checkStoppedSend(false)
+
+    @Test fun stopBeforeOutputKeepsTheDraftEmptyWhenTheServerRetainedTheMessage() = checkStoppedSend(true)
+
+    private fun checkStoppedSend(retained: Boolean) {
+        ContinuityFixture(json).use { server ->
+            server.clearHistory()
+            server.newMessageBlocks = listOf(UIMessage(0, "status", "正在准备"))
+            val (vm, settings, repository) = chat(server)
+            val historyResponse = CountDownLatch(1)
+            val attachment = File.createTempFile("stop-draft", ".txt", compose.activity.cacheDir)
+                .apply { writeText("draft attachment fixture") }
+            try {
+                compose.setContent { MemohTheme {
+                    val state by vm.state.collectAsState()
+                    ChatScreen(state, {}, vm::send, vm::abort, vm::setDraft, vm::loadOlder,
+                        onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
+                        onCancelUserInput = { _, _ -> }, onDismissError = vm::clearError)
+                } }
+                compose.runOnIdle { vm.open("b", "s") }
+                compose.waitUntil(8_000) { vm.state.value.canSend && !vm.state.value.historyLoading }
+                compose.runOnIdle {
+                    vm.setDraft("  停止后保留的文字  ")
+                    vm.attach(compose.activity, android.net.Uri.fromFile(attachment))
+                }
+                compose.waitUntil(8_000) { vm.state.value.canSend && vm.state.value.attachments.size == 1 }
+                val sentAttachment = vm.state.value.attachments.single()
+                compose.onNodeWithContentDescription("发送").performClick()
+                compose.waitUntil(8_000) { vm.state.value.isRunning && server.sentMessages.size == 1 }
+                compose.onNodeWithContentDescription("停止生成").performClick()
+                compose.waitUntil(8_000) { server.aborts.size == 1 }
+                assertEquals("run", server.aborts.single().runId)
+                assertTrue(vm.state.value.draft.isEmpty())
+                if (retained) server.messagesBody = json.encodeToString(ListResponse(items = listOf(
+                    UITurn("turn", id = "first-user", role = "user", text = "停止后保留的文字"))))
+                server.historyBlock = historyResponse
+                server.finishRun(emptyList(), RunStatus.ABORTED)
+                compose.waitUntil(8_000) { !vm.state.value.isRunning }
+                assertTrue(vm.state.value.draft.isEmpty())
+                compose.runOnIdle { vm.setDraft("后来输入的草稿") }
+                historyResponse.countDown()
+                compose.waitUntil(8_000) {
+                    val state = vm.state.value
+                    if (retained) state.history.singleOrNull()?.id == "first-user"
+                    else state.discardedRunId == "run"
+                }
+                if (retained) {
+                    assertEquals("后来输入的草稿", vm.state.value.draft)
+                    assertTrue(vm.state.value.attachments.isEmpty())
+                    assertEquals("first-user", vm.state.value.history.single().id)
+                } else {
+                    val restored = "  停止后保留的文字  \n后来输入的草稿"
+                    assertEquals(restored, vm.state.value.draft)
+                    assertEquals(sentAttachment, vm.state.value.attachments.single())
+                    assertTrue(vm.state.value.history.isEmpty())
+                    assertTrue(vm.state.value.liveUserTurns.isEmpty())
+                    val account = requireNotNull(repository.state.value.account)
+                    compose.waitUntil(8_000) { runBlocking { settings.draft(account.accountId, "b", "s") == restored } }
+                    val seq = vm.state.value.runtime.seq
+                    server.finishRun(emptyList(), RunStatus.ABORTED)
+                    compose.waitUntil(8_000) { vm.state.value.runtime.seq > seq }
+                    assertTrue(vm.state.value.liveUserTurns.isEmpty())
+                    assertEquals(restored, vm.state.value.draft)
+                }
+            } finally {
+                historyResponse.countDown()
+                compose.runOnIdle { vm.viewModelScope.cancel() }
+                attachment.delete()
+            }
+        }
+    }
+
     @Test fun warmResumeKeepsRetryReadyButAnActualReconnectWaitsForItsSnapshot() {
         ContinuityFixture(json).use { server ->
             val reply = UITurn("turn", id = "persisted-reply", role = "assistant",
@@ -603,6 +732,11 @@ internal class ContinuityFixture(private val json: Json) : AutoCloseable {
     val skillCatalogReads = AtomicInteger()
     val runtimeControlRequests = CopyOnWriteArrayList<String>()
     val sentMessages = CopyOnWriteArrayList<WSClientMessage>()
+    val edits = CopyOnWriteArrayList<WSClientMessage>()
+    val aborts = CopyOnWriteArrayList<WSClientMessage>()
+    @Volatile var editAnchor: String? = null
+    @Volatile var editFailure: String? = null
+    @Volatile var newMessageBlocks: List<UIMessage>? = null
     @Volatile var messageFailureCode: String? = null
     @Volatile var messageCommandResult: CommandActionResult? = null
     @Volatile var skillCatalogBody = """{"skills":[]}"""
@@ -674,6 +808,22 @@ internal class ContinuityFixture(private val json: Json) : AutoCloseable {
                     if (mask.isNotEmpty()) bytes.indices.forEach { bytes[it] = (bytes[it].toInt() xor mask[it % 4].toInt()).toByte() }
                     val frame = json.decodeFromString<WSClientMessage>(bytes.toString(Charsets.UTF_8))
                     if (frame.type == WSClientMessage.RETRY_MESSAGE) retryRequests.incrementAndGet()
+                    if (frame.type == WSClientMessage.ABORT) aborts += frame
+                    if (frame.type == WSClientMessage.EDIT_MESSAGE) {
+                        edits += frame
+                        val failure = editFailure
+                        if (failure != null) {
+                            sendEvent(client, UIStreamEvent(type = UIStreamEvent.RUN_REJECTED, invocationId = frame.invocationId,
+                                sessionId = frame.sessionId, code = failure))
+                            continue
+                        }
+                        val user = UIUserTurn("edit-${frame.invocationId}", text = frame.text.orEmpty())
+                        run = RuntimeCurrentRunView(runId = user.turnId, turnId = user.turnId, invocationId = frame.invocationId,
+                            requestUserTurn = user, operation = RuntimeRunOperation("edit", editAnchor, user))
+                        sendEvent(client, UIStreamEvent(type = UIStreamEvent.RUN_ACCEPTED, invocationId = frame.invocationId,
+                            sessionId = frame.sessionId, turnId = user.turnId, runId = run.runId))
+                        snapshot(client, frame.sessionId ?: "s")
+                    }
                     if (frame.type == WSClientMessage.MESSAGE) {
                         sentMessages += frame
                         messageRequests.incrementAndGet()
@@ -692,7 +842,7 @@ internal class ContinuityFixture(private val json: Json) : AutoCloseable {
                         if (historyCleared) {
                             historyCleared = false
                             val user = UIUserTurn("turn", id = "first-user", text = frame.text.orEmpty())
-                            run = run.copy(invocationId = frame.invocationId, requestUserTurn = user,
+                            run = run.copy(invocationId = frame.invocationId, requestUserTurn = user, messages = newMessageBlocks ?: run.messages,
                                 userTurns = listOf(user), status = RunStatus.RUNNING)
                             sendEvent(client, UIStreamEvent(type = UIStreamEvent.RUN_ACCEPTED,
                                 invocationId = frame.invocationId, sessionId = frame.sessionId, turnId = run.turnId))
@@ -798,8 +948,8 @@ internal class ContinuityFixture(private val json: Json) : AutoCloseable {
     @Volatile private var historyCleared = false
     @Volatile private var epoch = "fixture"
 
-    fun finishRun(messages: List<UIMessage> = run.safeMessages) {
-        run = run.copy(status = RunStatus.COMPLETED, messages = messages)
+    fun finishRun(messages: List<UIMessage> = run.safeMessages, status: String = RunStatus.COMPLETED) {
+        run = run.copy(status = status, messages = messages)
         subscribers.forEach { (client, id) -> if (!client.isClosed) snapshot(client, id) }
     }
 

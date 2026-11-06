@@ -53,6 +53,14 @@ enum class ManagementPage(val title: String, val description: String) {
 internal fun JsonElement?.obj(): JsonObject = this as? JsonObject ?: JsonObject(emptyMap())
 internal fun JsonObject.text(key: String): String = (get(key) as? JsonPrimitive)?.contentOrNull.orEmpty()
 internal fun JsonObject.flag(key: String, fallback: Boolean = false): Boolean = (get(key) as? JsonPrimitive)?.booleanOrNull ?: fallback
+/** A device-code or workspace sign-in keeps its login inside the Agent, so no credential backs it. */
+internal fun JsonObject.agentConfigured(): Boolean {
+    if (text("agent_credential_id").isNotBlank()) return true
+    val runtime = DirectAgentRuntime.fromId(text("runtime")) ?: return false
+    val auth = this["metadata"].obj().text("auth")
+    if (runtime.authModes.none { it.first == auth }) return false
+    return !runtime.storesCredential(auth)
+}
 internal fun JsonElement?.objects(key: String? = null): List<JsonObject> =
     ((if (key == null) this else obj()[key]) as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
 
@@ -420,6 +428,8 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                         withTimeout(15_000) { api.managementResult(path + "authorize").obj().also { loginId = it.text("login_id") } }
                     }
                 } catch (e: ApiException) {
+                    // A server without the device flow still stages a Codex ChatGPT
+                    // credential itself; the claim is what signs the Agent in there.
                     if (e.status != 404 || runtime != DirectAgentRuntime.Codex) throw e
                     checkCurrent()
                     stagedAgentAuthorization(api, agent, "openai_codex_oauth", "", checkCurrent)
@@ -499,13 +509,27 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
             } }
             checkCurrent()
             check(id.isNotBlank()) { "授权服务未返回授权编号" }
+            // Reading only works where the server advances the sign-in itself. An
+            // older server advances it on POST /poll instead, and answers 404 for
+            // that once it no longer has the route.
+            var legacyPoll = true
             val deadline = System.currentTimeMillis() + 15 * 60 * 1000
             while (auth.text("status") == "pending" && System.currentTimeMillis() < deadline) {
                 _state.update { it.copy(busy = false, authorization = auth) }
-                delay(((auth["interval_seconds"] as? JsonPrimitive)?.longOrNull ?: 5L).coerceAtLeast(5) * 1000)
+                delay(5_000)
                 checkCurrent()
-                auth = api.managementResult(listOf("agent-authorizations", id, "poll")).obj()
+                auth = api.managementRead("agent-authorizations", id).obj()
                 checkCurrent()
+                if (auth.text("status") == "pending" && legacyPoll) {
+                    auth = try {
+                        api.managementResult(listOf("agent-authorizations", id, "poll")).obj()
+                    } catch (e: ApiException) {
+                        if (e.status != 404) throw e
+                        legacyPoll = false
+                        auth
+                    }
+                    checkCurrent()
+                }
             }
             if (auth.text("status") != "ready") throw UserFacingException("授权未完成，请重新连接 Agent")
             api.managementWrite(path, "POST", apiBody("authorization_id" to id))
@@ -590,12 +614,12 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     fun loadCodexUsage(id: String) {
         val current = state.value
         val agent = current.data["agents"].objects("items").firstOrNull { it.text("id") == id } ?: return
-        if (agent.text("runtime") != "codex" || agent["metadata"].obj().text("auth") != "chatgpt" || agent.text("agent_credential_id").isBlank() || id in current.codexUsageLoading) return
+        if (agent.text("runtime") != "codex" || agent["metadata"].obj().text("auth") != "chatgpt" || id in current.codexUsageLoading) return
         val generation = repository.generation
         viewModelScope.launch {
             _state.update { it.copy(codexUsageLoading = it.codexUsageLoading + id, codexUsageErrors = it.codexUsageErrors - id) }
             try {
-                val usage = (repository.api() ?: throw SessionExpiredException()).codexUsage(current.botId, id)
+                val usage = (repository.api() ?: throw SessionExpiredException()).agentQuota(current.botId, id)
                 if (generation == repository.generation && state.value.botId == current.botId)
                     _state.update { it.copy(codexUsage = it.codexUsage + (id to usage), codexUsageLoading = it.codexUsageLoading - id) }
             } catch (e: CancellationException) { throw e }

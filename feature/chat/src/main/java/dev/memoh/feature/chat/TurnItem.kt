@@ -15,11 +15,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.model.UIMessage
 import dev.memoh.core.model.UITurn
@@ -55,9 +63,10 @@ internal fun assistantBlockKeys(turnId: String, messages: List<UIMessage>): List
  * a question is an utterance to be recognised at a glance.
  */
 @Composable
-fun TurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: Boolean = false, onSave: (() -> Unit)? = null) {
+fun TurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: Boolean = false, onSave: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null, editor: (@Composable () -> Unit)? = null) {
     when {
-        turn.isUser -> UserTurnItem(turn, modifier, isSaved, onSave)
+        turn.isUser -> UserTurnItem(turn, modifier, isSaved, onSave, onEdit, editor)
         turn.isAssistant -> AssistantTurnItem(
             messages = turn.safeMessages,
             isStreaming = false,
@@ -70,7 +79,8 @@ fun TurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: Boolean = fal
 /** The user's own message, right-aligned. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun UserTurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: Boolean = false, onSave: (() -> Unit)? = null) {
+private fun UserTurnItem(turn: UITurn, modifier: Modifier, isSaved: Boolean, onSave: (() -> Unit)?,
+    onEdit: (() -> Unit)?, editor: (@Composable () -> Unit)?) {
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
@@ -79,6 +89,10 @@ private fun UserTurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: B
             modifier = Modifier.widthIn(max = 560.dp),
             horizontalAlignment = Alignment.End,
         ) {
+            if (editor != null) {
+                editor()
+                return@Column
+            }
             // Attachments sit above the text, so the media is seen before the
             // caption rather than after it.
             val attachments = turn.attachments.orEmpty()
@@ -120,7 +134,28 @@ private fun UserTurnItem(turn: UITurn, modifier: Modifier = Modifier, isSaved: B
                     modifier = Modifier.padding(top = 4.dp, end = 4.dp),
                 )
             }
-            MessageActions(text, turn.timestamp, assistant = false, isSaved = isSaved, onSave = onSave)
+            MessageActions(text, turn.timestamp, assistant = false, isSaved = isSaved, onSave = onSave, onEdit = onEdit)
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun UserMessageEditor(text: String, onTextChange: (String) -> Unit, saving: Boolean,
+    canSubmit: Boolean, onCancel: () -> Unit, onSubmit: () -> Unit) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { if (!saving) focus.requestFocus() }
+    OutlinedTextField(text, onTextChange, modifier = Modifier.fillMaxWidth().focusRequester(focus),
+        label = { Text("编辑消息") }, enabled = !saving, maxLines = 8,
+        shape = MaterialTheme.shapes.large, colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        ))
+    FlowRow(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) {
+        TextButton(onClick = onCancel, enabled = !saving) { Text("取消") }
+        FilledTonalButton(onClick = onSubmit, enabled = !saving && canSubmit && text.isNotBlank()) {
+            Text(if (saving) "正在提交" else "保存并重试")
         }
     }
 }

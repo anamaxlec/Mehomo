@@ -64,7 +64,17 @@ data class PendingTurn(
     val acceptedTurnId: String? = null,
 )
 
-data class PendingRegeneration(val invocationId: String, val turnId: String, val acceptedTurnId: String? = null)
+data class PendingRegeneration(
+    val invocationId: String,
+    val turnId: String,
+    val acceptedTurnId: String? = null,
+    val editFromMessageId: String? = null,
+)
+
+private data class StoppedSend(val runId: String, val turnId: String, val draft: PendingTurn)
+
+private fun RuntimeCurrentRunView.hasVisibleOutput(): Boolean =
+    safeMessages.any { it.type != UIMessage.TYPE_STATUS && it.type != UIMessage.TYPE_ERROR }
 
 /** Forks load their transcript; a newly created conversation can render immediately. */
 data class SessionNavigation(val session: Session, val isNew: Boolean)
@@ -146,21 +156,28 @@ data class ChatUiState(
     /** True until the first snapshot of the current session arrives. */
     val awaitingSnapshot: Boolean = true,
     val offlineSyncedAt: Long? = null,
+    /** History can discard a provisional turn even while the ledger still projects it. */
+    val discardedRunId: String? = null,
 ) {
     val isRunning: Boolean get() = runtime.isRunning || regeneration != null
     val isEmptyConversation: Boolean get() = history.isEmpty() && liveMessages.isEmpty() &&
         liveUserTurns.isEmpty() && pending.isEmpty() && !isRunning
     // A completed empty history page stays known while it is refreshed or the socket reconnects.
     val hasResolvedHistory: Boolean get() = !historyLoading && historyError == null || !hasMoreHistory
-    val retryableTurnId: String?
+    private val canReplaceTurn: Boolean
         get() {
-            val currentSession = session ?: return null
-            // Retrying does not consume the composer draft or attachments.
-            if (!currentSession.isLocal || currentSession.runtimeType !in listOf(null, "model") ||
-                sessionLoading || busy || isRunning || historyLoading || pending.isNotEmpty() ||
-                awaitingSnapshot || runtime.needsSnapshot || socketStatus != SocketStatus.Connected) return null
-            return history.lastOrNull { it.isAssistant }?.turnId
+            val currentSession = session ?: return false
+            return currentSession.isLocal && currentSession.runtimeType in listOf(null, "model") &&
+                !sessionLoading && !busy && !isRunning && !historyLoading && pending.isEmpty() &&
+                !awaitingSnapshot && !runtime.needsSnapshot && socketStatus == SocketStatus.Connected
         }
+    val retryableTurnId: String?
+        get() = if (canReplaceTurn) history.lastOrNull { it.isAssistant }?.turnId else null
+
+    val editableUserTurn: UITurn?
+        get() = if (canReplaceTurn && offlineSyncedAt == null && historyError == null) history.lastOrNull { it.isUser }?.takeIf {
+            !it.id.isNullOrBlank() && it.turnId.isNotBlank() && !it.text.isNullOrBlank() && it.attachments.isNullOrEmpty()
+        } else null
 
     fun canFork(turn: UITurn): Boolean = !busy && !isRunning && session?.isLocal != false &&
         turn.turnId.isNotBlank() && (session?.runtimeType in listOf(null, "model") ||
@@ -266,14 +283,14 @@ data class ChatUiState(
     val liveMessages: List<UIMessage>
         get() {
             val run = runtime.run ?: return emptyList()
-            if (run.configurationOnly == true) return emptyList()
+            if (run.configurationOnly == true || run.runId == discardedRunId) return emptyList()
             if (run.isTerminal && history.any { it.isAssistant && it.turnId == run.turnId }) return emptyList()
             return run.safeMessages
         }
 
     val liveUserTurns: List<UITurn>
         get() {
-            val run = runtime.run?.takeUnless { it.configurationOnly == true } ?: return emptyList()
+            val run = runtime.run?.takeUnless { it.configurationOnly == true || it.runId == discardedRunId } ?: return emptyList()
             val users = run.userTurns?.takeIf { it.isNotEmpty() }
                 ?: listOfNotNull(run.requestUserTurn ?: run.operation?.replacementUserTurn)
             return users.map { user ->
@@ -299,18 +316,20 @@ data class ChatUiState(
 
     /** Keep rendered output through a completion/new-run frame until REST history arrives. */
     internal fun withRuntime(next: RuntimeState, awaitingSnapshot: Boolean = this.awaitingSnapshot): ChatUiState {
-        val nextRun = next.run
+        val nextRun = next.run?.takeUnless { it.runId == discardedRunId }
         val retryAdmitted = regeneration?.let { retry -> nextRun != null &&
             (nextRun.invocationId == retry.invocationId || nextRun.turnId == retry.acceptedTurnId) } == true
         val anchorIndex = nextRun?.operation?.replaceFromMessageId?.takeIf(String::isNotBlank)
             ?.let { anchor -> history.indexOfFirst { it.id == anchor }.takeIf { it >= 0 } }
-            ?: if (retryAdmitted) history.indexOfFirst { it.isAssistant && it.turnId == regeneration?.turnId }
-                .takeIf { it >= 0 } else null
+            ?: if (retryAdmitted) history.indexOfFirst { turn ->
+                regeneration?.editFromMessageId?.let { turn.id == it }
+                    ?: (turn.isAssistant && turn.turnId == regeneration?.turnId)
+            }.takeIf { it >= 0 } else null
         val outgoing = when {
             nextRun?.isTerminal == true && nextRun.safeMessages.isNotEmpty() -> nextRun
             nextRun?.isTerminal == true || runtime.run?.turnId != nextRun?.turnId -> runtime.run
             else -> null
-        }?.takeIf { it.configurationOnly != true && it.safeMessages.isNotEmpty() &&
+        }?.takeIf { it.configurationOnly != true && it.runId != discardedRunId && it.safeMessages.isNotEmpty() &&
             (anchorIndex == null || it.runId == nextRun?.runId) }
         val retained = (anchorIndex?.let(history::take) ?: history).toMutableList()
         if (outgoing != null) {
@@ -404,6 +423,8 @@ class ChatViewModel @Inject constructor(
     private var draftRevision = 0L
     private var attachmentReadId = 0L
     private var draftInvocationId: String? = null
+    private var submittedDraft: PendingTurn? = null
+    private var stoppedSend: StoppedSend? = null
     private var boundGeneration = -1L
 
     /** Debounce for coalescing streaming appends into fewer recompositions. */
@@ -454,6 +475,8 @@ class ChatViewModel @Inject constructor(
         draftAddress = repository.state.value.account?.accountId?.let { Triple(it, botId, sessionId) }
         draftRevision = 0
         draftInvocationId = null
+        submittedDraft = null
+        stoppedSend = null
         // Reuse the existing offline history and bot options, including an empty history page.
         // These are available on the destination's first frame, while REST validates them.
         _state.value = ChatUiState(botId = botId, session = seed ?: Session(sessionId, botId = botId), sessionLoading = seed == null,
@@ -690,6 +713,7 @@ class ChatViewModel @Inject constructor(
 
             UIStreamEvent.RUN_REJECTED, UIStreamEvent.COMMAND_ERROR -> {
                 val invocationId = event.invocationId
+                if (submittedDraft?.invocationId == invocationId) submittedDraft = null
                 _state.update { current ->
                     val rejected = current.pending.firstOrNull { it.invocationId == invocationId }
                     current.copy(
@@ -714,6 +738,7 @@ class ChatViewModel @Inject constructor(
             }
 
             UIStreamEvent.COMMAND_RESULT -> {
+                if (event.terminal != false && submittedDraft?.invocationId == event.invocationId) submittedDraft = null
                 val result = event.result
                 val output = listOfNotNull(result?.title, result?.text,
                     result?.items?.joinToString("\n") { listOfNotNull(it.title, it.description).joinToString(" · ") })
@@ -747,7 +772,11 @@ class ChatViewModel @Inject constructor(
         if (!historyInvalidated && event.type in setOf(UIStreamEvent.RUNTIME_SNAPSHOT, UIStreamEvent.RUNTIME_DELTA) &&
             previousRun != null && !previousRun.isTerminal && previousRun.configurationOnly != true) {
             val current = _state.value
+            val next = current.runtime.run
+            if (next != null && stoppedSend?.runId == next.runId &&
+                (next.hasVisibleOutput() || next.isTerminal && next.status != RunStatus.ABORTED)) stoppedSend = null
             if (current.runtime.run == null || current.runtime.run?.isTerminal == true) {
+                if (submittedDraft?.invocationId == previousRun.invocationId) submittedDraft = null
                 current.session?.let { session -> viewModelScope.launch { loadHistory(current.botId, session) } }
                 refreshSessionInfo()
                 if (state.value.contextInspectorOpen) loadContextLifecycle()
@@ -1123,7 +1152,7 @@ class ChatViewModel @Inject constructor(
             _state.update { it.copy(codexUsageLoading = true, codexUsageError = null,
                 codexUsage = it.codexUsage.takeIf { _ -> it.codexUsageAgentId == agent.id }, codexUsageAgentId = agent.id) }
             try {
-                val usage = (repository.api() ?: throw SessionExpiredException()).codexUsage(current.botId, agent.id)
+                val usage = (repository.api() ?: throw SessionExpiredException()).agentQuota(current.botId, agent.id)
                 if (generation == repository.generation && state.value.session?.id == current.session?.id && state.value.selectedAgentId == agent.id)
                     _state.update { it.copy(codexUsage = usage, codexUsageLoading = false) }
             } catch (e: CancellationException) { throw e }
@@ -1169,6 +1198,11 @@ class ChatViewModel @Inject constructor(
         historyJob?.cancel()
         val account = repository.state.value.account
         val generation = repository.generation
+        // Only a history request started after the server confirms the abort can
+        // tell whether the stopped turn was retained.
+        val run = state.value.runtime.run
+        val stop = stoppedSend?.takeIf { before == null && run != null && it.runId == run.runId &&
+            run.status == RunStatus.ABORTED && !run.hasVisibleOutput() }
         historyJob = viewModelScope.launch {
             val api = repository.api()
             if (api == null) {
@@ -1182,17 +1216,39 @@ class ChatViewModel @Inject constructor(
                 .fold(
                     onSuccess = { page ->
                         if (generation != repository.generation) return@fold
+                        val active = _state.value
+                        if (active.botId != botId || active.session?.id != session.id) return@fold
+                        val restore = stop?.takeIf { stoppedSend === it && active.runtime.run?.runId == it.runId &&
+                            page.items.none { turn -> turn.turnId == it.turnId } }
+                        if (stop != null && stoppedSend === stop) stoppedSend = null
+                        val rollbackEdit = active.runtime.run?.takeIf { completed ->
+                            before == null && completed.isTerminal && completed.status != RunStatus.COMPLETED &&
+                                !completed.hasVisibleOutput() && completed.operation?.kind == "edit" &&
+                                page.items.any { it.id == completed.operation?.replaceFromMessageId && it.isUser } &&
+                                page.items.none { it.turnId == completed.turnId }
+                        }
+                        val editError = rollbackEdit?.takeIf { it.status != RunStatus.ABORTED && active.error == null }
+                        val editProblem = editError?.let { failed ->
+                            val code = failed.errorCode ?: failed.safeMessages.lastOrNull { it.type == UIMessage.TYPE_ERROR }?.code
+                            code?.let { MemohError(code = it) }
+                        }
+                        val discardTurn = restore?.turnId ?: rollbackEdit?.turnId
                         _state.update { current ->
-                            if (current.botId != botId || current.session?.id != session.id) return@update current
+                            val existing = if (discardTurn == null) current.history else current.history.filterNot { it.turnId == discardTurn }
                             val merged = if (before == null) {
-                                if (replace || current.offlineSyncedAt != null) page.items else mergeLatestHistory(current.history, page.items)
+                                if (replace || current.offlineSyncedAt != null) page.items else mergeLatestHistory(existing, page.items)
                             } else {
                                 // Older page goes in front; keep chronological order.
-                                page.items + current.history
+                                page.items + existing
                             }
                             current.copy(
                                 offlineSyncedAt = null,
                                 history = merged.distinctBy { it.listKey },
+                                discardedRunId = restore?.runId ?: rollbackEdit?.runId ?: current.discardedRunId,
+                                draft = restore?.let { mergeDraftText(it.draft.text, current.draft) } ?: current.draft,
+                                attachments = if (restore == null) current.attachments else restore.draft.attachments + current.attachments,
+                                error = if (editError == null) current.error else editProblem?.text() ?: "未能保存修改，请重试",
+                                errorProblem = if (editError == null) current.errorProblem else editProblem,
                                 historyLoading = false,
                                 historyError = if (before == null) null else current.historyError,
                                 olderHistoryError = null,
@@ -1202,6 +1258,10 @@ class ChatViewModel @Inject constructor(
                                     before == null || current.history.none { it.listKey == pageTurn.listKey }
                                 } && page.items.any { !it.id.isNullOrBlank() },
                             )
+                        }
+                        if (restore != null) {
+                            draftRevision++
+                            persistDraft()
                         }
                         if (refreshTitle && before == null && _state.value.session?.title.isNullOrBlank()) {
                             val refreshed = try { api.session(botId, session.id) }
@@ -1311,19 +1371,36 @@ class ChatViewModel @Inject constructor(
     fun regenerate(turnId: String) {
         val current = _state.value
         if (current.retryableTurnId != turnId) return
+        replaceLatestTurn(current, turnId, edit = null)
+    }
+
+    fun editMessage(turnId: String, text: String) {
+        val current = _state.value
+        val target = current.editableUserTurn?.takeIf { it.turnId == turnId } ?: return
+        val trimmed = text.trim().takeIf(String::isNotEmpty) ?: return
+        replaceLatestTurn(current, turnId, edit = requireNotNull(target.id) to trimmed)
+    }
+
+    private fun replaceLatestTurn(current: ChatUiState, turnId: String, edit: Pair<String, String>?) {
         val session = current.session ?: return
         val activeSocket = socket ?: return
         val invocationId = UUID.randomUUID().toString()
-        // Keep the original reply until the server admits the replacement.
-        // A rejection then leaves both history and the user's draft intact.
-        historyJob?.cancel()
-        _state.update { it.copy(regeneration = PendingRegeneration(invocationId, turnId), loadingMore = false, error = null) }
-        activeSocket.send(WSClientMessage(type = WSClientMessage.RETRY_MESSAGE,
+        val result = activeSocket.send(WSClientMessage(type = if (edit == null) WSClientMessage.RETRY_MESSAGE else WSClientMessage.EDIT_MESSAGE,
             invocationId = invocationId, sessionId = session.id, turnId = turnId,
+            text = edit?.second,
             modelId = current.selectedModelId ?: current.models.firstOrNull()?.id,
             reasoningEffort = (current.models.firstOrNull { it.id == current.selectedModelId }
                 ?: current.models.firstOrNull())?.resolveEffort(current.reasoningEffort),
             workspaceTargetId = current.selectedTargetId))
+        if (result == SocketSendResult.Queued) {
+            // Keep the old turn visible until the server admits the replacement.
+            historyJob?.cancel()
+            _state.update { it.copy(regeneration = PendingRegeneration(invocationId, turnId, editFromMessageId = edit?.first),
+                loadingMore = false, error = null, errorProblem = null) }
+        } else {
+            _state.update { it.copy(error = if (result == SocketSendResult.TooLarge) "消息过大，请缩短文字后重试。"
+                else "连接已断开，请等待恢复后重试。", errorProblem = null) }
+        }
     }
 
     fun send(text: String) {
@@ -1384,13 +1461,15 @@ class ChatViewModel @Inject constructor(
                 workspaceTargetId = current.selectedTargetId,
             ),
         ) ?: SocketSendResult.Closed
-        if (sendResult != SocketSendResult.Queued) {
+        if (sendResult == SocketSendResult.Queued) {
+            submittedDraft = PendingTurn(invocationId, text, current.attachments)
+        } else {
             if (draftInvocationId == invocationId) draftInvocationId = null
             _state.update { current ->
                 val rejected = current.pending.firstOrNull { it.invocationId == invocationId }
                 current.copy(
                     pending = current.pending.filterNot { it.invocationId == invocationId },
-                    draft = listOfNotNull(text.takeIf(String::isNotBlank), current.draft.takeIf(String::isNotBlank)).joinToString("\n"),
+                    draft = mergeDraftText(text, current.draft),
                     attachments = rejected?.attachments.orEmpty() + current.attachments,
                     error = if (sendResult == SocketSendResult.TooLarge) "消息或附件过大，请减少附件或缩短文字后重试。"
                         else "连接已断开，请等待恢复后重试。",
@@ -1402,10 +1481,19 @@ class ChatViewModel @Inject constructor(
     }
 
     fun abort() {
-        val run = _state.value.runtime.run ?: return
-        val session = _state.value.session ?: return
-        socket?.abort(runId = run.runId, sessionId = session.id)
+        val current = _state.value
+        val run = current.runtime.run?.takeUnless { it.isTerminal } ?: return
+        val session = current.session ?: return
+        val activeSocket = socket ?: return
+        val draft = submittedDraft?.takeIf { it.invocationId == run.invocationId }
+        if (draft != null && run.operation == null && !run.hasVisibleOutput()) {
+            stoppedSend = StoppedSend(run.runId, run.turnId, draft)
+        }
+        activeSocket.abort(runId = run.runId, sessionId = session.id)
     }
+
+    private fun mergeDraftText(previous: String, current: String): String =
+        listOf(previous, current).filter(String::isNotBlank).joinToString("\n")
 
     /** Approves or rejects a pending tool decision. */
     fun respondToApproval(

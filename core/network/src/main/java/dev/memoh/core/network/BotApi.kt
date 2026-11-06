@@ -141,8 +141,15 @@ suspend fun MemohApi.uploadFile(botId: String, path: String, name: String, mime:
             .addFormDataPart("file", name, bytes.toRequestBody(mime.toMediaType())).build()))
 fun workspaceDownloadPath(botId: String, path: String): String = "${botPath(botId)}/container/fs/download${query("path" to path)}"
 suspend fun MemohApi.runtimeGoal(botId: String, sessionId: String): JsonObject = get("${sessionPath(botId, sessionId)}/runtime-controls/goal")
-suspend fun MemohApi.codexUsage(botId: String, agentId: String): CodexUsage =
-    get("${botPath(botId)}/agents/${segment(agentId)}/codex/usage")
+suspend fun MemohApi.agentQuota(botId: String, agentId: String): CodexUsage {
+    val agentPath = "${botPath(botId)}/agents/${segment(agentId)}"
+    return try {
+        get("$agentPath/quota")
+    } catch (error: ApiException) {
+        if (error.status != 404) throw error
+        get("$agentPath/codex/usage")
+    }
+}
 suspend fun MemohApi.contextLifecycle(botId: String, sessionId: String, limit: Int = 50): ContextLifecycleResponse =
     get("${sessionPath(botId, sessionId)}/context-lifecycle${query("limit" to limit.coerceIn(1, 200).toString())}")
 suspend fun MemohApi.setRuntimeMode(botId: String, sessionId: String, mode: String, kind: String = "permission"): JsonElement = change("${sessionPath(botId, sessionId)}/runtime-controls/mode", "PATCH", apiBody("mode_id" to mode, "mode_kind" to kind))
