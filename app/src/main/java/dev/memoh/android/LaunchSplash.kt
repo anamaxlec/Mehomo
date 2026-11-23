@@ -9,9 +9,11 @@ import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
 import android.os.Build
+import android.view.View
 import android.view.animation.LinearInterpolator
 import android.view.animation.PathInterpolator
 import androidx.compose.material3.MaterialShapes
+import androidx.core.animation.doOnCancel
 import androidx.core.animation.doOnEnd
 import androidx.core.splashscreen.SplashScreen
 import androidx.graphics.shapes.Morph
@@ -42,23 +44,39 @@ internal fun SplashScreen.animateMemohExit() {
         mark.alpha = 0
         layer.overlay.add(mark)
 
-        ValueAnimator.ofFloat(0f, 1f).apply {
+        var cleaned = false
+        var detachListener: View.OnAttachStateChangeListener? = null
+        fun cleanup() {
+            if (cleaned) return
+            cleaned = true
+            detachListener?.let(layer::removeOnAttachStateChangeListener)
+            layer.overlay.remove(mark)
+            splash.remove()
+        }
+
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 380
             interpolator = LinearInterpolator()
-            addUpdateListener { animator ->
-                val fraction = animator.animatedFraction
+            addUpdateListener { anim ->
+                val fraction = anim.animatedFraction
                 val handoff = (fraction / 0.18f).coerceIn(0f, 1f)
                 icon.alpha = 1f - handoff
                 mark.alpha = (255f * handoff).roundToInt()
                 mark.setProgress(fraction)
                 layer.alpha = 1f - ((fraction - 0.38f) / 0.62f).coerceIn(0f, 1f)
             }
-            doOnEnd {
-                layer.overlay.remove(mark)
-                splash.remove()
-            }
-            start()
+            doOnEnd { cleanup() }
+            doOnCancel { cleanup() }
         }
+        detachListener = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                animator.cancel()
+                cleanup()
+            }
+        }
+        layer.addOnAttachStateChangeListener(detachListener)
+        animator.start()
     }
 }
 

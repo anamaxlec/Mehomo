@@ -123,6 +123,7 @@ fun OfflineHistoryScreen(state: OfflineHistoryState, vm: OfflineHistoryViewModel
             if (state.chats.isEmpty()) item { Text(if (state.query.isBlank()) "打开会话后会在这里保存近期历史。" else "缓存中没有匹配内容。", Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium) }
         }
     }
-    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("清理离线历史") }, text = { Text("清理当前账号和团队的本地缓存。") },
-        confirmButton = { TextButton({ vm.clear(); confirm = false }) { Text("清理") } }, dismissButton = { TextButton({ confirm = false }) { Text("取消") } })
+    if (confirm) MemohDialog(onDismissRequest = { confirm = false }, title = "清理离线历史", text = { Text("清理当前账号和团队的本地缓存。") },
+        confirmButton = { MemohActionButton("清理", Icons.Filled.DeleteOutline, { vm.clear(); confirm = false }, primary = true, danger = true) },
+        dismissButton = { TextButton({ confirm = false }) { Text("取消") } })
 }

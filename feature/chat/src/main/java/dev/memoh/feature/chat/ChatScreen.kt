@@ -98,9 +98,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.memoh.core.designsystem.component.MemohPopupMenu
 import dev.memoh.core.designsystem.component.MemohMenuRow
 import dev.memoh.core.designsystem.component.MemohMenuDivider
+import dev.memoh.core.designsystem.component.MemohDialog
 import dev.memoh.core.designsystem.component.MemohEmptyState
 import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.designsystem.component.MemohStatus
+import dev.memoh.core.designsystem.component.MemohStatusBanner
 import dev.memoh.core.designsystem.component.MemohStatusDot
 import dev.memoh.core.network.SocketStatus
 import dev.memoh.feature.chat.components.ApprovalPanel
@@ -532,14 +534,13 @@ fun ChatScreen(
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     state.historyError != null && settled.isEmpty() -> {
-                        Column(Modifier.align(Alignment.Center).padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text("历史消息未能加载", style = MaterialTheme.typography.titleMedium)
-                            Text(state.historyError, style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            MemohActionButton("重试", Icons.Filled.Refresh, onRetryHistory, primary = true)
-                        }
+                        MemohEmptyState(
+                            title = "历史消息未能加载",
+                            modifier = Modifier.align(Alignment.Center),
+                            icon = Icons.Filled.Refresh,
+                            description = state.historyError,
+                            action = { MemohActionButton("重试", Icons.Filled.Refresh, onRetryHistory, primary = true) },
+                        )
                     }
 
                     showEmptyConversation -> Unit
@@ -655,8 +656,8 @@ fun ChatScreen(
                 androidx.compose.animation.AnimatedVisibility(
                     visible = showEmptyConversation,
                     modifier = Modifier.align(Alignment.Center),
-                    enter = androidx.compose.animation.fadeIn(MemohMotion.enterSpec()),
-                    exit = androidx.compose.animation.fadeOut(MemohMotion.exitSpec()),
+                    enter = fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()),
+                    exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
                 ) {
                     EmptyConversation(state, onDraftChange, onRefreshSuggestions, onConfigureExample)
                 }
@@ -714,32 +715,29 @@ fun ChatScreen(
             }
 
             if (snapshotTimedOut && onRetryRuntime != null) {
-                Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.extraLarge,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("会话状态同步超时", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                        MemohActionButton("重新同步", Icons.Filled.Refresh, { syncAttempt++; onRetryRuntime() })
-                    }
-                }
+                MemohStatusBanner(
+                    message = "会话状态同步超时",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    action = { MemohActionButton("重新同步", Icons.Filled.Refresh, { syncAttempt++; onRetryRuntime() }) },
+                )
             }
             state.offlineSyncedAt?.takeIf { state.historyError != null }?.let { synced ->
-                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("缓存历史 · 最后同步 " + java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault()).format(java.time.Instant.ofEpochMilli(synced)),
-                            Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                        TextButton(onClick = onRetryHistory) { Text("刷新") }
-                    }
-                }
+                val formatted = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm")
+                    .withZone(java.time.ZoneId.systemDefault())
+                    .format(java.time.Instant.ofEpochMilli(synced))
+                MemohStatusBanner(
+                    message = "缓存历史 · 最后同步 $formatted",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    action = { MemohActionButton("刷新", Icons.Filled.Refresh, onRetryHistory) },
+                )
             }
             state.olderHistoryError?.let { error ->
-                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(error, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                        TextButton(onClick = onLoadOlder, enabled = !state.loadingMore) { Text("加载更早消息") }
-                    }
-                }
+                MemohStatusBanner(
+                    message = error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    error = true,
+                    action = { MemohActionButton("加载更早消息", Icons.Filled.Refresh, onLoadOlder, enabled = !state.loadingMore) },
+                )
             }
             if (state.session?.isLocal == false) {
                 ExternalSessionNotice(
@@ -912,9 +910,9 @@ fun ChatScreen(
             }
         }
     }
-    if (state.pendingFolderChange) AlertDialog(
+    if (state.pendingFolderChange) MemohDialog(
         onDismissRequest = onCancelFolder,
-        title = { Text("在此文件夹中新建会话") },
+        title = "在此文件夹中新建会话",
         text = { Text("会话创建后无法改绑文件夹。将新建一个会话，现有会话和历史会保留。") },
         confirmButton = { MemohActionButton("新建会话", Icons.Filled.Add, onConfirmFolder, enabled = !state.busy, primary = true) },
         dismissButton = { MemohActionButton("取消", Icons.Filled.Close, onCancelFolder, enabled = !state.busy) },

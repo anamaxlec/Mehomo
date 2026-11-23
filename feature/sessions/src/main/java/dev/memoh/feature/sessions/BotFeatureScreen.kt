@@ -43,6 +43,8 @@ import androidx.compose.ui.unit.dp
 import dev.memoh.core.model.*
 import dev.memoh.core.network.apiBody
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohDialog
+import dev.memoh.core.designsystem.component.MemohFeedbackCard
 import dev.memoh.core.designsystem.component.LocalFloatingNavigationPadding
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohListSkeleton
@@ -472,12 +474,12 @@ fun BotFeatureScreen(
     }
     editor?.let { value -> EditDialog(value, state, onDismiss = { editor = null }) }
     state.mcpAuthorization?.let { McpAuthorizationDialog(it, state.busy, state.error, viewModel) }
-    state.mcpExport?.let { config -> AlertDialog(onDismissRequest = viewModel::closeMcpExport, title = { Text("导出 MCP 配置") }, text = {
+    state.mcpExport?.let { config -> MemohDialog(onDismissRequest = viewModel::closeMcpExport, title = "导出 MCP 配置", text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("配置可用于其他客户端，可能包含连接凭据。保存后请妥善保管。")
             exportError?.let { Text(it, color = MaterialTheme.colorScheme.error) } }
     }, confirmButton = { FeatureAction("保存 JSON", Icons.Filled.FileDownload, { exportError = null; mcpSaver.launch("mcp-config.json") }, primary = true) },
         dismissButton = { FeatureAction("取消", Icons.Filled.Close, viewModel::closeMcpExport) }) }
-    confirmation?.let { value -> AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(value.title) }, text = { Text(value.message) },
+    confirmation?.let { value -> MemohDialog(onDismissRequest = { confirmation = null }, title = value.title, text = { Text(value.message) },
         confirmButton = { FeatureAction("确认", Icons.Filled.Check, { confirmation = null; value.action() }, primary = true) },
         dismissButton = { FeatureAction("取消", Icons.Filled.Close, { confirmation = null }) }) }
     details?.let { (title, text) -> ContentDialog(title, { details = null }) { Text(text, style = MaterialTheme.typography.bodyMedium) } }
@@ -520,7 +522,7 @@ fun BotFeatureScreen(
         val dependencies = preview["dependencies"] as? JsonArray
         val connectors = preview["connectors"] as? JsonArray
         val requiredApps = preview["required_apps"] as? JsonArray
-        AlertDialog(onDismissRequest = viewModel::cancelRemove, title = { Text("移除 ${app.name.orEmpty()}") },
+        MemohDialog(onDismissRequest = viewModel::cancelRemove, title = "移除 ${app.name.orEmpty()}",
             text = { Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("移除应用及其管理的技能。服务器预览的影响如下：")
                 dependencies.orEmpty().forEach { value ->
@@ -647,15 +649,12 @@ fun BotFeatureScreen(
 }
 
 @Composable private fun ContentDialog(title: String, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(title) }, text = { Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp), content = content) },
+    MemohDialog(onDismissRequest = onDismiss, title = title, text = { Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp), content = content) },
         confirmButton = { FeatureAction("关闭", Icons.Filled.Close, onDismiss) })
 }
 @Composable private fun ErrorNotice(message: String, retry: () -> Unit, dismiss: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer), shape = MaterialTheme.shapes.large) {
-        Column(Modifier.padding(16.dp)) {
-            Text(message, style = MaterialTheme.typography.bodySmall)
-            FeatureActions { FeatureAction("重试", Icons.Filled.Refresh, retry); FeatureAction("关闭", Icons.Filled.Close, dismiss) }
-        }
+    MemohFeedbackCard(message, error = true) {
+        FeatureActions { FeatureAction("重试", Icons.Filled.Refresh, retry); FeatureAction("关闭", Icons.Filled.Close, dismiss) }
     }
 }
 @Composable private fun EmptyNote(title: String, subtitle: String) {

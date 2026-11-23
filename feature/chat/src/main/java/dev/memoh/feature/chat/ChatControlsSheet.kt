@@ -14,6 +14,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.designsystem.component.MemohBottomSheet
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohDialog
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohComposerSurface
 import dev.memoh.core.designsystem.component.MemohComposerTextField
@@ -139,7 +140,7 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
         confirmButton = { MemohActionButton("保存", Icons.Filled.Save, { viewModel.editQueue(item, editText, steer); edit = null }, enabled = editText.isNotBlank() && !state.busy, primary = true) }, dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { edit = null }) }) }
     command?.let { name -> MemohFormDialog(onDismissRequest = { command = null }, title = name, text = { OutlinedTextField(commandArgs, { commandArgs = it }, label = { Text("命令参数") }) },
         confirmButton = { MemohActionButton("执行", Icons.Filled.PlayArrow, { viewModel.command("$name $commandArgs".trim()); command = null }, enabled = state.runtimeCommandsAvailable, primary = true) }, dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { command = null }) }) }
-    confirm?.let { (title, action) -> AlertDialog(onDismissRequest = { confirm = null }, title = { Text(title) }, text = { Text("确认对当前会话执行此操作？") },
+    confirm?.let { (title, action) -> MemohDialog(onDismissRequest = { confirm = null }, title = title, text = { Text("确认对当前会话执行此操作？") },
         confirmButton = { MemohActionButton("确认", Icons.Filled.Check, { confirm = null; action() }, primary = true) }, dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { confirm = null }) }) }
 }
 

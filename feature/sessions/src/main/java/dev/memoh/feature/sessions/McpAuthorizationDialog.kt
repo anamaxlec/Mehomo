@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohDialog
 import kotlinx.serialization.json.*
 
 @Composable
@@ -25,7 +26,7 @@ internal fun McpAuthorizationDialog(auth: McpAuthorization, busy: Boolean, error
     val uriHandler = LocalUriHandler.current
     val authorized = (auth.status["has_token"] as? JsonPrimitive)?.booleanOrNull == true && (auth.status["expired"] as? JsonPrimitive)?.booleanOrNull != true
     LaunchedEffect(auth.url) { if (auth.url != null) clientSecret = "" }
-    AlertDialog(onDismissRequest = { if (!busy) vm.closeMcpAuthorization() }, title = { Text("${auth.name} 授权") }, icon = { Icon(Icons.Filled.Link, null) },
+    MemohDialog(onDismissRequest = { if (!busy) vm.closeMcpAuthorization() }, title = "${auth.name} 授权", icon = { Icon(Icons.Filled.Link, null) },
         text = { Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(if (authorized) "已授权" else if ((auth.status["expired"] as? JsonPrimitive)?.booleanOrNull == true) "授权已过期" else "等待授权")
             if (authorized) {
@@ -55,7 +56,7 @@ internal fun McpAuthorizationDialog(auth: McpAuthorization, busy: Boolean, error
                 else -> MemohActionButton("检查授权状态", Icons.Filled.Refresh, vm::checkMcpAuthorization, enabled = !busy)
             }
         }, dismissButton = { if (!authorized) TextButton(vm::closeMcpAuthorization, enabled = !busy) { Text("关闭") } })
-    if (revoke) AlertDialog(onDismissRequest = { revoke = false }, title = { Text("断开 MCP 授权") }, text = { Text("此连接需要重新授权后才能使用受保护的工具。") },
+    if (revoke) MemohDialog(onDismissRequest = { revoke = false }, title = "断开 MCP 授权", text = { Text("此连接需要重新授权后才能使用受保护的工具。") },
         confirmButton = { MemohActionButton("断开", Icons.Filled.LinkOff, { revoke = false; vm.revokeMcpAuthorization() }, enabled = !busy, danger = true, primary = true) },
         dismissButton = { TextButton({ revoke = false }) { Text("取消") } })
 }

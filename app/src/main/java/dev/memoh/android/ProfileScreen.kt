@@ -118,7 +118,7 @@ fun ProfileScreen(
     }
     if (updatesOpen) AppUpdateSettings(update, automaticUpdates, updates::setAutomatic, { updates.check(manual = true) },
         { updatesOpen = false; updates.showRelease() }, { updatesOpen = false })
-    if (teamsOpen) AlertDialog(onDismissRequest = { teamsOpen = false }, title = { Text("Cloud 团队") }, icon = { Icon(Icons.Filled.Groups, null) },
+    if (teamsOpen) MemohDialog(onDismissRequest = { teamsOpen = false }, title = "Cloud 团队", icon = { Icon(Icons.Filled.Groups, null) },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
             if (teams.loading) LoadingIndicator(Modifier.size(36.dp))
             teams.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -232,8 +232,8 @@ fun SettingsCategoryScreen(
         }
     }
     if (navigationOpen) FloatingMenuSettings(floating, { navigationOpen = false }, settings::setFloatingSections)
-    if (logoutOpen) AlertDialog(onDismissRequest = { logoutOpen = false }, icon = { Icon(Icons.AutoMirrored.Filled.Logout, null) },
-        title = { Text("退出登录") }, text = { Text("清除本机的当前登录凭据，再次使用时需要重新登录。") },
+    if (logoutOpen) MemohDialog(onDismissRequest = { logoutOpen = false }, icon = { Icon(Icons.AutoMirrored.Filled.Logout, null) },
+        title = "退出登录", text = { Text("清除本机的当前登录凭据，再次使用时需要重新登录。") },
         confirmButton = { MemohActionButton("退出登录", Icons.AutoMirrored.Filled.Logout, { logoutOpen = false; settings.signOut() }, primary = true, danger = true) },
         dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { logoutOpen = false }) })
 }
@@ -307,7 +307,7 @@ private fun featureDescription(feature: BotFeature): String = when (feature) {
 @Composable
 private fun FloatingMenuSettings(selected: List<String>, onDismiss: () -> Unit, onSave: (List<String>) -> Unit) {
     var items by remember { mutableStateOf(selected) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("自定义浮动菜单") }, text = {
+    MemohDialog(onDismissRequest = onDismiss, title = "自定义浮动菜单", text = {
         LazyColumn(Modifier.heightIn(max = 480.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest)) {

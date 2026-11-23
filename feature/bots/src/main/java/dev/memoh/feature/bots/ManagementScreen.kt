@@ -590,11 +590,11 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     }
     editor?.let { ManagementForm(it, state.busy, state.error, onDismiss = { editor = null }) }
     state.audio?.let { AudioPreviewDialog(it, vm::dismissAudio) }
-    state.dependencyPrompt?.let { prompt -> AlertDialog(onDismissRequest = vm::dismissDependency,
-        title = { Text("安装运行依赖") }, text = { Text("启用此 Agent 需要在当前 Bot 的工作空间安装 ${prompt.text("name").ifBlank { prompt.text("dependency") }}。") },
+    state.dependencyPrompt?.let { prompt -> MemohDialog(onDismissRequest = vm::dismissDependency,
+        title = "安装运行依赖", text = { Text("启用此 Agent 需要在当前 Bot 的工作空间安装 ${prompt.text("name").ifBlank { prompt.text("dependency") }}。") },
         confirmButton = { MemohActionButton("安装并启用", Icons.Filled.Download, vm::installAgentDependency, primary = true) },
         dismissButton = { TextButton(vm::dismissDependency) { Text("取消") } }) }
-    state.operationLog?.let { log -> AlertDialog(onDismissRequest = vm::dismissOperationLog, title = { Text("依赖操作") }, text = {
+    state.operationLog?.let { log -> MemohDialog(onDismissRequest = vm::dismissOperationLog, title = "依赖操作", text = {
         Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
             Text(log, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
@@ -614,7 +614,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     confirmation?.let { action ->
         var typed by remember(action) { mutableStateOf("") }
         val canConfirm = !state.busy && (action.typedConfirmation?.let { it.isNotEmpty() && typed == it } ?: true)
-        AlertDialog(onDismissRequest = { if (!state.busy) confirmation = null }, title = { Text(action.title) }, text = {
+        MemohDialog(onDismissRequest = { if (!state.busy) confirmation = null }, title = action.title, text = {
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(action.message)
                 action.typedConfirmation?.let { expected -> OutlinedTextField(typed, { typed = it }, Modifier.fillMaxWidth(),
@@ -632,8 +632,8 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
             val url = auth.text("verification_url").ifBlank { auth.text("authorization_url") }
             if (url.startsWith("https://")) uriHandler.openUri(url)
         }
-        AlertDialog(onDismissRequest = {}, properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
-        icon = { Icon(Icons.Filled.Devices, null) }, title = { Text("连接 Agent") }, text = {
+        MemohDialog(onDismissRequest = {}, properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+        icon = { Icon(Icons.Filled.Devices, null) }, title = "连接 Agent", text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text(when {
             needsCode -> "在浏览器中登录 Claude，然后把页面显示的授权码粘贴到这里。"
             auth.text("user_code").isBlank() -> "打开授权页面完成连接，完成后会自动更新。"
@@ -681,7 +681,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
         val url = data.text("authorization_url").ifBlank { data.text("auth_url").ifBlank { device.text("verification_uri") } }
         val command = data.text("command").ifBlank { if (data.text("key").isNotBlank()) vm.runtimeCommand(data) else "" }
         var detailsOpen by remember(result) { mutableStateOf(false) }
-        AlertDialog(onDismissRequest = vm::dismiss, title = { Text(if (command.isNotBlank()) "电脑接入命令" else if (url.isNotBlank()) "完成授权" else "操作结果") }, text = {
+        MemohDialog(onDismissRequest = vm::dismiss, title = if (command.isNotBlank()) "电脑接入命令" else if (url.isNotBlank()) "完成授权" else "操作结果", text = {
             Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (device.text("user_code").isNotBlank()) Text(device.text("user_code"), style = MaterialTheme.typography.headlineMedium)
                 if (command.isNotBlank()) Text(command, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)

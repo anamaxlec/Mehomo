@@ -6,12 +6,12 @@ import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.hilt.navigation.compose.hiltViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import dev.memoh.core.designsystem.theme.MemohTheme
 import dev.memoh.feature.settings.SettingsViewModel
@@ -23,6 +23,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -36,6 +37,7 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
     @Inject lateinit var preferences: SettingsStore
     @Inject lateinit var repository: SessionRepository
+    private val settings: SettingsViewModel by viewModels()
     private var sharedContent by mutableStateOf<SharedContent?>(null)
     private var chatTarget by mutableStateOf<ChatTarget?>(null)
     private var providerImport by mutableStateOf<dev.memoh.core.model.ProviderImport?>(null)
@@ -106,7 +108,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         val splash = installSplashScreen()
         super.onCreate(savedInstanceState)
-        if (savedInstanceState == null) splash.animateMemohExit()
+        if (savedInstanceState == null) {
+            var splashTimeoutReached = false
+            splash.setKeepOnScreenCondition { !settings.appearanceLoaded.value && !splashTimeoutReached }
+            lifecycleScope.launch {
+                delay(350L)
+                splashTimeoutReached = true
+            }
+            splash.animateMemohExit()
+        }
         if (savedInstanceState?.getString("shared_id") != null) sharedContent = SharedContent(
             savedInstanceState.getString("shared_id")!!, savedInstanceState.getString("shared_text").orEmpty(),
             savedInstanceState.getStringArrayList("shared_uris").orEmpty().map(Uri::parse))
@@ -140,7 +150,6 @@ class MainActivity : ComponentActivity() {
             }
         }
         setContent {
-            val settings: SettingsViewModel = hiltViewModel()
             val themeMode by settings.themeMode.collectAsState()
             val accent by settings.accent.collectAsState()
 

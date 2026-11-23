@@ -16,6 +16,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import dev.memoh.core.model.TeamMembership
 
 data class CloudTeamsState(val loading: Boolean = false, val teams: List<TeamMembership> = emptyList(), val error: String? = null)
@@ -81,4 +82,11 @@ class SettingsViewModel @Inject constructor(
         started = SharingStarted.Eagerly,
         initialValue = MemohAccent.Violet,
     )
+
+    val appearanceLoaded: StateFlow<Boolean> = combine(settings.themeMode, settings.accent) { _, _ -> true }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = false,
+        )
 }

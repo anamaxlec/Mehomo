@@ -38,19 +38,6 @@ val LocalMemohSpacing = staticCompositionLocalOf { MemohSpacing() }
 /** The breakpoint the official web client uses to switch to its mobile shell. */
 val MemohCompactBreakpoint = 768.dp
 
-/** Duration/easing constants for hand-rolled motion, kept in one place. */
-object MemohMotion {
-    /** Streaming caret pulse period. */
-    const val CARET_PULSE_MS = 800
-    /** How long a settled reasoning card stays expanded before folding. */
-    const val REASONING_FOLD_DELAY_MS = 800
-    /** Typing-indicator dot stagger. */
-    const val TYPING_DOT_PERIOD_MS = 600
-    const val TYPING_DOT_DELAY_MS = 150
-    /** Connection dot breathing period while disconnected. */
-    const val DISCONNECT_BREATH_MS = 1200
-}
-
 @Composable
 fun MemohTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -73,16 +60,17 @@ fun MemohTheme(
  * Applies an accent by overriding only the primary quartet; the neutral planes
  * and error/tertiary roles keep their brand values in every accent.
  */
-private fun memohColorScheme(darkTheme: Boolean, accent: MemohAccent): ColorScheme {
+internal fun memohColorScheme(darkTheme: Boolean, accent: MemohAccent): ColorScheme {
     val base = if (darkTheme) MemohDarkColors else MemohLightColors
     if (accent == MemohAccent.Violet) return base
     val (primary, onPrimary, container, onContainer) = accentQuartet(accent, darkTheme)
+    val inversePrimary = accentQuartet(accent, !darkTheme).primary
     return base.copy(
         primary = primary,
         onPrimary = onPrimary,
         primaryContainer = container,
         onPrimaryContainer = onContainer,
-        inversePrimary = primary,
+        inversePrimary = inversePrimary,
     )
 }
 

@@ -48,6 +48,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohDialog
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Compress
 import androidx.core.content.FileProvider
@@ -379,7 +380,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 if (success && file != null) viewModel.attach(context, listOf(FileProvider.getUriForFile(context, "${context.packageName}.files", file)), onConsumed = { file.delete() })
                 else file?.delete()
             }
-            if (pendingImages.isNotEmpty()) AlertDialog(onDismissRequest = { pendingImages = emptyList() }, title = { Text("添加图片") },
+            if (pendingImages.isNotEmpty()) MemohDialog(onDismissRequest = { pendingImages = emptyList() }, title = "添加图片",
                 text = { Text("原图保留文件内容；压缩会将静态图片缩至最长边 2048 px，文件较小时保留原图。") },
                 confirmButton = { MemohActionButton("保留原图", Icons.Filled.Image, {
                     val selected = pendingImages; pendingImages = emptyList(); viewModel.attach(context, selected)

@@ -218,7 +218,7 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
     }
     deleting?.let { file ->
         var recursive by remember(file) { mutableStateOf(false) }
-        AlertDialog(onDismissRequest = { deleting = null }, title = { Text("删除 ${file.name}？") }, text = {
+        MemohDialog(onDismissRequest = { deleting = null }, title = "删除 ${file.name}？", text = {
             Column {
                 Text("此操作会从云端电脑删除该${if (file.isDir) "文件夹" else "文件"}。")
                 if (file.isDir) Row(verticalAlignment = Alignment.CenterVertically) {
@@ -228,7 +228,7 @@ fun WorkspaceFilesScreen(state: BotFeatureState, viewModel: BotFeatureViewModel,
         }, confirmButton = { MemohActionButton("删除", Icons.Outlined.DeleteOutline, { viewModel.deleteFile(file, recursive); deleting = null }, danger = true) },
             dismissButton = { MemohActionButton("取消", Icons.Outlined.Close, { deleting = null }) })
     }
-    if (discard) AlertDialog(onDismissRequest = { discard = false }, title = { Text("保留文件修改？") }, text = { Text("文件还有未保存的修改。") },
+    if (discard) MemohDialog(onDismissRequest = { discard = false }, title = "保留文件修改？", text = { Text("文件还有未保存的修改。") },
         confirmButton = { MemohActionButton("保存", Icons.Outlined.Save, { discard = false; viewModel.saveFile() }, enabled = !state.busy, primary = true) },
         dismissButton = { MemohActionButton("放弃修改", Icons.Outlined.Undo, { discard = false; viewModel.closeFile(); viewModel.refresh() }) })
 }

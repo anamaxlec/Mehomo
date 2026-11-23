@@ -20,6 +20,9 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.unveilIn
 import androidx.compose.animation.core.tween
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -176,11 +179,19 @@ object MemohMotion {
             slideOutHorizontally(animationSpec = exitSpec()) { width -> width / 8 }
 
     /** A bottom-anchored panel rising into place (the composer's trays). */
-    fun panelEnter(): EnterTransition =
-        fadeIn(enterSpec()) + slideInVertically(animationSpec = enterSpec()) { it / 4 }
+    @OptIn(ExperimentalMaterial3ExpressiveApi::class)
+    @Composable
+    fun panelEnter(): EnterTransition {
+        val motion = MaterialTheme.motionScheme
+        return fadeIn(motion.defaultEffectsSpec()) + slideInVertically(animationSpec = motion.defaultSpatialSpec()) { it / 4 }
+    }
 
-    fun panelExit(): ExitTransition =
-        fadeOut(exitSpec()) + slideOutVertically(animationSpec = exitSpec()) { it / 6 }
+    @OptIn(ExperimentalMaterial3ExpressiveApi::class)
+    @Composable
+    fun panelExit(): ExitTransition {
+        val motion = MaterialTheme.motionScheme
+        return fadeOut(motion.fastEffectsSpec()) + slideOutVertically(animationSpec = motion.fastSpatialSpec()) { it / 6 }
+    }
 
     // -- horizontal swaps ---------------------------------------------------
 
@@ -214,9 +225,17 @@ object MemohMotion {
      * pops from nothing reads as a glitch, one that settles into size reads as
      * having been there.
      */
-    fun controlEnter(): EnterTransition =
-        fadeIn(enterSpec()) + scaleIn(animationSpec = enterSpec(), initialScale = 0.8f)
+    @OptIn(ExperimentalMaterial3ExpressiveApi::class)
+    @Composable
+    fun controlEnter(): EnterTransition {
+        val motion = MaterialTheme.motionScheme
+        return fadeIn(motion.fastEffectsSpec()) + scaleIn(animationSpec = motion.fastSpatialSpec(), initialScale = 0.8f)
+    }
 
-    fun controlExit(): ExitTransition =
-        fadeOut(exitSpec()) + scaleOut(animationSpec = exitSpec(), targetScale = 0.8f)
+    @OptIn(ExperimentalMaterial3ExpressiveApi::class)
+    @Composable
+    fun controlExit(): ExitTransition {
+        val motion = MaterialTheme.motionScheme
+        return fadeOut(motion.fastEffectsSpec()) + scaleOut(animationSpec = motion.fastSpatialSpec(), targetScale = 0.8f)
+    }
 }

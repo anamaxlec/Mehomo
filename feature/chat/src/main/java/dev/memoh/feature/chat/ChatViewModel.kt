@@ -1162,13 +1162,19 @@ class ChatViewModel @Inject constructor(
                 .fold(
                     onSuccess = { page ->
                         if (generation != repository.generation) return@fold
-                        val active = _state.value
-                        if (active.botId != botId || active.session?.id != session.id) return@fold
                         val pendingStop = stop?.takeIf { stoppedSend === it }
-                        val updated = active.withHistoryPage(page.items, before, replace, pendingStop)
+                        var restoredDraft = false
+                        var applied = false
+                        _state.update { active ->
+                            if (active.botId != botId || active.session?.id != session.id) return@update active
+                            applied = true
+                            val updated = active.withHistoryPage(page.items, before, replace, pendingStop)
+                            restoredDraft = updated.restoredDraft
+                            updated.state
+                        }
+                        if (!applied) return@fold
                         if (pendingStop != null) stoppedSend = null
-                        _state.value = updated.state
-                        if (updated.restoredDraft) {
+                        if (restoredDraft) {
                             draftRevision++
                             persistDraft()
                         }

@@ -65,27 +65,10 @@ internal fun ChatErrorCard(
 /** Runtime degradation notice — informational, not an error. */
 @Composable
 fun NoticeBar(message: UIMessage, modifier: Modifier = Modifier) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.secondaryContainer)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = Icons.Filled.Info,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier.size(16.dp),
-        )
-        Text(
-            text = if (message.code.isNullOrBlank()) message.content else dev.memoh.core.model.errorMessage(message.code, message.args),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-        )
-    }
+    val text = if (message.code.isNullOrBlank()) message.content
+        else dev.memoh.core.model.errorMessage(message.code, message.args)
+    if (text.isBlank()) return
+    MemohFeedbackCard(message = text, modifier = modifier, error = false)
 }
 
 /** A one-line status such as "正在启动容器…". */

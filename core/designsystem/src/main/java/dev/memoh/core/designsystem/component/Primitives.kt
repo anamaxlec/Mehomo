@@ -1,5 +1,6 @@
 package dev.memoh.core.designsystem.component
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -155,6 +157,7 @@ fun MemohFeedbackCard(
         shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp, bottomEnd = 26.dp, bottomStart = 12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         contentColor = MaterialTheme.colorScheme.onSurface,
+        border = if (error) BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.24f)) else null,
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -163,6 +166,45 @@ fun MemohFeedbackCard(
                 Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
             }
             content?.invoke(this)
+        }
+    }
+}
+
+/** Compact status banner anchored above the composer or footer controls. */
+@Composable
+fun MemohStatusBanner(
+    message: String,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    error: Boolean = false,
+    action: (@Composable () -> Unit)? = null,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = if (error) BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.24f)) else null,
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            icon?.let {
+                Icon(
+                    imageVector = it,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                )
+            }
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f).padding(vertical = 6.dp),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            action?.invoke()
         }
     }
 }

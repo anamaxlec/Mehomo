@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -120,7 +119,7 @@ fun ProcessBlock(
                 )
             }
             ProcessDetails(expanded) {
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                Column(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
                     .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 10.dp, vertical = 4.dp)) {
                     messages.forEachIndexed { index, message ->
                         key(keys[index]) {
@@ -183,7 +182,7 @@ private fun ProcessStep(message: UIMessage, isStreaming: Boolean, isRunActive: B
     }
     ProcessDetails(expanded && expandable) {
         if (reasoning) ReasoningDetails(message.content, inGroup) else {
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+            Column(Modifier.fillMaxWidth().clip(if (inGroup) MaterialTheme.shapes.small else MaterialTheme.shapes.medium)
                 .background(if (inGroup) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceContainerLow)
                 .padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 ToolDetails(message)
@@ -275,7 +274,7 @@ private fun PatchFileStep(file: ToolFileDiff, inGroup: Boolean, onToggleDetails:
         DiffCounts(add, remove)
     }
     ProcessDetails(expanded && file.diff.isNotBlank()) {
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+        Column(Modifier.fillMaxWidth().clip(if (inGroup) MaterialTheme.shapes.small else MaterialTheme.shapes.medium)
             .background(if (inGroup) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceContainerLow).padding(10.dp)) {
             DetailText(file.diff, diff = true)
         }
@@ -360,7 +359,7 @@ private fun DetailText(text: String, error: Boolean = false, diff: Boolean = fal
 private fun AnsweredQuestion(message: UIMessage, modifier: Modifier) {
     val answers = message.userInput?.answers.orEmpty()
     val questions = message.userInput?.questions.orEmpty()
-    Column(modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(RoundedCornerShape(8.dp))
+    Column(modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(MaterialTheme.shapes.medium)
         .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(when (message.userInput?.status ?: toolResult(message).string("status")) {
             "canceled", "cancelled" -> "已取消回答"; "expired" -> "问题已过期"; "failed" -> "回答未成功"; else -> "已回答"

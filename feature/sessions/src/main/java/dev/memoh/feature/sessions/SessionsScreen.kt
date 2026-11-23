@@ -102,6 +102,7 @@ import dev.memoh.core.designsystem.component.MemohStatusDot
 import dev.memoh.core.designsystem.component.MemohListSkeleton
 import dev.memoh.core.designsystem.component.MemohLoadingContent
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohDialog
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohSkeleton
 import dev.memoh.core.designsystem.component.MemohSkeletonBlock
@@ -168,16 +169,16 @@ fun SessionsScreen(
     BackHandler(actionsOpen) { actionsOpen = false }
     var confirmBatchDelete by rememberSaveable(state.bot?.id) { mutableStateOf(false) }
     BackHandler(state.selecting) { if (!state.deletingSelected) onCancelSelection() }
-    if (confirmBatchDelete) AlertDialog(
+    if (confirmBatchDelete) MemohDialog(
         onDismissRequest = { confirmBatchDelete = false },
-        title = { Text("删除 ${state.selectedSessions.size} 个会话") },
+        title = "删除 ${state.selectedSessions.size} 个会话",
         text = { Text("所选会话及其历史将被删除，此操作不可撤销。") },
         confirmButton = { MemohActionButton("删除", Icons.Filled.DeleteOutline, { confirmBatchDelete = false; onDeleteSelected() }, danger = true) },
         dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { confirmBatchDelete = false }) },
     )
     var folderDetails by remember(state.bot?.id) { mutableStateOf<Workdir?>(null) }
     folderDetails?.let { folder ->
-        AlertDialog(onDismissRequest = { folderDetails = null }, title = { Text(folder.name) },
+        MemohDialog(onDismissRequest = { folderDetails = null }, title = folder.name,
             text = { Column { Text(folder.path.orEmpty()); Text(if (folder.targetKind == "remote") "绑定到远程电脑" else "绑定到云端工作空间", style = MaterialTheme.typography.bodySmall) } },
             confirmButton = { Column {
                 TextButton({ folderDetails = null; onNewFolderSession(folder) }, enabled = folder.isActive && state.bot?.can("chat") == true && !state.creating) { Text("在此新建会话") }
@@ -415,9 +416,9 @@ fun SessionsScreen(
     }
 
     state.deleting?.let { session ->
-        AlertDialog(
+        MemohDialog(
             onDismissRequest = onCancelDelete,
-            title = { Text("删除会话") },
+            title = "删除会话",
             text = {
                 Text(
                     "「${session.title?.takeIf(String::isNotBlank) ?: "未命名会话"}」及其历史将被删除，此操作不可撤销。",

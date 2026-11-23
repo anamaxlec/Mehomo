@@ -154,6 +154,10 @@ object MemohMarkdown {
     @Composable
     fun Code(code: String, language: String = "") { CodeBlock(code, language) }
 
+    private const val BACKGROUND_STREAMING_THRESHOLD = 2_048
+    private const val BACKGROUND_SETTLED_THRESHOLD = 4_096
+    private const val CACHE_MAX_LENGTH = 16_384
+
     private data class RenderSource(val markdown: String, val singleDollarMath: Boolean)
     private data class RenderDocument(val source: RenderSource, val math: MathDocument, val node: Node)
 
@@ -168,28 +172,54 @@ object MemohMarkdown {
         return RenderDocument(source, math, parse(math.markdown))
     }
 
+    private fun cachedDocument(source: RenderSource): RenderDocument? =
+        if (source.markdown.length > CACHE_MAX_LENGTH) null
+        else synchronized(completedDocuments) { completedDocuments[source] }
+
+    private fun cacheDocument(document: RenderDocument) {
+        if (document.source.markdown.length <= CACHE_MAX_LENGTH) {
+            synchronized(completedDocuments) { completedDocuments[document.source] = document }
+        }
+    }
+
     @Composable
     private fun rememberRenderDocument(markdown: String, singleDollarMath: Boolean, streaming: Boolean): RenderDocument? {
         val source = remember(markdown, singleDollarMath) { RenderSource(markdown, singleDollarMath) }
         val latestSource by rememberUpdatedState(source)
+        val latestStreaming by rememberUpdatedState(streaming)
         var lastDocument by remember(singleDollarMath) { mutableStateOf<RenderDocument?>(null) }
-        val parseInBackground = streaming && markdown.length >= 2_048
+        val cached = remember(source, streaming) { if (streaming) null else cachedDocument(source) }
+        if (cached != null) {
+            SideEffect { lastDocument = cached }
+            return cached
+        }
+        val exactPrevious = lastDocument?.takeIf { it.source == source }
+        if (exactPrevious != null) {
+            if (!streaming) SideEffect { cacheDocument(exactPrevious) }
+            return exactPrevious
+        }
+        val parseInBackground = if (streaming) {
+            markdown.length >= BACKGROUND_STREAMING_THRESHOLD
+        } else {
+            markdown.length >= BACKGROUND_SETTLED_THRESHOLD ||
+                (markdown.length >= BACKGROUND_STREAMING_THRESHOLD && lastDocument != null)
+        }
         if (parseInBackground) {
             LaunchedEffect(singleDollarMath) {
-                // Finish one parse at a time and take the newest pending revision.
-                snapshotFlow { latestSource }.conflate().collect { revision ->
-                    lastDocument = withContext(Dispatchers.Default) { renderDocument(revision) }
+                // Finish one parse at a time and take the newest pending revision,
+                // including the final settled frame when streaming finishes.
+                snapshotFlow { latestSource to latestStreaming }.conflate().collect { (revision, isStreaming) ->
+                    val existing = lastDocument?.takeIf { it.source == revision }
+                        ?: if (!isStreaming) cachedDocument(revision) else null
+                    val parsed = existing ?: withContext(Dispatchers.Default) { renderDocument(revision) }
+                    if (!isStreaming) cacheDocument(parsed)
+                    lastDocument = parsed
                 }
             }
             return lastDocument?.takeIf { markdown.startsWith(it.source.markdown) }
         }
         val document = remember(source, streaming) {
-            val previous = lastDocument?.takeIf { it.source == source }
-            if (streaming || markdown.length > 16_384) previous ?: renderDocument(source)
-            else synchronized(completedDocuments) { completedDocuments[source] }
-                ?: (previous ?: renderDocument(source)).also {
-                    synchronized(completedDocuments) { completedDocuments[source] = it }
-                }
+            renderDocument(source).also { if (!streaming) cacheDocument(it) }
         }
         SideEffect { lastDocument = document }
         return document
@@ -222,7 +252,15 @@ object MemohMarkdown {
                 modifier = modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (rendered != null) NodeChildren(rendered.node, linkHandler)
+                if (rendered != null) {
+                    NodeChildren(rendered.node, linkHandler)
+                } else if (markdown.isNotEmpty()) {
+                    Text(
+                        text = markdown,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
             }
         }
         }

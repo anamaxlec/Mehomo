@@ -93,7 +93,7 @@ internal fun BackupTools(state: ManagementState, vm: ManagementViewModel, onOpen
         if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
     }
     editor?.let { current -> ManagementForm(current, state.busy, state.error) { editor = null } }
-    if (confirming) AlertDialog(onDismissRequest = { confirming = false }, title = { Text("恢复备份") }, text = {
+    if (confirming) MemohDialog(onDismissRequest = { confirming = false }, title = "恢复备份", text = {
         Text(if (state.backupImport?.mode == "overwrite") "将按选定方式恢复到当前 Bot。标为替换的内容会覆盖现有数据。" else "将创建一个 Bot 并恢复选定的内容。")
     }, confirmButton = { MemohActionButton("恢复", Icons.Filled.Restore, {
         confirming = false; vm.importBackup(JsonObject(selected.mapValues { JsonPrimitive(it.value) }), onOpenBot)

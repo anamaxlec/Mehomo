@@ -41,6 +41,7 @@ import dev.memoh.core.designsystem.component.MemohStatus
 import dev.memoh.core.designsystem.component.MemohStatusDot
 import dev.memoh.core.designsystem.component.MemohTextSkeleton
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohDialog
 import dev.memoh.core.model.DisplayAnswer
 import dev.memoh.core.model.BrowserSession
 import dev.memoh.core.model.WorkspaceSurface
@@ -236,7 +237,7 @@ fun WorkspaceScreen(botId: String, botName: String, surface: WorkspaceSurface, v
             }
         }
     }
-    if (prepareConfirm) AlertDialog(onDismissRequest = { prepareConfirm = false }, title = { Text("准备桌面环境") },
+    if (prepareConfirm) MemohDialog(onDismissRequest = { prepareConfirm = false }, title = "准备桌面环境",
         text = { Text("将在当前云端电脑安装并启动桌面所需的组件。已有工作空间文件会保留。") },
         confirmButton = { MemohActionButton("开始准备", Icons.Filled.InstallDesktop, { prepareConfirm = false; viewModel.prepareDesktop() }, primary = true) },
         dismissButton = { MemohActionButton("取消", Icons.Filled.Close, { prepareConfirm = false }) })
