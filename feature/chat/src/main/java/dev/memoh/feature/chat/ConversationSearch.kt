@@ -20,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.memoh.core.designsystem.component.MemohBottomSheet
 import dev.memoh.core.data.SavedChatItem
 import dev.memoh.core.designsystem.component.MemohListIcon
 import dev.memoh.core.model.UITurn
@@ -90,9 +91,7 @@ internal fun ConversationSearchDialog(turns: List<UITurn>, onDismiss: () -> Unit
             searching = false
         }
     }
-    ModalBottomSheet(onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    MemohBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().heightIn(max = 640.dp).imePadding().padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -126,9 +125,7 @@ internal fun ConversationSearchDialog(turns: List<UITurn>, onDismiss: () -> Unit
 @Composable
 internal fun SavedItemsDialog(items: List<SavedChatItem>, onDismiss: () -> Unit,
     onOpen: (SavedChatItem) -> Unit, onRemove: (SavedChatItem) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    MemohBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().heightIn(max = 640.dp).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -161,9 +158,7 @@ internal fun SavedItemsDialog(items: List<SavedChatItem>, onDismiss: () -> Unit,
 /** Cached results stay separate from the live transcript, which may have changed on the server. */
 @Composable
 internal fun CachedTurnSheet(turn: UITurn, hit: ConversationHit, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    MemohBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().heightIn(max = 640.dp).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

@@ -3,6 +3,7 @@ package dev.memoh.core.designsystem.component
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -19,10 +20,12 @@ fun MemohFormDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismissRequest,
-        title = { Text(title) },
+        title = { Text(title, style = MaterialTheme.typography.headlineSmall) },
         text = text,
         confirmButton = confirmButton,
         dismissButton = dismissButton,
+        shape = MaterialTheme.shapes.extraLarge,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = Modifier.imePadding().systemBarsPadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
     )

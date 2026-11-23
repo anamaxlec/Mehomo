@@ -5,10 +5,54 @@ import dev.memoh.core.model.UIMessage
 import dev.memoh.core.model.UIUserTurn
 import dev.memoh.core.model.RuntimeState
 import dev.memoh.core.model.RuntimeCurrentRunView
+import dev.memoh.core.model.RuntimeRunOperation
+import dev.memoh.core.model.RunStatus
 import org.junit.Assert.*
 import org.junit.Test
 
 class ChatHistoryTest {
+    @Test fun `a text delta preserves the settled history reference`() {
+        val history = listOf(user, assistant)
+        val state = ChatUiState(history = history, runtime = run(RunStatus.RUNNING, emptyList()))
+        val updated = state.withRuntime(run(RunStatus.RUNNING, listOf(UIMessage(0, "text", "Delta"))))
+        assertSame(history, updated.history)
+    }
+
+    @Test fun `an abort restores the stopped draft only with a confirmed newest page`() {
+        val attempted = user.copy(turnId = "stopped")
+        val aborted = RuntimeCurrentRunView(runId = "stop", turnId = "stopped", status = RunStatus.ABORTED)
+        val stop = StoppedSend("stop", "stopped", PendingTurn("client", "Stopped text"))
+        val active = ChatUiState(history = listOf(assistant, attempted), draft = "New draft",
+            runtime = RuntimeState(run = aborted))
+
+        assertFalse(active.withHistoryPage(emptyList(), null, false, null).restoredDraft)
+        assertFalse(active.withHistoryPage(listOf(attempted), null, false, stop).restoredDraft)
+        assertFalse(active.withHistoryPage(emptyList(), "older", false, stop).restoredDraft)
+        assertFalse(active.copy(runtime = RuntimeState(run = aborted.copy(runId = "other")))
+            .withHistoryPage(emptyList(), null, false, stop).restoredDraft)
+
+        val restored = active.withHistoryPage(listOf(assistant), null, false, stop)
+        assertTrue(restored.restoredDraft)
+        assertEquals("Stopped text\nNew draft", restored.state.draft)
+        assertEquals("stop", restored.state.discardedRunId)
+        assertEquals(listOf(assistant), restored.state.history)
+    }
+
+    @Test fun `a failed edit rolls back after the original user record reappears`() {
+        val replacement = user.copy(turnId = "edited", id = "attempted")
+        val failure = RuntimeCurrentRunView(runId = "edit", turnId = "edited", status = RunStatus.ERRORED,
+            operation = RuntimeRunOperation("edit", replaceFromMessageId = user.id))
+        val active = ChatUiState(history = listOf(replacement), runtime = RuntimeState(run = failure))
+        val older = active.withHistoryPage(listOf(user, assistant), "cursor", false, null)
+        assertNull(older.state.discardedRunId)
+        assertNull(active.withHistoryPage(listOf(user, replacement), null, false, null).state.discardedRunId)
+
+        val restored = active.withHistoryPage(listOf(user, assistant), null, false, null)
+        assertEquals(listOf(user, assistant), restored.state.history)
+        assertEquals("edit", restored.state.discardedRunId)
+        assertEquals("未能保存修改，请重试", restored.state.error)
+    }
+
     @Test fun `a saved live reply resolves to the newest persisted record for its turn`() {
         val provisional = dev.memoh.core.data.SavedChatItem("bot", "session", "assistant:turn", "回复", provisionalTurnId = "turn")
         val older = UITurn("turn", id = "old", role = "assistant")

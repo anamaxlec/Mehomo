@@ -20,7 +20,7 @@ import dev.memoh.core.model.*
 @Composable
 fun ChatExampleGallery(capabilities: Map<String, Boolean>, onPick: (ChatExample) -> Unit, onDismiss: () -> Unit, loading: Boolean = false) {
     var category by rememberSaveable { mutableStateOf("all") }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    MemohBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {

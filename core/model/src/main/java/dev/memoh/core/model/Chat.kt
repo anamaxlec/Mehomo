@@ -4,6 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Wire models, transcribed from the official web client
@@ -193,7 +194,12 @@ data class UIMessage(
     val code: String? = null,
     val args: Map<String, String>? = null,
     val attachments: List<UIAttachment>? = null,
+    @SerialName("request_id") val requestId: String? = null,
+    @SerialName("trace_id") val traceId: String? = null,
 ) {
+    val problem: MemohError get() = MemohError(code, args?.let { JsonObject(it.mapValues { (_, value) -> JsonPrimitive(value) }) },
+        requestId = requestId, traceId = traceId)
+
     companion object {
         const val TYPE_TEXT = "text"
         const val TYPE_REASONING = "reasoning"

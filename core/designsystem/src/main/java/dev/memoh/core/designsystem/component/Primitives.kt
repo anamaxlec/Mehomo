@@ -4,17 +4,25 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -94,6 +102,7 @@ fun MemohEmptyState(
     title: String,
     modifier: Modifier = Modifier,
     description: String? = null,
+    icon: ImageVector? = null,
     action: (@Composable () -> Unit)? = null,
 ) {
     Column(
@@ -101,13 +110,14 @@ fun MemohEmptyState(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        icon?.let { MemohListIcon(it, ListIconTone.Tertiary, size = 56.dp) }
         Text(
             text = title,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center,
         )
-        if (description != null) {
+        if (!description.isNullOrBlank()) {
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodyMedium,
@@ -130,17 +140,29 @@ fun MemohInlineError(
     message: String,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.errorContainer)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    MemohFeedbackCard(message, modifier, error = true)
+}
+
+@Composable
+fun MemohFeedbackCard(
+    message: String,
+    modifier: Modifier = Modifier,
+    error: Boolean = false,
+    content: (@Composable ColumnScope.() -> Unit)? = null,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp, bottomEnd = 26.dp, bottomStart = 12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
-        Text(
-            text = message,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onErrorContainer,
-        )
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                MemohListIcon(if (error) Icons.Filled.ErrorOutline else Icons.Filled.Info,
+                    if (error) ListIconTone.Error else ListIconTone.Secondary)
+                Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            }
+            content?.invoke(this)
+        }
     }
 }

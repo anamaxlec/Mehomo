@@ -15,7 +15,7 @@ import java.time.Instant
 
 class TaskNotifications(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
-    private val posted = mutableSetOf<String>()
+    private val posted = mutableSetOf<Pair<String, Int>>()
     init {
         manager.createNotificationChannels(listOf(
             NotificationChannel(MONITOR, "后台监控", NotificationManager.IMPORTANCE_LOW),
@@ -70,14 +70,32 @@ class TaskNotifications(private val context: Context) {
         if (!task.terminal && started != null) builder.setWhen(started).setUsesChronometer(true)
         else builder.setShowWhen(false)
         manager.notify(tag, TASK_ID, builder.build())
-        posted.add(tag)
+        posted.add(tag to TASK_ID)
+    }
+
+    fun schedule(account: String, bot: String, session: String, title: String?, kind: String) {
+        if (!allowed) return
+        val label = when (kind) {
+            "reply" -> "日程已完成"
+            "failed" -> "日程执行失败"
+            "needs_input" -> "日程等待你处理"
+            "update" -> "日程有新进展"
+            else -> return
+        }
+        val tag = Uri.Builder().scheme("memoh-task").authority("schedule").appendPath(account).appendPath(bot).appendPath(session).build().toString()
+        manager.notify(tag, SCHEDULE_ID, NotificationCompat.Builder(context, if (kind == "needs_input") DECISIONS else TASKS)
+            .setSmallIcon(R.drawable.ic_task_notification).setContentTitle(label)
+            .setContentText(title?.takeIf(String::isNotBlank)?.take(80)).setContentIntent(open(account, bot, session))
+            .setCategory(NotificationCompat.CATEGORY_STATUS).setAutoCancel(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).build())
+        posted.add(tag to SCHEDULE_ID)
     }
 
     fun cancelTask(account: String, bot: String, session: String) {
         val tag = Uri.Builder().scheme("memoh-task").authority("notification").appendPath(account).appendPath(bot).appendPath(session).build().toString()
-        manager.cancel(tag, TASK_ID); posted.remove(tag)
+        manager.cancel(tag, TASK_ID); posted.remove(tag to TASK_ID)
     }
-    fun clear() { posted.forEach { manager.cancel(it, TASK_ID) }; posted.clear() }
+    fun clear() { posted.forEach { (tag, id) -> manager.cancel(tag, id) }; posted.clear() }
 
     companion object {
         const val MONITOR = "cloud-monitor"
@@ -85,5 +103,6 @@ class TaskNotifications(private val context: Context) {
         const val DECISIONS = "task-decisions"
         const val FOREGROUND_ID = 1
         private const val TASK_ID = 2
+        private const val SCHEDULE_ID = 3
     }
 }

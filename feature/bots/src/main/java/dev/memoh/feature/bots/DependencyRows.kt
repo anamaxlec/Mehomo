@@ -40,4 +40,5 @@ fun managementPageForError(action: dev.memoh.core.model.ErrorAction): Management
     dev.memoh.core.model.ErrorAction.Dependencies -> ManagementPage.Dependencies
     dev.memoh.core.model.ErrorAction.Agents -> ManagementPage.Agents
     dev.memoh.core.model.ErrorAction.Connectors -> ManagementPage.Connectors
+    dev.memoh.core.model.ErrorAction.Providers -> ManagementPage.Providers
 }

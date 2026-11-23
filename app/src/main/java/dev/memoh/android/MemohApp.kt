@@ -414,9 +414,9 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 dev.memoh.feature.chat.components.LocalChatBotId provides botId,
             ) {
             androidx.compose.runtime.CompositionLocalProvider(
-                dev.memoh.core.designsystem.component.LocalErrorActionHandler provides { action ->
+                dev.memoh.core.designsystem.component.LocalErrorActionHandler provides (if (state.botPermissions?.contains("manage") == true) { action ->
                     navController.navigate(Routes.management(botId, dev.memoh.feature.bots.managementPageForError(action).name))
-                },
+                } else null),
                 dev.memoh.core.markdown.LocalWorkspaceLinkHandler provides { link ->
                 when (link) {
                     is dev.memoh.core.markdown.WorkspaceLink.File -> navController.navigate(Routes.feature(botId, BotFeature.Files.name, link.path))
@@ -431,6 +431,7 @@ fun MemohApp(sharedContent: SharedContent? = null, onShareConsumed: () -> Unit =
                 onDraftChange = viewModel::setDraft,
                 onLoadOlder = viewModel::loadOlder,
                 onRetryHistory = viewModel::retryHistory,
+                onRetryRuntime = viewModel::retryRuntimeSync,
                 onRegenerate = viewModel::regenerate,
                 onEditMessage = viewModel::editMessage,
                 onFork = viewModel::fork,

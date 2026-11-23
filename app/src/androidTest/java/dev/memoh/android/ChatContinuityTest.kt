@@ -534,11 +534,11 @@ class ChatContinuityTest {
                 compose.waitUntil(8_000) { vm.state.value.canSend && vm.state.value.queue.steerSupported }
                 server.queueFailure = true
                 compose.onNode(hasSetTextAction()).performTextInput("FAIL_PANEL")
-                compose.onNodeWithText("加入后续").performClick()
+                compose.onNodeWithText("加入后续").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
                 compose.waitUntil(8_000) { !vm.state.value.busy && vm.state.value.error != null }
                 compose.onNode(hasSetTextAction()).assertTextEquals("FAIL_PANEL")
                 server.queueFailure = false
-                compose.onNodeWithText("加入后续").performClick()
+                compose.onNodeWithText("加入后续").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
                 compose.waitUntil(8_000) { !vm.state.value.busy && vm.state.value.queue.followUp.isNotEmpty() }
                 compose.onNode(hasSetTextAction()).assert(SemanticsMatcher.expectValue(
                     androidx.compose.ui.semantics.SemanticsProperties.EditableText, androidx.compose.ui.text.AnnotatedString("")))

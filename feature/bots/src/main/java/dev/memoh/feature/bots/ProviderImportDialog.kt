@@ -1,6 +1,10 @@
 package dev.memoh.feature.bots
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -9,6 +13,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.memoh.core.data.SessionRepository
+import dev.memoh.core.designsystem.component.ErrorDetails
+import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohFormDialog
+import dev.memoh.core.model.MemohError
 import dev.memoh.core.model.ProviderImport
 import dev.memoh.core.network.*
 import kotlinx.coroutines.CancellationException
@@ -20,7 +28,13 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
 import kotlinx.serialization.json.JsonObject
 
-data class ProviderImportState(val busy: Boolean = false, val error: String? = null, val createdId: String? = null, val modelsImported: Boolean = true)
+data class ProviderImportState(
+    val busy: Boolean = false,
+    val error: String? = null,
+    val createdId: String? = null,
+    val modelsImported: Boolean = true,
+    val problem: MemohError? = null,
+)
 
 @HiltViewModel
 class ProviderImportViewModel @Inject constructor(private val repository: SessionRepository, @ApplicationContext private val context: Context) : ViewModel() {
@@ -57,19 +71,24 @@ class ProviderImportViewModel @Inject constructor(private val repository: Sessio
                 }
                 var imported = true
                 var importError: String? = null
+                var problem: MemohError? = null
                 try { if (generation == repository.generation) {
-                    val verified = api.managementResult(listOf("providers", id, "test")).obj()
-                    if (verified.text("status") in listOf("auth_error", "error")) throw UserFacingException(verified.text("code").takeIf(String::isNotBlank)?.let {
-                        dev.memoh.core.model.errorMessage(it)
-                    } ?: "连接验证失败，请检查 API key 和地址。")
-                    api.managementResult(providerImportPath(JsonObject(created.obj() +
+                    val verified = api.modelConnectionProbe("providers", id)
+                    if (verified.rejected) {
+                        val failure = verified.connectionTestResult()
+                        imported = false
+                        importError = failure.summary
+                        problem = failure.problem
+                    } else api.importProviderModels(providerImportPath(JsonObject(created.obj() +
                         (if (source != null) mapOf("metadata" to sourceMetadata(source)) else emptyMap()))))
                 } }
                 catch (e: CancellationException) { throw e }
-                catch (e: Exception) { imported = false; importError = e.userMessage() }
-                if (generation == repository.generation) _state.value = ProviderImportState(createdId = id, modelsImported = imported, error = importError)
+                catch (e: Exception) { imported = false; importError = e.userMessage(); problem = (e as? ApiException)?.problem }
+                if (generation == repository.generation) _state.value = ProviderImportState(
+                    createdId = id, modelsImported = imported, error = importError, problem = problem)
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (generation == repository.generation) _state.value = ProviderImportState(error = e.userMessage()) }
+            catch (e: Exception) { if (generation == repository.generation) _state.value = ProviderImportState(
+                error = e.userMessage(), problem = (e as? ApiException)?.problem) }
         }
     }
 }
@@ -77,19 +96,26 @@ class ProviderImportViewModel @Inject constructor(private val repository: Sessio
 @Composable
 fun ProviderImportDialog(payload: ProviderImport, destination: String, state: ProviderImportState,
     onConfirm: () -> Unit, onDismiss: () -> Unit, onDone: () -> Unit) {
-    AlertDialog(onDismissRequest = { if (!state.busy) onDismiss() },
-        title = { Text(if (state.createdId == null) "导入供应商" else "供应商已添加") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    MemohFormDialog(onDismissRequest = { if (!state.busy) onDismiss() },
+        title = if (state.createdId == null) "导入供应商" else "供应商已添加",
+        text = { Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("保存到 · $destination", style = MaterialTheme.typography.labelLarge)
             Text(payload.name, style = MaterialTheme.typography.titleMedium)
             Text(payload.baseUrl)
             Text(payload.clientType, style = MaterialTheme.typography.bodySmall)
             Text("API key · ${payload.maskedKey}", style = MaterialTheme.typography.bodyMedium)
             if (state.busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth())
-            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            state.error?.let {
+                Text(it, color = MaterialTheme.colorScheme.error)
+                ErrorDetails(state.problem, it)
+            }
             if (state.createdId == null) Text("确认后会保存配置，并尝试从此供应商导入模型。", style = MaterialTheme.typography.bodySmall)
             else if (!state.modelsImported) Text("模型导入暂未完成，可在供应商页面重试。", style = MaterialTheme.typography.bodySmall)
         } },
-        confirmButton = { TextButton(if (state.createdId == null) onConfirm else onDone, enabled = !state.busy) { Text(if (state.createdId == null) "确认添加" else "查看供应商") } },
+        confirmButton = {
+            MemohActionButton(if (state.createdId == null) "确认添加" else "查看供应商", Icons.Filled.Check,
+                if (state.createdId == null) onConfirm else onDone, enabled = !state.busy, primary = true)
+        },
         dismissButton = { TextButton(onDismiss, enabled = !state.busy) { Text("关闭") } })
 }

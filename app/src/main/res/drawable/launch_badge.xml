@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:width="@dimen/launch_badge_size" android:height="@dimen/launch_badge_size" android:gravity="center">
+        <shape android:shape="oval">
+            <solid android:color="@color/launcher_background" />
+        </shape>
+    </item>
+    <item android:drawable="@drawable/ic_launcher_foreground" android:width="@dimen/launch_mascot_size"
+        android:height="@dimen/launch_mascot_size" android:gravity="center" />
+</layer-list>

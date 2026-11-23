@@ -36,10 +36,10 @@ class RecentProtocolTest {
     }
     @Test fun codexQuotaIsOfferedOnlyForConnectedChatGptCodexAgents() {
         val agent = json.decodeFromString<BotAgent>("""{"id":"a","runtime":"codex","metadata":{"auth":"chatgpt"}}""")
-        assertTrue(agent.hasCodexUsage)
-        assertFalse(agent.copy(metadata = buildJsonObject { put("auth", "api_key") }).hasCodexUsage)
-        assertFalse(agent.copy(runtime = "claude-code").hasCodexUsage)
-        val usage = json.decodeFromString<CodexUsage>("""{"limit_reached":true,"windows":[{"used_percent":103,"window_minutes":10080,"resets_at":"2026-10-14T01:00:00Z"}]}""")
+        assertTrue(agent.supportsAgentQuota)
+        assertFalse(agent.copy(metadata = buildJsonObject { put("auth", "api_key") }).supportsAgentQuota)
+        assertFalse(agent.copy(runtime = "claude-code").supportsAgentQuota)
+        val usage = json.decodeFromString<AgentQuota>("""{"limit_reached":true,"windows":[{"used_percent":103,"window_minutes":10080,"resets_at":"2026-10-14T01:00:00Z"}]}""")
         assertTrue(usage.limitReached)
         assertEquals("1 周", usage.windows.single().label)
         assertEquals(103.0, usage.windows.single().usedPercent, .0)

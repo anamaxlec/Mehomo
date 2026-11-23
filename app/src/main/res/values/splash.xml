@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="launch_badge_size">112dp</dimen>
+    <dimen name="launch_mascot_size">128dp</dimen>
+
+    <style name="Theme.Memoh.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/memoh_surface</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/launch_badge</item>
+        <item name="postSplashScreenTheme">@style/Theme.Memoh</item>
+    </style>
+</resources>

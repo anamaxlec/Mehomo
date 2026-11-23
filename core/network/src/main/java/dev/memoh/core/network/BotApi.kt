@@ -141,12 +141,15 @@ suspend fun MemohApi.uploadFile(botId: String, path: String, name: String, mime:
             .addFormDataPart("file", name, bytes.toRequestBody(mime.toMediaType())).build()))
 fun workspaceDownloadPath(botId: String, path: String): String = "${botPath(botId)}/container/fs/download${query("path" to path)}"
 suspend fun MemohApi.runtimeGoal(botId: String, sessionId: String): JsonObject = get("${sessionPath(botId, sessionId)}/runtime-controls/goal")
-suspend fun MemohApi.agentQuota(botId: String, agentId: String): CodexUsage {
+suspend fun MemohApi.agentAccount(botId: String, agentId: String): AgentAccount =
+    get("${botPath(botId)}/agents/${segment(agentId)}/account")
+
+suspend fun MemohApi.agentQuota(botId: String, agentId: String, legacyCodexFallback: Boolean = true): AgentQuota {
     val agentPath = "${botPath(botId)}/agents/${segment(agentId)}"
     return try {
         get("$agentPath/quota")
     } catch (error: ApiException) {
-        if (error.status != 404) throw error
+        if (error.status != 404 || !legacyCodexFallback) throw error
         get("$agentPath/codex/usage")
     }
 }
@@ -163,6 +166,7 @@ suspend fun MemohApi.approveTool(botId: String, id: String, body: JsonObject = a
 suspend fun MemohApi.rejectTool(botId: String, id: String, reason: String?): Unit = change("${botPath(botId)}/tool-approvals/${segment(id)}/reject", "POST", apiBody("reason" to reason))
 
 fun MemohApi.sessionActivity(botId: String): Flow<SessionActivityEvent> = sse("${botPath(botId)}/sessions/events", SessionActivityEvent.serializer())
+fun MemohApi.sessionAttention(): Flow<SessionAttentionEvent> = sse("/users/me/attention/events", SessionAttentionEvent.serializer())
 fun MemohApi.installApp(botId: String, registryId: String, appId: String, revision: String): Flow<AppInstallEvent> =
     sse("${botPath(botId)}/apps", AppInstallEvent.serializer(), apiBody("registry_id" to registryId, "app_id" to appId, "revision" to revision), "POST")
 fun MemohApi.resumeApp(botId: String, id: String): Flow<AppInstallEvent> = sse("${botPath(botId)}/apps/${segment(id)}/resume", AppInstallEvent.serializer(), apiBody(), "POST")

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -28,8 +29,9 @@ fun MemohActionButton(
         Text(label)
     }
     val padding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+    val shapes = ButtonDefaults.shapes(shape = CircleShape, pressedShape = MaterialTheme.shapes.small)
     if (primary) Button(onClick = onClick, modifier = modifier, enabled = enabled,
-        shapes = ButtonDefaults.shapes(), contentPadding = padding,
+        shapes = shapes, contentPadding = padding,
         colors = if (danger) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error,
             contentColor = MaterialTheme.colorScheme.onError) else ButtonDefaults.buttonColors(),
         content = content)
@@ -38,7 +40,7 @@ fun MemohActionButton(
         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
         content = content)
     else FilledTonalButton(onClick = onClick, modifier = modifier, enabled = enabled,
-        shapes = ButtonDefaults.shapes(), contentPadding = padding,
+        shapes = shapes, contentPadding = padding,
         colors = ButtonDefaults.filledTonalButtonColors(
             containerColor = MaterialTheme.colorScheme.secondaryContainer,
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer),

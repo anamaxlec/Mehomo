@@ -101,6 +101,9 @@ internal fun toolResult(message: UIMessage): JsonObject {
     return (result["structuredContent"] as? JsonObject)?.takeIf { it.isNotEmpty() } ?: result
 }
 
+internal fun toolContinuesInBackground(message: UIMessage): Boolean =
+    toolResult(message).string("status") == "running_in_background"
+
 internal fun toolResultFailed(message: UIMessage): Boolean =
     listOf(message.output.objectValue(), toolResult(message)).any { (it["isError"] as? JsonPrimitive)?.booleanOrNull == true }
 
@@ -125,7 +128,9 @@ internal fun toolOutputText(message: UIMessage): String {
         .filter(String::isNotBlank).joinToString("\n")
     if (toolResultFailed(message)) return listOf(logs, text).filter(String::isNotBlank).distinct().joinToString("\n")
         .ifBlank { renderToolValue(output) }
-    return logs.ifBlank { text }.ifBlank { renderToolValue(output) }
+    return logs.ifBlank { text }.ifBlank {
+        if (toolContinuesInBackground(message)) "" else renderToolValue(output)
+    }
 }
 
 internal fun isCompletedQuestion(message: UIMessage): Boolean {

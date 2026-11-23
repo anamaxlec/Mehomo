@@ -225,6 +225,24 @@ class TaskMonitorService : Service() {
                     delay(5000)
                 }
             }
+            launch {
+                while (current()) {
+                    try {
+                        api.sessionAttention().collect { event ->
+                            if (!current() || event.type != "session_attention" || event.botId != bot) return@collect
+                            val id = event.sessionId?.takeIf(String::isNotBlank) ?: return@collect
+                            val kind = event.kind ?: return@collect
+                            // Existing chat sessions have no schedule_id, but update is only sent by notify_user.
+                            if (event.scheduleId.isNullOrBlank() && kind != "update") return@collect
+                            if (if (kind == "needs_input") decisionNotifications else replyNotifications)
+                                notifications.schedule(account, bot, id, event.title, kind)
+                        }
+                    } catch (e: CancellationException) { throw e }
+                    catch (e: ApiException) { if (e.status == 404 || e.status == 403) return@launch }
+                    catch (_: Exception) { /* Existing chat monitoring continues independently. */ }
+                    delay(5000)
+                }
+            }
             refreshes.trySend(Unit)
             socket.connect()
             awaitCancellation()

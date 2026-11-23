@@ -20,6 +20,38 @@ class ManagementApiTest {
     @Before fun setup() { server = MockWebServer(); server.start() }
     @After fun cleanup() { server.shutdown() }
     private fun api() = MemohApi(OkHttpClient(), ServerEndpoint(ServerKind.SelfHosted, server.url("/").toString().trimEnd('/'), "", ""), json, auth)
+    @Test fun `connection probes retain legacy booleans and structured errors`() = runTest {
+        server.enqueue(MockResponse().setBody("""{"ok":"true","latency_ms":"73","extension":true}"""))
+        val passed = api().modelConnectionProbe("models", "model/one")
+        assertTrue(passed.accepted)
+        assertEquals(73L, passed.latencyMillis)
+        assertEquals("/models/model%2Fone/test", server.takeRequest().path)
+
+        server.enqueue(MockResponse().setBody("""{"status":"auth_error","error_code":"provider.insufficient_quota","request_id":"req-1","trace_id":"trace-1"}"""))
+        val failed = api().modelConnectionProbe("providers", "provider")
+        assertTrue(failed.rejected)
+        assertEquals("provider.insufficient_quota", failed.problem.code)
+        assertEquals("req-1", failed.problem.requestId)
+        assertEquals("trace-1", failed.problem.traceId)
+        assertEquals("/providers/provider/test", server.takeRequest().path)
+    }
+
+    @Test fun `model imports read optional counts and stale catalog state`() = runTest {
+        server.enqueue(MockResponse().setBody("""{"created":2,"updated":"3","skipped":4,"catalog":{"stale":true}}"""))
+        val catalog = api().importProviderModels(listOf("providers", "provider", "import-catalog-models"))
+        assertEquals(2, catalog.created)
+        assertEquals(3, catalog.updated)
+        assertEquals(4, catalog.skipped)
+        assertTrue(catalog.staleCatalog)
+        assertEquals("/providers/provider/import-catalog-models", server.takeRequest().path)
+
+        server.enqueue(MockResponse().setBody("""{"items":[]}"""))
+        val endpoint = api().importProviderModels(listOf("providers", "provider", "import-models"))
+        assertNull(endpoint.created)
+        assertFalse(endpoint.staleCatalog)
+        assertEquals("/providers/provider/import-models", server.takeRequest().path)
+    }
+
     @Test fun `Cloud profile requests omit team scope without changing later team requests`() = runTest {
         val cloud = CloudAuth(OkHttpClient(), json, ServerEndpoint(ServerKind.OfficialCloud, server.url("/").toString().trimEnd('/'), "", ""))
         cloud.teamId = "team-1"

@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Compress
+import dev.memoh.core.designsystem.component.MemohBottomSheet
 import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.model.errorMessage
 import dev.memoh.feature.chat.ChatUiState
@@ -28,7 +29,7 @@ fun ContextInspectorSheet(state: ChatUiState, onLoad: (Boolean) -> Unit, onDismi
     val selected = turns.firstOrNull { it.runId.ifBlank { it.assistantMessageId.orEmpty() } == selectedKey } ?: turns.lastOrNull()
     val strip = rememberLazyListState()
     LaunchedEffect(turns.size) { if (turns.isNotEmpty()) strip.scrollToItem(turns.lastIndex) }
-    ModalBottomSheet(onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    MemohBottomSheet(onDismiss) {
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 680.dp), contentPadding = PaddingValues(20.dp, 0.dp, 20.dp, 32.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item {

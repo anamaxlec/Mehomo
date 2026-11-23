@@ -144,6 +144,7 @@ data class BotAgent(
     val enabled: Boolean? = null,
     val metadata: JsonObject? = null,
     @SerialName("agent_credential_id") val agentCredentialId: String? = null,
+    @SerialName("reports_quota") val reportsQuota: Boolean? = null,
     @SerialName("created_at") val createdAt: String? = null,
     @SerialName("updated_at") val updatedAt: String? = null,
 )

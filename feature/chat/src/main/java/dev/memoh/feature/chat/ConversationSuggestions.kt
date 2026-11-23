@@ -21,7 +21,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.designsystem.component.ChatExampleGallery
+import dev.memoh.core.designsystem.component.ListIconTone
 import dev.memoh.core.designsystem.component.MemohActionButton
+import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohListIcon
 import dev.memoh.core.designsystem.motion.MemohMotion
 import dev.memoh.core.model.*
@@ -42,14 +44,14 @@ fun ConversationSuggestions(state: ChatUiState, onPrefill: (String) -> Unit, onR
         val missing = example.missing(state.exampleCapabilities)
         if (missing.isNotEmpty()) onConfigure(missing.first()) else pick(example.prompt)
     }, onDismiss = { gallery = false })
-    replacement?.let { prompt -> AlertDialog(onDismissRequest = { replacement = null },
-        title = { Text("替换当前草稿") }, text = { Text("输入框中已有内容，使用这个推荐会替换文字草稿。") },
-        confirmButton = { TextButton({ replacement = null; onPrefill(prompt) }) { Text("替换") } },
+    replacement?.let { prompt -> MemohFormDialog(onDismissRequest = { replacement = null },
+        title = "替换当前草稿", text = { Text("使用这个建议会替换输入框中的文字。") },
+        confirmButton = { MemohActionButton("替换", Icons.Filled.Check, { replacement = null; onPrefill(prompt) }, primary = true) },
         dismissButton = { TextButton({ replacement = null }) { Text("取消") } }) }
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            MemohListIcon(Icons.Filled.ChatBubbleOutline)
+            MemohListIcon(Icons.Filled.ChatBubbleOutline, ListIconTone.Tertiary, size = 52.dp)
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("开始对话", style = MaterialTheme.typography.headlineSmall)
                 Text("选择一个建议，或写下你的问题", style = MaterialTheme.typography.bodyMedium,

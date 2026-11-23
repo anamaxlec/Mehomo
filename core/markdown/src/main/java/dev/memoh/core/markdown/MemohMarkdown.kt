@@ -42,12 +42,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.runtime.rememberCoroutineScope
 import android.content.ClipData
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
@@ -148,11 +154,47 @@ object MemohMarkdown {
     @Composable
     fun Code(code: String, language: String = "") { CodeBlock(code, language) }
 
-    /**
-     * Renders [markdown]. Parsing is memoised by the caller via [remember];
-     * during streaming the text changes on every frame, so this stays cheap by
-     * only re-parsing when the string actually differs.
-     */
+    private data class RenderSource(val markdown: String, val singleDollarMath: Boolean)
+    private data class RenderDocument(val source: RenderSource, val math: MathDocument, val node: Node)
+
+    // Renderer nodes are read-only after parsing. Bound both entry count and retained source size.
+    private val completedDocuments = object : LinkedHashMap<RenderSource, RenderDocument>(48, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RenderSource, RenderDocument>): Boolean =
+            size > 48
+    }
+
+    private fun renderDocument(source: RenderSource): RenderDocument {
+        val math = protectMath(source.markdown, source.singleDollarMath)
+        return RenderDocument(source, math, parse(math.markdown))
+    }
+
+    @Composable
+    private fun rememberRenderDocument(markdown: String, singleDollarMath: Boolean, streaming: Boolean): RenderDocument? {
+        val source = remember(markdown, singleDollarMath) { RenderSource(markdown, singleDollarMath) }
+        val latestSource by rememberUpdatedState(source)
+        var lastDocument by remember(singleDollarMath) { mutableStateOf<RenderDocument?>(null) }
+        val parseInBackground = streaming && markdown.length >= 2_048
+        if (parseInBackground) {
+            LaunchedEffect(singleDollarMath) {
+                // Finish one parse at a time and take the newest pending revision.
+                snapshotFlow { latestSource }.conflate().collect { revision ->
+                    lastDocument = withContext(Dispatchers.Default) { renderDocument(revision) }
+                }
+            }
+            return lastDocument?.takeIf { markdown.startsWith(it.source.markdown) }
+        }
+        val document = remember(source, streaming) {
+            val previous = lastDocument?.takeIf { it.source == source }
+            if (streaming || markdown.length > 16_384) previous ?: renderDocument(source)
+            else synchronized(completedDocuments) { completedDocuments[source] }
+                ?: (previous ?: renderDocument(source)).also {
+                    synchronized(completedDocuments) { completedDocuments[source] = it }
+                }
+        }
+        SideEffect { lastDocument = document }
+        return document
+    }
+
     @Composable
     fun Markdown(
         markdown: String,
@@ -160,9 +202,9 @@ object MemohMarkdown {
         onLinkClick: ((String) -> Unit)? = null,
         singleDollarMath: Boolean = true,
         workspaceImagesAsLinks: Boolean = false,
+        streaming: Boolean = false,
     ) {
-        val math = remember(markdown, singleDollarMath) { protectMath(markdown, singleDollarMath) }
-        val document = remember(math.markdown) { parse(math.markdown) }
+        val rendered = rememberRenderDocument(markdown, singleDollarMath, streaming)
         val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
         val workspaceHandler = LocalWorkspaceLinkHandler.current
         val linkHandler = MarkdownLinkHandler(workspaceHandler != null || onLinkClick != null) { url ->
@@ -173,14 +215,14 @@ object MemohMarkdown {
                 null -> Unit
             }
         }
-        androidx.compose.runtime.CompositionLocalProvider(inlineMath provides math.expressions,
+        androidx.compose.runtime.CompositionLocalProvider(inlineMath provides rendered?.math?.expressions.orEmpty(),
             LocalMarkdownWorkspaceImagesAsLinks provides workspaceImagesAsLinks) {
         SelectionContainer {
             Column(
                 modifier = modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                NodeChildren(document, linkHandler)
+                if (rendered != null) NodeChildren(rendered.node, linkHandler)
             }
         }
         }

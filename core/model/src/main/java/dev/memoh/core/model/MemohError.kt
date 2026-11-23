@@ -15,6 +15,9 @@ data class MemohError(
     @SerialName("trace_id") val traceId: String? = null,
 ) {
     val isCanceled: Boolean get() = status == 499 || fault == "canceled" || code in setOf("canceled", "runtime_control.cancelled")
+    val upstreamDetail: String? get() = (args?.get("upstream") as? JsonPrimitive)
+        ?.takeIf { it.isString }?.content?.trim()?.takeIf(String::isNotEmpty)
+
     fun text(): String {
         if (isCanceled) return ""
         val template = errorMessages[code] ?: errorMessages[legacyCodes[code]] ?: errorMessages[statusCode(status)]!!
@@ -29,6 +32,8 @@ data class MemohError(
         "acp_agent_not_configured", "acp_agent_auth_invalid", "external_runtime.auth_required",
         "codex_auth_token_missing", "codex_oauth_incomplete", "agent_credential.reauthorization_required" -> ErrorAction.Agents
         "connector.oauth_client_not_configured", "connector_oauth_client_not_configured", "connector.not_configured" -> ErrorAction.Connectors
+        "agent.provider_auth_failed", "agent.provider_permission_denied", "agent.provider_quota_exhausted",
+        "agent.provider_request_rejected" -> ErrorAction.Providers
         else -> null
     }
     companion object {
@@ -46,15 +51,18 @@ data class MemohError(
                 }
             }
             collect(value, 0)
-            fun JsonObject.string(key: String) = (get(key) as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+            fun JsonObject.string(key: String) = (get(key) as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotBlank)
             val record = records.firstOrNull { it.string("code") != null || it.string("error_code") != null }
+            fun JsonObject.requestId() = string("request_id") ?: string("requestId")
+            fun JsonObject.traceId() = string("trace_id") ?: string("traceId")
+            val correlation = (listOfNotNull(record) + records).firstOrNull { it.requestId() != null || it.traceId() != null }
             return MemohError(
                 code = record?.string("code") ?: record?.string("error_code"),
                 args = record?.get("args") as? JsonObject,
                 status = status ?: records.firstNotNullOfOrNull { (it["status"] as? JsonPrimitive)?.intOrNull ?: (it["http_status"] as? JsonPrimitive)?.intOrNull },
                 fault = record?.string("fault") ?: records.firstNotNullOfOrNull { it.string("fault") },
-                requestId = record?.string("request_id") ?: records.firstNotNullOfOrNull { it.string("request_id") ?: it.string("requestId") },
-                traceId = record?.string("trace_id") ?: records.firstNotNullOfOrNull { it.string("trace_id") },
+                requestId = correlation?.requestId(),
+                traceId = correlation?.traceId(),
             )
         }
         fun parse(body: String?, status: Int? = null): MemohError =
@@ -63,7 +71,7 @@ data class MemohError(
 }
 
 enum class ErrorAction(val title: String) {
-    BotSettings("配置默认模型"), Dependencies("管理依赖"), Agents("Agent 设置"), Connectors("连接器设置"),
+    BotSettings("配置默认模型"), Dependencies("管理依赖"), Agents("Agent 设置"), Connectors("连接器设置"), Providers("模型服务设置"),
 }
 
 fun errorMessage(code: String?, args: Map<String, String>? = null, status: Int? = null, fault: String? = null): String =

@@ -2,6 +2,7 @@ package dev.memoh.feature.chat
 
 import dev.memoh.core.model.UIMessage
 import dev.memoh.core.model.UIUserInput
+import kotlinx.serialization.json.Json
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -36,5 +37,16 @@ class AssistantRenderItemsTest {
         assertEquals(live.single().key, history.single().key)
         assertEquals(assistantRenderItems("turn", listOf(tool)).single().key,
             assistantRenderItems("turn", listOf(tool.copy(id = 0))).single().key)
+    }
+
+    @Test fun onlyDeliveredScheduleNoticesBreakOutOfToolGroups() {
+        val call = UIMessage(1, "tool", name = "notify_user", toolCallId = "notice")
+        val running = call.copy(running = true)
+        val unavailable = call.copy(id = 2, output = Json.parseToJsonElement("""{"structuredContent":{"status":"unavailable"}}"""))
+        val notified = call.copy(id = 3, output = Json.parseToJsonElement("""{"structuredContent":{"status":"notified"}}"""))
+        val items = assistantRenderItems("turn", listOf(running, unavailable, notified, UIMessage(4, "text", "已找到更新")))
+        assertEquals(listOf(true, false, false), items.map { it.isProcess })
+        assertEquals(listOf(running, unavailable), items.first().messages)
+        assertEquals(notified, items[1].messages.single())
     }
 }

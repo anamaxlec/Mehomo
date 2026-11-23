@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.memoh.core.designsystem.component.MemohBottomSheet
 import dev.memoh.core.data.SessionRepository
 import dev.memoh.core.model.*
 import dev.memoh.core.network.*
@@ -115,7 +116,7 @@ class FolderEditorViewModel @Inject constructor(private val repository: SessionR
 
 @Composable
 fun FolderEditorSheet(state: FolderEditorState, vm: FolderEditorViewModel, onDismiss: () -> Unit) {
-    ModalBottomSheet({ if (!state.busy) onDismiss() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    MemohBottomSheet({ if (!state.busy) onDismiss() }) {
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 650.dp), contentPadding = PaddingValues(20.dp, 0.dp, 20.dp, 32.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
                 Text(if (state.folder == null) "新建文件夹" else "编辑文件夹", style = MaterialTheme.typography.titleLarge)

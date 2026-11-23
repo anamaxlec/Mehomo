@@ -103,12 +103,14 @@ fun ProcessBlock(
         } else {
             val (phase, details) = processSummary(messages, isStreaming)
             val running = isStreaming || isRunActive && messages.any { it.running }
+            val background = !expanded && messages.any(::toolContinuesInBackground)
             val totals = messages.filterNot(::toolResultFailed).map { diffCounts(it.diff) }
             DisclosureRow(expanded, onToggle = { onToggleDetails(); expanded = !expanded }) {
                 ProcessLabel(phase, running, if (details.isEmpty()) Modifier.weight(1f, fill = false) else Modifier)
                 if (details.isNotEmpty()) Text(details, Modifier.weight(1f, fill = false),
                     style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (!running) DiffCounts(totals.sumOf { it.first }, totals.sumOf { it.second })
+                if (background) BackgroundCommandLabel()
             }
             if (isStreaming && !expanded) {
                 ProcessLabel(
@@ -173,6 +175,7 @@ private fun ProcessStep(message: UIMessage, isStreaming: Boolean, isRunActive: B
         }
         if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        else if (toolContinuesInBackground(message)) BackgroundCommandLabel()
         if (running && status.isBlank()) message.elapsedTimeSeconds?.takeIf { it.isFinite() && it >= 0 }?.let {
             Text("执行中 · ${it.toInt()} 秒", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -285,6 +288,7 @@ private fun ToolDetails(message: UIMessage) {
     val result = toolResult(message)
     val command = input.string("command", "cmd")
     val failed = toolResultFailed(message)
+    val background = toolContinuesInBackground(message)
     if (command.isNotBlank()) DetailText("$ $command")
     else if (input.isNotEmpty()) input.forEach { (name, value) ->
         val label = when (name) {
@@ -300,6 +304,10 @@ private fun ToolDetails(message: UIMessage) {
             color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
     result.string("exit_code", "exitCode").takeIf { it.isNotBlank() && it != "0" }?.let { DetailText("退出码 $it", error = true) }
+    if (background) {
+        val processId = result.string("process_id", "processId")
+        if (processId.isNotEmpty()) DetailText("进程 ID  $processId")
+    }
     if (!message.progress.isNullOrEmpty()) DetailText(message.progress!!.joinToString("\n", transform = ::renderToolValue))
     message.backgroundTask?.let { task ->
         listOfNotNull(task.outputTail, task.chunk).firstOrNull(String::isNotBlank)?.let { DetailText(it) }
@@ -310,9 +318,15 @@ private fun ToolDetails(message: UIMessage) {
         if (!message.diff.isNullOrBlank()) DetailText(message.diff!!, diff = true)
         if (output.isNotBlank()) DetailText(output)
     }
-    if (output.isBlank() && message.diff.isNullOrBlank() && message.progress.isNullOrEmpty()) Text(
+    if (!background && output.isBlank() && message.diff.isNullOrBlank() && message.progress.isNullOrEmpty()) Text(
         if (message.running) "等待输出中" else "暂无输出", style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+private fun BackgroundCommandLabel() {
+    Text("已转入后台", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1)
 }
 
 @Composable

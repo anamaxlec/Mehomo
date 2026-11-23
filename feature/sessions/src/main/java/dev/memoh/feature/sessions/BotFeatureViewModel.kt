@@ -200,7 +200,7 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
                         val page = api.marketSkills(text = current.query)
                         loaded = loaded.copy(marketSkills = page.data.orEmpty(), marketPage = 1, marketTotal = page.total ?: 0)
                     } else loaded = loaded.copy(skills = api.skills(current.botId))
-                    BotFeature.Mcp -> loaded = loaded.copy(connections = api.mcpConnections(current.botId))
+                    BotFeature.Mcp -> loaded = loaded.copy(connections = api.mcpConnections(current.botId).sortedByDescending { it.isActive == true })
                     BotFeature.Files -> {
                         val listing = api.files(current.botId, current.filePath)
                         loaded = loaded.copy(filePath = listing.path, files = listing.entries.sortedWith(compareByDescending<WorkspaceFile> { it.isDir }.thenBy { it.name.lowercase() }))
@@ -387,9 +387,29 @@ class BotFeatureViewModel @Inject constructor(private val repository: SessionRep
         _state.update { it.copy(graph = graph, graphMemories = entries) }
     }
     fun closeGraph() { _state.update { it.copy(graph = null) } }
-    fun saveSchedule(id: String?, body: JsonObject, onSaved: () -> Unit = {}) = action("日程已保存") { api, bot -> api.saveSchedule(bot, id, body); onSaved() }
-    private suspend fun scheduleTimezone(api: MemohApi, bot: String): String? = api.bot(bot).timezone?.takeIf(String::isNotBlank)
-        ?: (api.managementRead("users", "me") as? JsonObject)?.get("timezone")?.jsonPrimitive?.contentOrNull
+    fun saveSchedule(id: String?, body: JsonObject, onSaved: () -> Unit = {}) {
+        val current = state.value
+        val generation = repository.generation
+        action { api, bot ->
+            val saved = api.saveSchedule(bot, id, body)
+            val policy = (body["notify_policy"] as? JsonPrimitive)?.contentOrNull
+            val channels = (body["contact_via_channels"] as? JsonPrimitive)?.booleanOrNull
+            if (generation == repository.generation && itMatches(current)) {
+                val missingSettings = policy != null && saved.notifyPolicy != policy ||
+                    channels != null && saved.contactViaChannels != channels
+                _state.update { it.copy(notice = if (missingSettings) "日程已保存，服务端未保存提醒设置" else "日程已保存") }
+                onSaved()
+            }
+        }
+    }
+
+    private suspend fun scheduleTimezone(api: MemohApi, bot: String): String? {
+        val settings = try { api.managementRead("bots", bot, "settings") as? JsonObject }
+            catch (e: ApiException) { if (e.status == 404 || e.status == 403) null else throw e }
+        return (settings?.get("effective_timezone") as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+            ?: api.bot(bot).timezone?.takeIf(String::isNotBlank)
+            ?: (api.managementRead("users", "me") as? JsonObject)?.get("timezone")?.jsonPrimitive?.contentOrNull
+    }
 
     fun scheduleOptions() {
         scheduleOptionsJob?.cancel()

@@ -5,6 +5,7 @@ import dev.memoh.core.model.BotAgent
 import dev.memoh.core.model.ChatModel
 import dev.memoh.core.model.AgentModelCatalog
 import dev.memoh.core.model.ModelProvider
+import dev.memoh.core.model.MemohError
 import dev.memoh.core.model.CurrentUser
 import dev.memoh.core.model.ListResponse
 import dev.memoh.core.model.LoginRequest
@@ -37,13 +38,18 @@ import okhttp3.Response
 import java.io.IOException
 
 /** A REST failure carrying the server's status and body for diagnostics. */
-@Suppress("UNUSED_PARAMETER")
-class ApiException(
+class ApiException private constructor(
     val status: Int,
     val body: String?,
-    message: String,
-) : IOException(dev.memoh.core.model.MemohError.parse(body, status).text()) {
-    val problem = dev.memoh.core.model.MemohError.parse(body, status)
+    val problem: MemohError,
+) : IOException(problem.text()) {
+    @Suppress("UNUSED_PARAMETER")
+    constructor(status: Int, body: String?, message: String, requestId: String? = null, traceId: String? = null) :
+        this(status, body, MemohError.parse(body, status).let { parsed ->
+            if (parsed.requestId != null || parsed.traceId != null) parsed
+            else parsed.copy(requestId = requestId?.trim()?.takeIf(String::isNotBlank), traceId = traceId?.trim()?.takeIf(String::isNotBlank))
+        })
+
     /** No usable credentials — the caller must send the user back to login. */
     val isUnauthorized: Boolean get() = status == 401 || status == 403
 }
@@ -512,7 +518,7 @@ class MemohApi(
             val text = it.body?.string().orEmpty()
             requireCurrentAccount()
             if (!it.isSuccessful) {
-                throw ApiException(it.code, text, "$method $path failed: ${it.code}")
+                throw ApiException(it.code, text, "$method $path failed: ${it.code}", it.header("X-Request-ID"), it.header("X-Trace-ID"))
             }
             @Suppress("UNCHECKED_CAST")
             if (deserializer == UnitSerializer) Unit as T else json.decodeFromString(deserializer, text)

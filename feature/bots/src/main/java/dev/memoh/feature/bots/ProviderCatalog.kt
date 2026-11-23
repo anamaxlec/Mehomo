@@ -125,6 +125,7 @@ internal fun ProviderCatalogDialog(provider: JsonObject, data: JsonObject?, busy
 
 @Composable
 internal fun ProviderModelsDialog(provider: JsonObject, allModels: List<JsonObject>, busy: Boolean, error: String?, notice: String?,
+    problem: dev.memoh.core.model.MemohError?,
     onSave: (List<JsonObject>, Set<String>) -> Unit, onReload: () -> Unit, onDiscover: () -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) {
     val models = allModels.filter { it.text("provider_id") == provider.text("id") }
     val enabled = models.filter { it.flag("enable", true) }.map { it.text("id") }.toSet()
@@ -139,7 +140,12 @@ internal fun ProviderModelsDialog(provider: JsonObject, allModels: List<JsonObje
             Text(provider.text("name"), style = MaterialTheme.typography.bodyMedium)
             Box(Modifier.fillMaxWidth().height(WavyProgressIndicatorDefaults.LinearContainerHeight)) { if (busy) LinearWavyProgressIndicator(Modifier.fillMaxWidth()) }
             notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
+            error?.let {
+                Column {
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    dev.memoh.core.designsystem.component.ErrorDetails(problem, it)
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!providerManaged(provider)) {
                     TextButton(onReload, enabled = !busy) { Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text(if (models.isEmpty()) "获取模型" else "重新获取") }

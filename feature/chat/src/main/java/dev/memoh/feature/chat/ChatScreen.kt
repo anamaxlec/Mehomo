@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -66,7 +67,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +86,8 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.scrollBy
+import androidx.compose.ui.semantics.scrollToIndex
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -101,13 +103,13 @@ import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.designsystem.component.MemohStatus
 import dev.memoh.core.designsystem.component.MemohStatusDot
 import dev.memoh.core.network.SocketStatus
-import dev.memoh.core.markdown.LocalMarkdownImageLoading
 import dev.memoh.feature.chat.components.ApprovalPanel
 import androidx.compose.material.icons.filled.Image
 import dev.memoh.feature.chat.components.Composer
 import dev.memoh.feature.chat.components.ComposerAttachments
 import dev.memoh.feature.chat.components.ComposerQueue
 import dev.memoh.feature.chat.components.ChatHistoryPlaceholder
+import dev.memoh.feature.chat.components.ChatErrorCard
 import dev.memoh.feature.chat.components.MessageActions
 import dev.memoh.feature.chat.components.MessageActionsHeight
 import dev.memoh.feature.chat.components.replyCopyText
@@ -119,20 +121,21 @@ import dev.memoh.feature.chat.components.TypingIndicator
 import dev.memoh.feature.chat.components.UserInputPanel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 
 /** The same item content identity keeps disclosures open when a live turn becomes history. */
 private fun LazyListScope.assistantMessages(
-    turnId: String,
     messages: List<dev.memoh.core.model.UIMessage>,
+    renderItems: List<AssistantRenderItem>,
     isRunning: Boolean,
     onToggleDetails: () -> Unit,
     focusMessageIndex: Int? = null,
     focusRevision: Int = 0,
     onFocusHandled: () -> Unit = {},
 ) {
-    val renderItems = assistantRenderItems(turnId, messages)
     val focusItem = focusMessageIndex?.let { target -> renderItems.indexOfFirst { it.lastIndex >= target } }
     itemsIndexed(renderItems, key = { _, item -> item.key }) { index, item ->
         Box(Modifier.padding(top = if (index == 0) 10.dp else 0.dp)) {
@@ -203,24 +206,29 @@ fun ChatScreen(
     onExternalSearchConsumed: () -> Unit = {},
     onEditMessage: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onRetryRuntime: (() -> Unit)? = null,
 ) {
     val listState = rememberLazyListState()
     val chatContext = androidx.compose.ui.platform.LocalContext.current
-    val errorActionHandler = dev.memoh.core.designsystem.component.LocalErrorActionHandler.current
     val scope = rememberCoroutineScope()
 
-    val settled = state.settledHistory
+    val run = state.runtime.run
+    val liveMessages = state.liveMessages
+    val liveTurnId = run?.turnId?.takeIf { liveMessages.isNotEmpty() }
+    val settled = remember(state.history, liveTurnId) { state.history.withoutLiveAssistant(liveTurnId) }
     val assistantKeys = remember(settled) { assistantHistoryKeys(settled) }
+    val settledItems = remember(settled) {
+        settled.filter { it.isAssistant && it.safeMessages.isNotEmpty() }.associate { turn ->
+            turn.listKey to assistantRenderItems(assistantKeys.getValue(turn.listKey), turn.safeMessages)
+        }
+    }
+    val liveItems = remember(liveTurnId, liveMessages) {
+        liveTurnId?.let { assistantRenderItems(it, liveMessages) }.orEmpty()
+    }
     val retryableTurnId = state.retryableTurnId
     val retryableRowKey = if (retryableTurnId != null) state.history.lastOrNull { it.isAssistant }?.listKey else null
     val editableRowKey = state.editableUserTurn?.listKey
-    val liveMessages = state.liveMessages
     val liveUsers = state.liveUserTurns
-    val run = state.runtime.run
-    val savedTurns = remember(settled, liveUsers, run, liveMessages) { state.turnsForSavedItems() }
-    val savedTurnKeys = remember(state.savedItems, savedTurns) {
-        state.savedItems.mapNotNull { dev.memoh.core.data.resolveSavedChatTurn(it, savedTurns)?.listKey }.toSet()
-    }
     val composerAction = state.composerAction()
     fun runShortcut(action: ComposerQuickAction, openModelMenu: () -> Unit) {
         if (!state.composerAction(action.command).enabled) return
@@ -234,7 +242,8 @@ fun ChatScreen(
         }
     }
     var initiallyPositioned by rememberSaveable(state.session?.id) { mutableStateOf(false) }
-    val showEmptyConversation = state.hasResolvedHistory && state.isEmptyConversation && state.historyError == null
+    val resolvedEmpty by androidx.compose.runtime.rememberUpdatedState(state.hasResolvedHistory && state.isEmptyConversation)
+    val showEmptyConversation = resolvedEmpty && state.historyError == null
     val showHistoryPlaceholder = state.historyError == null &&
         (!state.hasResolvedHistory && state.isEmptyConversation || !state.isEmptyConversation && !initiallyPositioned)
     val historyPlaceholder = remember(state.session?.id) {
@@ -243,6 +252,12 @@ fun ChatScreen(
     historyPlaceholder.targetState = showHistoryPlaceholder
     var followingLatest by rememberSaveable(state.session?.id) { mutableStateOf(true) }
     var editingMessageKey by rememberSaveable(state.botId, state.session?.id) { mutableStateOf<String?>(null) }
+    val editingVisibleMessage = editingMessageKey != null && settled.any { it.isUser && it.listKey == editingMessageKey }
+    val operationError: @Composable () -> Unit = {
+        state.error?.let { message ->
+            ChatErrorCard(message, state.errorProblem?.takeIf { it.text() == message }, onDismiss = onDismissError)
+        }
+    }
     var editedMessage by rememberSaveable(state.botId, state.session?.id) { mutableStateOf("") }
     var searchOpen by remember(state.session?.id) { mutableStateOf(false) }
     var savedOpen by remember(state.session?.id) { mutableStateOf(false) }
@@ -250,6 +265,14 @@ fun ChatScreen(
     var searchFocusRevision by remember(state.session?.id) { mutableIntStateOf(0) }
     var searchCache by remember(state.session?.id) { mutableStateOf<List<dev.memoh.core.model.UITurn>>(emptyList()) }
     var cachedPreview by remember(state.session?.id) { mutableStateOf<Pair<dev.memoh.core.model.UITurn, ConversationHit>?>(null) }
+    val savedTurns = if (searchOpen || state.savedItems.isNotEmpty()) {
+        remember(settled, liveUsers, liveTurnId, liveMessages, run?.updatedAt) {
+            state.turnsForSavedItems(settled, liveUsers)
+        }
+    } else emptyList()
+    val savedTurnKeys = remember(state.savedItems, savedTurns) {
+        state.savedItems.mapNotNull { dev.memoh.core.data.resolveSavedChatTurn(it, savedTurns)?.listKey }.toSet()
+    }
     LaunchedEffect(searchOpen, savedOpen, state.session?.id) {
         if (searchOpen || savedOpen) searchCache = onLoadSearchCache()
     }
@@ -265,12 +288,24 @@ fun ChatScreen(
     }
     val connection = connectionMessage(state.socketStatus, state.awaitingSnapshot, state.runtime.sessionId == null)
     val connectionAttention = connectionNeedsAttention(state.session?.id, state.socketStatus, state.awaitingSnapshot, resumed)
-    var jumpingToLatest by remember(state.session?.id) { mutableStateOf(false) }
-    var loadingHistoryImages by remember(state.session?.id) { mutableIntStateOf(0) }
-    val onHistoryImageLoading = remember(state.session?.id) {
-        { loading: Boolean -> loadingHistoryImages += if (loading) 1 else -1 }
+    val waitingForSnapshot = resumed && state.session != null && state.socketStatus == SocketStatus.Connected && state.awaitingSnapshot
+    var syncAttempt by remember(state.botId, state.session?.id) { mutableIntStateOf(0) }
+    var snapshotTimedOut by remember(state.botId, state.session?.id, waitingForSnapshot, syncAttempt) { mutableStateOf(false) }
+    LaunchedEffect(state.botId, state.session?.id, waitingForSnapshot, syncAttempt) {
+        if (waitingForSnapshot) {
+            kotlinx.coroutines.delay(8_000)
+            snapshotTimedOut = true
+        }
     }
+    var jumpingToLatest by remember(state.session?.id) { mutableStateOf(false) }
     val latestState by androidx.compose.runtime.rememberUpdatedState(state)
+    fun scrollTranscript(scroll: suspend () -> Unit) {
+        followingLatest = false
+        scope.launch {
+            scroll()
+            followingLatest = !listState.canScrollForward
+        }
+    }
     fun jumpToHit(hit: ConversationHit) {
         searchOpen = false; savedOpen = false; followingLatest = false
         scope.launch {
@@ -327,42 +362,44 @@ fun ChatScreen(
 
     // Follow new content only while the user is already at the bottom; a reader
     // who scrolled up must not be yanked back by a streaming token.
-    val atBottom by remember {
-        androidx.compose.runtime.derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
-            last == null || (last.index == listState.layoutInfo.totalItemsCount - 1 &&
-                last.offset + last.size <= listState.layoutInfo.viewportEndOffset + 12)
-        }
-    }
     LaunchedEffect(externalSearchHit, state.session?.id, initiallyPositioned) {
         val hit = externalSearchHit
         if (hit != null && state.session != null && initiallyPositioned) {
-            val loaded = state.settledHistory.firstOrNull { it.listKey == hit.turnKey }
+            val loaded = settled.firstOrNull { it.listKey == hit.turnKey }
             if (loaded != null && (externalCachedTurn == null || sameCachedSearchTarget(hit, externalCachedTurn, loaded))) jumpToHit(hit)
             else if (externalCachedTurn?.listKey == hit.turnKey) cachedPreview = externalCachedTurn to hit
             else jumpToHit(hit)
             onExternalSearchConsumed()
         }
     }
-    LaunchedEffect(dragging) {
-        if (dragging) followingLatest = false
-        else {
-            androidx.compose.runtime.withFrameNanos { }
-            androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }.first { !it }
-            followingLatest = atBottom
+    LaunchedEffect(state.session?.id, listState) {
+        androidx.compose.runtime.snapshotFlow { dragging }.drop(1).collectLatest { isDragging ->
+            if (isDragging) followingLatest = false
+            else {
+                androidx.compose.runtime.withFrameNanos { }
+                androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }.first { !it }
+                followingLatest = !listState.canScrollForward
+            }
         }
     }
     LaunchedEffect(state.session?.id, resumed) {
         if (!resumed) return@LaunchedEffect
         // Layout also changes while a reasoning/phase panel is folding, after
         // the last socket frame. Follow those frames as well as text appends.
-        androidx.compose.runtime.snapshotFlow { Triple(latestState, listState.layoutInfo, loadingHistoryImages) }.conflate().collect {
+        androidx.compose.runtime.snapshotFlow {
+            if (jumpingToLatest || initiallyPositioned && !followingLatest) null
+            else {
+                val layout = listState.layoutInfo
+                Triple(resolvedEmpty, layout.totalItemsCount, layout.tailOverflow())
+            }
+        }.conflate().collect { position ->
+            if (position == null) return@collect
             androidx.compose.runtime.withFrameNanos { }
-            if (latestState.hasResolvedHistory && latestState.isEmptyConversation) {
+            if (resolvedEmpty) {
                 initiallyPositioned = true
                 return@collect
             }
-            if (jumpingToLatest) return@collect
+            if (jumpingToLatest || dragging) return@collect
             if ((!initiallyPositioned || followingLatest) && listState.layoutInfo.totalItemsCount > 0) {
                 // A drag can cancel this scroll without cancelling the follower.
                 coroutineScope {
@@ -373,7 +410,7 @@ fun ChatScreen(
                 androidx.compose.runtime.withFrameNanos { }
                 // Images keep their own placeholders. Reveal readable content as
                 // soon as it is positioned; later image growth still follows below.
-                if (atBottom) {
+                if (!listState.canScrollForward) {
                     initiallyPositioned = true
                     resumeScrollPending = false
                 }
@@ -396,7 +433,7 @@ fun ChatScreen(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "返回",
@@ -412,10 +449,10 @@ fun ChatScreen(
                     )
                 },
                 actions = {
-                    IconButton(onClick = { searchOpen = true }) { Icon(Icons.Filled.Search, "查找会话") }
+                    IconButton(onClick = { searchOpen = true }, shapes = IconButtonDefaults.shapes()) { Icon(Icons.Filled.Search, "查找会话") }
                     var moreOpen by remember { mutableStateOf(false) }
                     Box {
-                        IconButton(onClick = { moreOpen = !moreOpen }, modifier = Modifier.semantics {
+                        IconButton(onClick = { moreOpen = !moreOpen }, shapes = IconButtonDefaults.shapes(), modifier = Modifier.semantics {
                             if (connectionAttention) {
                                 stateDescription = connection.first
                                 liveRegion = LiveRegionMode.Polite
@@ -462,7 +499,9 @@ fun ChatScreen(
                     }
                     var addOpen by remember { mutableStateOf(false) }
                     Box {
-                        IconButton(onClick = { addOpen = !addOpen }) { Icon(Icons.Filled.Add, "打开工作区") }
+                        FilledTonalIconButton(onClick = { addOpen = !addOpen }, shapes = IconButtonDefaults.shapes()) {
+                            Icon(Icons.Filled.Add, "打开工作区")
+                        }
                         MemohPopupMenu(addOpen, { addOpen = false }, Alignment.BottomEnd) {
                             MemohMenuRow("新会话", Icons.AutoMirrored.Filled.Chat, { addOpen = false; onNewSession() })
                             BotSurface.entries.filter { it != BotSurface.Chat }.filter { surface ->
@@ -505,13 +544,29 @@ fun ChatScreen(
 
                     showEmptyConversation -> Unit
 
-                    else -> CompositionLocalProvider(LocalMarkdownImageLoading provides onHistoryImageLoading) {
+                    else -> {
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize()
                                 .nestedScroll(historyScroll)
                                 .graphicsLayer { alpha = transcriptAlpha }
-                                .then(if (initiallyPositioned) Modifier else Modifier.clearAndSetSemantics { }),
+                                .then(if (!initiallyPositioned) Modifier.clearAndSetSemantics { } else Modifier.semantics {
+                                    scrollBy { _, y ->
+                                        if (y == 0f || y > 0f && !listState.canScrollForward ||
+                                            y < 0f && !listState.canScrollBackward) false
+                                        else {
+                                            scrollTranscript { listState.animateScrollBy(y) }
+                                            true
+                                        }
+                                    }
+                                    scrollToIndex { index ->
+                                        if (index !in 0 until listState.layoutInfo.totalItemsCount) false
+                                        else {
+                                            scrollTranscript { listState.scrollToItem(index) }
+                                            true
+                                        }
+                                    }
+                                }),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(
                                 horizontal = 12.dp,
                                 vertical = 12.dp,
@@ -519,9 +574,9 @@ fun ChatScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             settled.forEach { turn ->
-                                val assistantKey = assistantKeys[turn.listKey] ?: turn.turnId
-                                if (turn.isAssistant && turn.safeMessages.isNotEmpty()) {
-                                    assistantMessages(assistantKey, turn.safeMessages, isRunning = false,
+                                val items = settledItems[turn.listKey]
+                                if (items != null) {
+                                    assistantMessages(turn.safeMessages, items, isRunning = false,
                                         onToggleDetails = { followingLatest = false },
                                         focusMessageIndex = searchFocus?.takeIf { it.turnKey == turn.listKey }?.messageIndex,
                                         focusRevision = searchFocusRevision, onFocusHandled = { searchFocus = null })
@@ -541,9 +596,10 @@ fun ChatScreen(
                                                 canSubmit = edit != null,
                                                 onCancel = { editingMessageKey = null; editedMessage = "" },
                                                 onSubmit = { edit?.invoke(turn.turnId, editedMessage) })
+                                            operationError()
                                         }) else null)
                                 }
-                                if (turn.isAssistant) item(key = "assistant-$assistantKey:actions") {
+                                if (turn.isAssistant) item(key = "assistant-${assistantKeys.getValue(turn.listKey)}:actions") {
                                     MessageActions(replyCopyText(turn.safeMessages), turn.timestamp, assistant = true,
                                         enabled = !state.busy && !state.isRunning,
                                         retryEnabled = retryableRowKey == turn.listKey,
@@ -568,7 +624,7 @@ fun ChatScreen(
                             // The live turn renders from the run view, which is
                             // authoritative while it is in flight.
                             if (liveMessages.isNotEmpty() && run != null) {
-                                assistantMessages(run.turnId, liveMessages, isRunning = !run.isTerminal,
+                                assistantMessages(liveMessages, liveItems, isRunning = !run.isTerminal,
                                     onToggleDetails = { followingLatest = false },
                                     focusMessageIndex = searchFocus?.takeIf { it.turnKey == "assistant:${run.turnId}" }?.messageIndex,
                                     focusRevision = searchFocusRevision, onFocusHandled = { searchFocus = null })
@@ -627,7 +683,7 @@ fun ChatScreen(
 
                 // Jump-to-bottom, shown only when the reader has scrolled away.
                 androidx.compose.animation.AnimatedVisibility(
-                    visible = initiallyPositioned && !atBottom && !followingLatest && !jumpingToLatest,
+                    visible = initiallyPositioned && !followingLatest && !jumpingToLatest && listState.canScrollForward,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
                     enter = MemohMotion.controlEnter(), exit = MemohMotion.controlExit(),
                 ) {
@@ -636,7 +692,7 @@ fun ChatScreen(
                     val scale by animateFloatAsState(if (pressed) .92f else 1f,
                         MaterialTheme.motionScheme.fastEffectsSpec(), label = "jumpToLatestPress")
                     SmallFloatingActionButton(
-                            modifier = Modifier.size(40.dp).graphicsLayer { scaleX = scale; scaleY = scale },
+                            modifier = Modifier.size(48.dp).graphicsLayer { scaleX = scale; scaleY = scale },
                             shape = CircleShape,
                             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                             contentColor = MaterialTheme.colorScheme.primary,
@@ -645,8 +701,10 @@ fun ChatScreen(
                             onClick = {
                                 jumpingToLatest = true
                                 scope.launch {
-                                    try { listState.scrollToLatest(scrollSpec) }
-                                    finally { jumpingToLatest = false; followingLatest = atBottom }
+                                    try {
+                                        listState.scrollToLatest(scrollSpec)
+                                        followingLatest = true
+                                    } finally { jumpingToLatest = false }
                                 }
                             },
                         ) {
@@ -655,6 +713,15 @@ fun ChatScreen(
                 }
             }
 
+            if (snapshotTimedOut && onRetryRuntime != null) {
+                Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.extraLarge,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("会话状态同步超时", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                        MemohActionButton("重新同步", Icons.Filled.Refresh, { syncAttempt++; onRetryRuntime() })
+                    }
+                }
+            }
             state.offlineSyncedAt?.takeIf { state.historyError != null }?.let { synced ->
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.large,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
@@ -695,7 +762,10 @@ fun ChatScreen(
                                 val shortcut = state.composerQuickAction(state.draft)
                                 if (composerAction.kind == ComposerActionKind.QuickAction && shortcut != null)
                                     runShortcut(shortcut, openModelMenu)
-                                else onSend(state.draft)
+                                else {
+                                    if (!listState.canScrollForward) followingLatest = true
+                                    onSend(state.draft)
+                                }
                             },
                             sendDescription = composerAction.description,
                             showStop = composerAction.kind == ComposerActionKind.Stop,
@@ -833,31 +903,7 @@ fun ChatScreen(
                                             )
                                         }
                                     }
-                                    state.error?.let { message ->
-                                        state.errorProblem?.takeIf { it.text() == message }?.action?.let { action ->
-                                            if (errorActionHandler != null && state.botPermissions?.contains("manage") == true)
-                                                TextButton({ errorActionHandler(action) }) { Text(action.title) }
-                                        }
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Text(
-                                                text = message,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.error,
-                                                modifier = Modifier.weight(1f),
-                                            )
-                                            Text(
-                                                text = "知道了",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier
-                                                    .clickable(onClick = onDismissError)
-                                                    .padding(4.dp),
-                                            )
-                                        }
-                                    }
+                                    if (!editingVisibleMessage) operationError()
                                 }
                             },
                         )
@@ -882,12 +928,16 @@ private suspend fun LazyListState.scrollToLatest(animationSpec: AnimationSpec<Fl
     if (layoutInfo.visibleItemsInfo.none { it.index == lastIndex }) {
         if (animationSpec == null) scrollToItem(lastIndex) else animateScrollToItem(lastIndex)
     }
-    val last = layoutInfo.visibleItemsInfo.firstOrNull { it.index == lastIndex } ?: return
-    val overflow = last.offset + last.size + layoutInfo.afterContentPadding - layoutInfo.viewportEndOffset
+    val overflow = layoutInfo.tailOverflow() ?: return
     if (overflow > 0) {
         if (animationSpec == null) scrollBy(overflow.toFloat())
         else animateScrollBy(overflow.toFloat(), animationSpec)
     }
+}
+
+private fun LazyListLayoutInfo.tailOverflow(): Int? {
+    val last = visibleItemsInfo.lastOrNull()?.takeIf { it.index == totalItemsCount - 1 } ?: return null
+    return last.offset + last.size + afterContentPadding - viewportEndOffset
 }
 
 private fun connectionMessage(status: SocketStatus, awaitingSnapshot: Boolean, initialLoading: Boolean): Pair<String, MemohStatus> = when {

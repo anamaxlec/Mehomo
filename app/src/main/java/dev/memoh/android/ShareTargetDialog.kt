@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import dev.memoh.core.designsystem.component.MemohBottomSheet
 import dev.memoh.core.data.ShareQuickTask
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohListIcon
@@ -47,9 +48,7 @@ fun ShareTargetDialog(accountId: String, teamId: String, onDismiss: () -> Unit, 
     val taskReady = selectedTask == null || selectedTask.botId == state.bot?.id
     val sessions = state.sessions.filter { it.isLocal }
 
-    ModalBottomSheet(onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    MemohBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().heightIn(max = 680.dp).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

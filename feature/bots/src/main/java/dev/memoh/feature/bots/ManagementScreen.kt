@@ -29,6 +29,7 @@ import dev.memoh.core.designsystem.component.*
 import dev.memoh.core.network.apiBody
 import dev.memoh.core.model.DirectAgentRuntime
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 internal data class MenuAction(val label: String, val icon: ImageVector = Icons.Filled.Edit, val run: () -> Unit)
@@ -75,7 +76,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     var usageAgent by remember(state.botId) { mutableStateOf<String?>(null) }
     LaunchedEffect(usageAgent) {
         val id = usageAgent ?: return@LaunchedEffect
-        while (true) { vm.loadCodexUsage(id); kotlinx.coroutines.delay(60_000) }
+        while (true) { vm.loadAgentQuota(id); kotlinx.coroutines.delay(60_000) }
     }
     val removalState = state.data["container"].obj()["removal"].obj().text("state")
     LaunchedEffect(state.page, state.botId, removalState) { vm.observeWorkspaceRemoval() }
@@ -169,7 +170,9 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     fun agentEditor(agent: JsonObject? = null) { vm.dismiss(); editor = agentEditor(state, agent, vm) }
     fun authorize(agent: JsonObject, oauth: Boolean) {
         val runtime = DirectAgentRuntime.fromId(agent.text("runtime")) ?: return
-        if (oauth && runtime.deviceAuthMode != null) { vm.authorizeDeviceAgent(agent); return }
+        if (oauth && runtime.deviceAuthMode != null && (runtime != DirectAgentRuntime.ClaudeCode || agent.usesClaudeAccount())) {
+            vm.authorizeDeviceAgent(agent); return
+        }
         val kind = if (oauth) "claude_code_oauth" else runtime.apiKeyKind
         editor = ManagementEditor(if (oauth) "连接 Claude Code" else "连接 API key", listOf(
             FormField("secret", if (oauth) "claude setup-token 生成的 token" else "API key", secret = true, required = true),
@@ -190,8 +193,9 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
 
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     usageAgent?.let { id ->
-        ModalBottomSheet({ usageAgent = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-            CodexUsagePanel(state.codexUsage[id], id in state.codexUsageLoading, state.codexUsageErrors[id], { vm.loadCodexUsage(id) })
+        MemohBottomSheet({ usageAgent = null }) {
+            AgentQuotaPanel(state.agentQuota[id], id in state.agentQuotaLoading, state.agentQuotaErrors[id], { vm.loadAgentQuota(id) },
+                accountName = if (agents.any { it.text("id") == id && it.text("runtime") == DirectAgentRuntime.ClaudeCode.id }) "Claude" else "ChatGPT")
             Spacer(Modifier.height(32.dp))
         }
     }
@@ -293,23 +297,34 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         itemsIndexed(agents, key = { _, it -> it.text("id") }) { index, agent ->
                             val default = settings.text("default_bot_agent_id") == agent.text("id")
                             val runtime = DirectAgentRuntime.fromId(agent.text("runtime"))
-                            val attached = agent.agentConfigured()
-                            val credentialAttached = agent.text("agent_credential_id").isNotBlank()
+                            val id = agent.text("id")
+                            val claudeAccount = agent.usesClaudeAccount()
+                            val account = state.agentAccounts[id]
+                            val connected = if (claudeAccount) agent.flag("enabled") && account?.signedIn == true else agent.agentConfigured()
+                            val credentialAttached = agent.text("agent_credential_id").isNotBlank() || claudeAccount && connected
                             val authMode = agent["metadata"].obj().text("auth").ifBlank { runtime?.defaultAuthMode.orEmpty() }
                             val actions = listOfNotNull(
                                 MenuAction("运行配置", Icons.Filled.Tune) { agentEditor(agent) },
                                 MenuAction("设为默认", Icons.Filled.Star) { vm.write(base + "settings", "PUT", apiBody("default_bot_agent_id" to agent.text("id"))) },
                                 if (runtime == null) MenuAction("认证配置", Icons.Filled.Login) { editor = acpEditor(state, agent, vm) }
+                                    else if (runtime == DirectAgentRuntime.ClaudeCode && authMode == "api_key") null
+                                    else if (claudeAccount && (!agent.flag("enabled") || connected)) null
                                     else if (!credentialAttached || authMode == runtime.deviceAuthMode || authMode == "oauth_token") MenuAction("账号授权", Icons.Filled.Login) { authorize(agent, true) } else null,
                                 if (runtime != null && (!credentialAttached || authMode == "api_key")) MenuAction("API key", Icons.Filled.Key) { authorize(agent, false) } else null,
                                 if (credentialAttached) MenuAction("断开认证", Icons.Filled.LinkOff) { confirmation = ConfirmAction("断开 Agent 认证", "下一次启动此 Agent 时需要重新连接。") { vm.write(base + listOf("agents", agent.text("id"), "credential"), "DELETE") } } else null,
                                 MenuAction("删除 Agent", Icons.Filled.Delete) { confirmation = ConfirmAction("删除 Agent", agent.text("name")) { vm.write(base + listOf("agents", agent.text("id")), "DELETE") } },
                             )
-                            ManagementRow(agent.text("name"), listOfNotNull(DirectAgentRuntime.fromId(agent.text("runtime"))?.label ?: agent.text("runtime"), if (default) "默认" else null, if (attached) "已连接" else "待配置").joinToString(" · "),
+                            val connection = when {
+                                connected -> listOfNotNull("已连接", account?.email?.takeIf(String::isNotBlank)).joinToString(" · ")
+                                claudeAccount && !agent.flag("enabled") -> "启用后可连接账号"
+                                claudeAccount && account == null -> "账号状态未确认"
+                                else -> "待配置"
+                            }
+                            ManagementRow(agent.text("name"), listOfNotNull(runtime?.label ?: agent.text("runtime"), if (default) "默认" else null, connection).joinToString(" · "),
                                 Icons.Filled.Psychology, index, agents.size, state.canManage && !state.busy, onClick = { agentEditor(agent) }, actions = actions,
                                 checked = agent.flag("enabled"), onChecked = { vm.enableAgent(agent, it) })
-                            if (agent.text("runtime") == "codex" && agent["metadata"].obj().text("auth") == "chatgpt")
-                                TextButton({ usageAgent = agent.text("id") }) { Text("查看 ${agent.text("name")} 的账号额度") }
+                            if (agent.supportsAgentQuota() && (!claudeAccount || connected))
+                                TextButton({ usageAgent = id }) { Text("查看 ${agent.text("name")} 的账号额度") }
                         }
                         if (agents.isEmpty()) item { ManagementNotice("尚未添加 Agent。Memoh 默认运行方式仍可在对话中使用。") }
                     }
@@ -338,7 +353,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                             ManagementRow(provider.text("name"), if (provider.flag("enable", true)) "已启用 ${enabledModelCounts[id] ?: 0} 个模型" else "已停用", if (subscription) Icons.Filled.AccountCircle else Icons.Filled.Cloud, index, visibleProviders.size, state.canManage && !state.busy,
                                 onClick = { modelsProvider = provider; vm.dismiss() }, checked = provider.flag("enable", true).takeUnless { providerManaged(provider) }, onChecked = { vm.write(listOf("providers", id), "PUT", apiBody("enable" to it)) }, actions = if (providerManaged(provider)) emptyList() else listOfNotNull(
                                     MenuAction("连接设置", Icons.Filled.Settings) { providerEditor(provider) },
-                                    MenuAction("测试连接", Icons.Filled.NetworkCheck) { vm.write(listOf("providers", id, "test"), "POST", result = true) },
+                                    MenuAction("测试连接", Icons.Filled.NetworkCheck) { vm.testModelConnection("providers", id, provider.text("name")) },
                                     providerCatalogSource(provider)?.let { MenuAction("查看模型目录", Icons.Filled.List) { catalogProvider = provider; vm.previewModelCatalog(provider) } },
                                     MenuAction(if (providerCatalogSource(provider) != null) "导入目录模型" else "从接口发现模型", Icons.Filled.CloudDownload) { vm.importProviderModels(provider) },
                                     providerCatalogSource(provider)?.let { MenuAction("从接口发现模型", Icons.Filled.Search) { vm.importProviderModels(provider, fromEndpoint = true) } },
@@ -358,7 +373,9 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                             ManagementRow(model.text("name").ifBlank { model.text("model_id") }, listOf(providerName, model.text("type"), model.text("model_id")).filter(String::isNotBlank).joinToString(" · "), Icons.Filled.ModelTraining,
                                 index, visibleModels.size, state.canManage && !state.busy, onClick = { modelEditor(model) }, checked = model.flag("enable", true),
                                 onChecked = { vm.write(listOf("models", model.text("id")), "PUT", modelUpdate(model, it)) }, actions = listOf(
-                                    MenuAction("测试模型", Icons.Filled.PlayArrow) { vm.write(listOf("models", model.text("id"), "test"), "POST", result = true) },
+                                    MenuAction("测试模型", Icons.Filled.PlayArrow) {
+                                        vm.testModelConnection("models", model.text("id"), model.text("name").ifBlank { model.text("model_id") })
+                                    },
                                     MenuAction("删除", Icons.Filled.Delete) { confirmation = ConfirmAction("删除模型", model.text("name")) { vm.write(listOf("models", model.text("id")), "DELETE") } },
                                 ))
                         }
@@ -404,7 +421,9 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                     }
                     ManagementPage.Services -> {
                         listOf("search" to "搜索", "fetch" to "网页读取", "memory" to "记忆").filter { state.page != ManagementPage.Providers || it.first == capability }.forEach { (kind, label) ->
-                            val entries = state.data["$kind-providers"].objects()
+                            val entries = state.data["$kind-providers"].objects().let { providers ->
+                                if (kind == "search" || kind == "fetch") providers.sortedByDescending { it.flag("enable", true) } else providers
+                            }
                             val catalog = state.data["$kind-meta"].objects()
                             item { GroupLabel(label) }
                             item { Actions {
@@ -530,25 +549,37 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         } }
                     }
                     ManagementPage.Channels -> {
-                        val channels = state.data["channels"].objects()
                         val configs = state.data["configs"].obj()
+                        val channels = state.data["channels"].objects().sortedByDescending { channel ->
+                            (configs[channel.text("type")] as? JsonObject)?.flag("disabled") == false
+                        }
                         itemsIndexed(channels, key = { _, it -> it.text("type") }) { _, channel ->
                             val type = channel.text("type")
                             val config = configs[type].obj()
                             val configured = config.isNotEmpty()
+                            val configless = channel.flag("configless")
+                            val credentials = config["credentials"] as? JsonObject
+                            val credentialsUnavailable = configured && !configless && credentials == null
                             val ownerOnly = channel.flag("owner_only")
                             val canConfigure = state.canManage && (!ownerOnly || state.bot?.ownerUserId == state.data["channel-current-user"].obj().text("id"))
                             val editable = canConfigure && !state.busy
                             val fields = channel["config_schema"].obj()["fields"].obj().entries.sortedBy { (it.value.obj()["order"] as? JsonPrimitive)?.intOrNull ?: 0 }
-                            ChannelRow(type, channel.text("display_name").ifBlank { type }, if (ownerOnly && !canConfigure) "仅 Bot 所有者可配置" else if (configured) if (config.flag("disabled")) "已停用" else "已连接" else "待配置",
-                                enabled = editable, onConfigure = if (channel.flag("configless")) null else ({
-                                    val credentials = config["credentials"].obj()
-                                    edit(channel.text("display_name").ifBlank { type }, schemaFields(JsonObject(fields.associate { it.key to it.value }), credentials, configured) + listOf(FormField("routing", "路由", formatted(config["routing"].obj()), FieldKind.Object, multiline = true)), base + listOf("channel", type)) { body ->
-                                        apiBody("credentials" to JsonObject(credentials + body.filterKeys { it != "routing" }), "routing" to body.getValue("routing"), "disabled" to config.flag("disabled"))
+                            val status = when {
+                                ownerOnly && !canConfigure -> "仅 Bot 所有者可配置"
+                                credentialsUnavailable -> "凭据未返回，请刷新"
+                                !configured -> "待配置"
+                                config.flag("disabled") -> "已停用"
+                                else -> "已连接"
+                            }
+                            ChannelRow(type, channel.text("display_name").ifBlank { type }, status,
+                                enabled = editable, onConfigure = if (configless || credentialsUnavailable) null else ({
+                                    val current = credentials.obj()
+                                    edit(channel.text("display_name").ifBlank { type }, channelCredentialFields(type, JsonObject(fields.associate { it.key to it.value }), current, configured) + listOf(FormField("routing", "路由", formatted(config["routing"].obj()), FieldKind.Object, multiline = true)), base + listOf("channel", type)) { body ->
+                                        apiBody("credentials" to JsonObject(current + body.filterKeys { it != "routing" }), "routing" to body.getValue("routing"), "disabled" to config.flag("disabled"))
                                     }
                                 }), checked = if (configured) !config.flag("disabled") else null,
                                 onChecked = { vm.write(base + listOf("channel", type, "status"), "PATCH", apiBody("disabled" to !it)) },
-                                onDisconnect = if (configured && !channel.flag("configless")) ({
+                                onDisconnect = if (configured && !configless) ({
                                     confirmation = ConfirmAction("断开消息渠道", channel.text("display_name")) { vm.write(base + listOf("channel", type), "DELETE") }
                                 }) else null)
                         }
@@ -575,6 +606,7 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
     catalogProvider?.let { provider -> ProviderCatalogDialog(provider, state.data["model-catalog"] as? JsonObject, state.busy, state.error,
         onRetry = { vm.previewModelCatalog(provider) }, onImport = { catalogProvider = null; vm.importProviderModels(provider) }, onDismiss = { catalogProvider = null }) }
     modelsProvider?.let { provider -> ProviderModelsDialog(provider, models, state.busy, state.error, state.notice,
+        problem = state.modelImportProblem,
         onSave = { choices, selected -> vm.saveModelSelection(choices, selected) { modelsProvider = null } },
         onReload = { vm.prepareProviderModels(provider) }, onDiscover = { vm.prepareProviderModels(provider, fromEndpoint = true) },
         onSettings = { modelsProvider = null; providerEditor(provider) }, onDismiss = { modelsProvider = null }) }
@@ -593,9 +625,20 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
         }, enabled = canConfirm, primary = true) },
             dismissButton = { TextButton({ confirmation = null }, enabled = !state.busy) { Text("取消") } })
     }
-    state.authorization?.let { auth -> AlertDialog(onDismissRequest = {}, properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+    state.authorization?.let { auth ->
+        val needsCode = auth.flag("code_required")
+        var code by remember(auth.text("login_id")) { mutableStateOf("") }
+        val openPage = {
+            val url = auth.text("verification_url").ifBlank { auth.text("authorization_url") }
+            if (url.startsWith("https://")) uriHandler.openUri(url)
+        }
+        AlertDialog(onDismissRequest = {}, properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
         icon = { Icon(Icons.Filled.Devices, null) }, title = { Text("连接 Agent") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text(if (auth.text("user_code").isBlank()) "打开授权页面完成连接，完成后会自动更新。" else "打开授权页面，确认或输入以下代码，完成后会自动更新。")
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text(when {
+            needsCode -> "在浏览器中登录 Claude，然后把页面显示的授权码粘贴到这里。"
+            auth.text("user_code").isBlank() -> "打开授权页面完成连接，完成后会自动更新。"
+            else -> "打开授权页面，确认或输入以下代码，完成后会自动更新。"
+        })
             if (auth.text("user_code").isNotBlank()) Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.large) {
                 Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(auth.text("user_code"), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall, fontFamily = FontFamily.Monospace)
@@ -603,13 +646,35 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         .setPrimaryClip(ClipData.newPlainText("Agent 授权代码", auth.text("user_code"))) }) { Icon(Icons.Filled.ContentCopy, "复制授权代码") }
                 }
             }
-            Text("等待授权 · 可打开页面后返回", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (needsCode) {
+                TextButton(openPage, enabled = !state.busy) { Text("打开授权页") }
+                OutlinedTextField(code, { code = it }, Modifier.fillMaxWidth(), label = { Text("Claude 授权码") },
+                    singleLine = true, enabled = !state.busy, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Password))
+            } else Text("等待授权 · 可打开页面后返回", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
-    }, confirmButton = { MemohActionButton("打开授权页", Icons.Filled.OpenInNew, {
-        val url = auth.text("verification_url").ifBlank { auth.text("authorization_url") }
-        if (url.startsWith("https://")) uriHandler.openUri(url)
-    }, primary = true) }, dismissButton = { TextButton(vm::cancelAuthorization) { Text("取消") } }) }
+    }, confirmButton = {
+        if (needsCode) MemohActionButton("连接", Icons.Filled.Check, { vm.submitAgentAuthorizationCode(code) },
+            enabled = !state.busy && code.isNotBlank(), primary = true)
+        else MemohActionButton("打开授权页", Icons.Filled.OpenInNew, openPage, primary = true)
+    }, dismissButton = { TextButton(vm::cancelAuthorization, enabled = !state.busy) { Text("取消") } }) }
+    state.connectionTest?.let { ConnectionTestSheet(it, vm::dismiss) }
+    state.modelImportResult?.let { receipt ->
+        var detailsOpen by remember(receipt) { mutableStateOf(false) }
+        MemohFormDialog(onDismissRequest = vm::dismiss, title = "模型已导入", text = {
+            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (receipt.created != null && receipt.updated != null && receipt.skipped != null) {
+                    Text("已添加 ${receipt.created} · 已更新 ${receipt.updated} · 已跳过 ${receipt.skipped}")
+                }
+                Text(state.notice ?: "选择需要启用的模型。")
+                if (receipt.staleCatalog) Text("本次使用缓存目录，稍后可重新同步。")
+                TextButton({ detailsOpen = !detailsOpen }) { Text(if (detailsOpen) "收起详情" else "查看详情") }
+                if (detailsOpen) Text(formatted(receipt.details), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+        }, confirmButton = { TextButton(vm::dismiss) { Text("完成") } },
+            dismissButton = { TextButton({ vm.dismiss(); vm.refresh() }) { Text("关闭并刷新") } })
+    }
     state.result?.let { result ->
         val data = result.obj()
         val device = data["device"].obj()
@@ -630,9 +695,6 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
                         data.text("text").isNotBlank() -> data.text("text")
                         data.text("token").isNotBlank() -> "关联码 · ${data.text("token")}\n有效期至 ${data.text("expires_at")}"
                         data["imported"] is JsonObject -> "已恢复 " + data["imported"].obj().entries.joinToString("、") { "${it.value.jsonPrimitive.content} 项 ${it.key}" }
-                        listOf("created", "updated", "skipped").all { data[it] is JsonPrimitive } ->
-                            "已添加 ${data.text("created")} · 已更新 ${data.text("updated")} · 已跳过 ${data.text("skipped")}\n导入后选择需要启用的模型。" +
-                                if (data["catalog"].obj().flag("stale")) "\n本次使用缓存目录，稍后可重新同步。" else ""
                         data.text("status").isNotBlank() -> "状态 · ${data.text("status")}" + data.text("alias").takeIf(String::isNotBlank)?.let { "\n$it" }.orEmpty()
                         else -> "操作已完成，详情中可查看服务端返回结果。"
                     }
@@ -645,6 +707,47 @@ fun ManagementScreen(state: ManagementState, vm: ManagementViewModel, onBack: ()
         }, confirmButton = { if (url.startsWith("https://")) MemohActionButton("打开授权页", Icons.Filled.OpenInNew, { uriHandler.openUri(url) }) else if (command.isNotBlank()) MemohActionButton("复制", Icons.Filled.ContentCopy, {
             (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Memoh 电脑接入命令", command))
         }) else TextButton(vm::dismiss) { Text("完成") } }, dismissButton = { TextButton({ vm.dismiss(); vm.refresh() }) { Text("关闭并刷新") } })
+    }
+}
+
+@Composable
+private fun ConnectionTestSheet(test: ConnectionTestResult, onDismiss: () -> Unit) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    val (title, icon, tone) = when (test.status) {
+        ConnectionTestStatus.Passed -> Triple("测试通过", Icons.Filled.Check, ListIconTone.Tertiary)
+        ConnectionTestStatus.Unverified -> Triple("连接待验证", Icons.Filled.NetworkCheck, ListIconTone.Secondary)
+        ConnectionTestStatus.Failed -> Triple("连接测试未通过", Icons.Filled.ErrorOutline, ListIconTone.Error)
+    }
+    MemohBottomSheet(onDismiss, sheetState) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 600.dp).verticalScroll(rememberScrollState())
+            .padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                MemohListIcon(icon, tone, size = 56.dp)
+                Column(Modifier.weight(1f)) {
+                    if (test.subject.isNotBlank()) Text(test.subject, style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(title, style = MaterialTheme.typography.headlineSmall)
+                }
+            }
+            if (test.status != ConnectionTestStatus.Passed || test.latencyMillis != null) {
+                Surface(color = MaterialTheme.colorScheme.surfaceContainerLowest, shape = MaterialTheme.shapes.extraLarge) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (test.status != ConnectionTestStatus.Passed) Text(test.summary, style = MaterialTheme.typography.bodyLarge)
+                        test.latencyMillis?.let { Text("耗时 ${it} ms", style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        ErrorDetails(test.problem, test.summary)
+                    }
+                }
+            }
+            MemohActionButton("完成", Icons.Filled.Check, onClick = {
+                scope.launch {
+                    sheetState.hide()
+                    if (!sheetState.isVisible) onDismiss()
+                }
+            }, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), primary = true)
+        }
     }
 }
 
@@ -680,11 +783,7 @@ internal fun ManagementRow(title: String, subtitle: String, icon: ImageVector, i
 internal fun GroupLabel(title: String) { Text(title, Modifier.padding(start = 12.dp, top = 20.dp, bottom = 8.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant) }
 @Composable
 internal fun ManagementNotice(text: String, error: Boolean = false) {
-    Surface(Modifier.fillMaxWidth().padding(bottom = 12.dp), shape = MaterialTheme.shapes.large,
-        color = if (error) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = if (error) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer) {
-        Text(text, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
-    }
+    MemohFeedbackCard(text, Modifier.padding(bottom = 12.dp), error = error)
 }
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

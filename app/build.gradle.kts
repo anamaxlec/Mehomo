@@ -13,7 +13,10 @@ val releaseKeystoreProperties = Properties().apply {
   if (propertiesFile.exists()) propertiesFile.inputStream().use { load(it) }
 }
 
+val benchmarkRelease = providers.gradleProperty("mehomoBenchmark").map(String::toBoolean).orElse(false).get()
+
 android {
+  if (benchmarkRelease) testBuildType = "release"
   namespace = "dev.memoh.android"
   compileSdk = 37
   defaultConfig {
@@ -73,6 +76,7 @@ dependencies {
   implementation(project(":feature:settings"))
 
   implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.core.splashscreen)
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.runtime.compose)
@@ -103,4 +107,5 @@ dependencies {
   androidTestImplementation(libs.androidx.test.espresso.core)
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
+  if (benchmarkRelease) add("releaseImplementation", libs.androidx.compose.ui.test.manifest)
 }

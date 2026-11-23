@@ -3,6 +3,16 @@ package dev.memoh.core.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+@Serializable
+data class SessionAttentionEvent(
+    val type: String,
+    @SerialName("bot_id") val botId: String? = null,
+    @SerialName("session_id") val sessionId: String? = null,
+    @SerialName("schedule_id") val scheduleId: String? = null,
+    @SerialName("attention_kind") val kind: String? = null,
+    val title: String? = null,
+)
+
 /**
  * Server → client WebSocket events (`UIStreamEvent` in the official web client).
  *
@@ -77,8 +87,9 @@ data class UIStreamEvent(
     val isKnown: Boolean get() = type in KNOWN
     val problem: MemohError get() {
         val legacy = error?.problem ?: MemohError.parse(feedback, status)
-        return if (!code.isNullOrBlank()) MemohError(code, args ?: legacy.args, status ?: legacy.status, fault ?: legacy.fault,
-            requestId ?: legacy.requestId, traceId ?: legacy.traceId) else legacy
+        val hasCorrelation = !requestId.isNullOrBlank() || !traceId.isNullOrBlank()
+        return MemohError(code?.takeIf(String::isNotBlank) ?: legacy.code, args ?: legacy.args, status ?: legacy.status,
+            fault ?: legacy.fault, if (hasCorrelation) requestId else legacy.requestId, if (hasCorrelation) traceId else legacy.traceId)
     }
 }
 

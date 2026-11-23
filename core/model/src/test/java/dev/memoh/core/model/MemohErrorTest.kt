@@ -43,15 +43,42 @@ class MemohErrorTest {
         val legacy = Json.decodeFromString<UIStreamEvent>("""{"type":"error","feedback":"old text","message":"private exception"}""")
         assertEquals(errorMessage("internal"), legacy.problem.text())
     }
+    @Test fun diagnosticIdsStayWithTheirOperationAndProviderErrorsOpenSettings() {
+        val nested = MemohError.parse("""{"traceId":"response-trace","error":{"code":"agent.provider_auth_failed","requestId":"operation-request"}}""")
+        assertEquals("operation-request", nested.requestId)
+        assertNull(nested.traceId)
+        assertEquals(ErrorAction.Providers, nested.action)
+        val frame = Json.decodeFromString<UIStreamEvent>("""{"type":"error","request_id":"frame-request","feedback":{"code":"agent.provider_quota_exhausted","trace_id":"nested-trace"}}""")
+        assertEquals("frame-request", frame.problem.requestId)
+        assertNull(frame.problem.traceId)
+        assertEquals(ErrorAction.Providers, frame.problem.action)
+        val message = Json.decodeFromString<UIMessage>("""{"type":"error","id":1,"code":"agent.provider_request_rejected","trace_id":"stored-trace"}""")
+        assertEquals("stored-trace", message.problem.traceId)
+        assertEquals(ErrorAction.Providers, message.problem.action)
+        assertNull(MemohError("agent.provider_rate_limited").action)
+    }
     @Test fun desktopPreparationUsesTheSameCodeArgsAndCancellationRules() {
         val event = Json.decodeFromString<DisplayPrepareEvent>("""{"type":"error","code":"request.field_required","args":{"field":"desktop"},"request_id":"display-r"}""")
         val problem = MemohError(event.code, event.args, fault = event.fault, requestId = event.requestId)
         assertEquals("缺少 desktop。", problem.text())
         assertEquals("display-r", problem.requestId)
     }
+    @Test fun upstreamDiagnosticsAreSeparateFromTheEmptyResponseSummary() {
+        val frame = Json.decodeFromString<UIStreamEvent>(
+            """{"type":"error","code":"agent.empty_response","args":{"upstream":"  missing content  "}}""")
+        val history = Json.decodeFromString<UIMessage>(
+            """{"type":"error","id":1,"code":"agent.empty_response","args":{"upstream":"missing content"}}""")
+        for (problem in listOf(frame.problem, history.problem)) {
+            assertEquals("模型返回了空回复，请重试。", problem.text())
+            assertEquals("missing content", problem.upstreamDetail)
+        }
+        assertNull(MemohError.parse("""{"code":"internal","detail":"server text"}""").upstreamDetail)
+        assertNull(MemohError.parse("""{"code":"internal","args":{"upstream":42}}""").upstreamDetail)
+    }
     @Test fun knownErrorsSupplySpecificSetupActions() {
         assertEquals(ErrorAction.BotSettings, MemohError("agent.chat_model_not_configured").action)
         assertEquals(ErrorAction.Agents, MemohError("external_runtime.auth_required").action)
+        assertTrue(errorMessage("external_runtime.busy", status = 409).contains("上下文仍保留"))
         assertTrue(errorMessage("connector_oauth_client_not_configured").contains("OAuth App"))
         assertEquals(ErrorAction.Connectors, MemohError("connector.oauth_client_not_configured").action)
         assertTrue(errorMessage("schedule.model_required").contains("模型"))

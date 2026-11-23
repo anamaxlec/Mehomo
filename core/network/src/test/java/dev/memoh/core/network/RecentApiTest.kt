@@ -20,6 +20,33 @@ class RecentApiTest {
     @Before fun start() { server = MockWebServer(); server.start() }
     @After fun stop() { server.shutdown() }
     private fun api() = MemohApi(OkHttpClient(), ServerEndpoint(ServerKind.SelfHosted, server.url("/").toString().trimEnd('/'), "", ""), json, auth)
+
+    @Test fun botChannelConfigsUsesOneBatchAndRetainsTheCompleteConfig() = runTest {
+        server.enqueue(MockResponse().setBody("""{"items":[{"channel_type":"feishu","disabled":false,"credentials":{"enableStreaming":false},"routing":{"default":"session"}}]}"""))
+        val configs = api().botChannelConfigs("b", listOf("feishu", "telegram"))
+        assertEquals(setOf("feishu"), configs.keys)
+        assertEquals(JsonPrimitive(false), configs["feishu"]!!.jsonObject["credentials"]!!.jsonObject["enableStreaming"])
+        assertEquals(JsonPrimitive("session"), configs["feishu"]!!.jsonObject["routing"]!!.jsonObject["default"])
+        assertEquals("/bots/b/channels", server.takeRequest().path)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun botChannelConfigsFallsBackOnAnOlderServerButSurfacesPermissionAndBotErrors() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"code":"http.not_found"}"""))
+        server.enqueue(MockResponse().setBody("""{"disabled":true}"""))
+        server.enqueue(MockResponse().setResponseCode(404))
+        assertEquals(setOf("feishu"), api().botChannelConfigs("b", listOf("feishu", "telegram")).keys)
+        assertEquals(listOf("/bots/b/channels", "/bots/b/channel/feishu", "/bots/b/channel/telegram"),
+            List(3) { server.takeRequest().path })
+        for ((status, code) in listOf(403 to "capability.access_denied", 404 to "bot.not_found", 500 to "internal")) {
+            server.enqueue(MockResponse().setResponseCode(status).setBody("""{"code":"$code"}"""))
+            try { api().botChannelConfigs("b", listOf("feishu")); fail("expected batch failure") }
+            catch (e: ApiException) { assertEquals(status, e.status); assertEquals(code, e.problem.code) }
+            assertEquals("/bots/b/channels", server.takeRequest().path)
+        }
+        assertEquals(6, server.requestCount)
+    }
+
     @Test fun runtimeControlsDecodeTheServersStringCommandKinds() = runTest {
         server.enqueue(MockResponse().setBody("""{"session_id":"s","commands":[{"name":"status","kind":"read"},{"name":"compact","kind":"operation"},{"name":"review","kind":"turn"}]}"""))
         val controls = api().runtimeControls("b", "s")
@@ -56,6 +83,17 @@ class RecentApiTest {
         server.enqueue(MockResponse().setResponseCode(403).setBody("""{"code":"capability.access_denied","request_id":"sse-r"}"""))
         try { api().managementStream(listOf("bots", "b", "dependencies", "codex", "install")).toList(); fail("expected a Problem") }
         catch (e: ApiException) { assertEquals("sse-r", e.problem.requestId); assertTrue(e.message!!.contains("管理权限")) }
+    }
+
+    @Test fun apiErrorsUseHeadersOnlyWhenTheBodyHasNoOperationIds() = runTest {
+        fun response(body: String) = MockResponse().setResponseCode(429).setBody(body)
+            .setHeader("X-Request-ID", "header-request").setHeader("X-Trace-ID", "header-trace")
+        server.enqueue(response("""{"code":"agent.provider_rate_limited","request_id":"operation-request"}"""))
+        server.enqueue(response("""{"code":"agent.provider_rate_limited"}"""))
+        try { api().managementRead("models"); fail("expected failed operation") }
+        catch (e: ApiException) { assertEquals("operation-request", e.problem.requestId); assertNull(e.problem.traceId) }
+        try { api().managementRead("models"); fail("expected failed request") }
+        catch (e: ApiException) { assertEquals("header-request", e.problem.requestId); assertEquals("header-trace", e.problem.traceId) }
     }
     @Test fun remoteDirectoryPathsAreReturnedByTheTargetAndNeverJoinedLocally() = runTest {
         server.enqueue(MockResponse().setBody("""{"workspace_target_id":"remote-1","path":"C:\\Users\\Alice","directories":[{"name":"工程","path":"C:\\Users\\Alice\\工程"}]}"""))
@@ -101,5 +139,23 @@ class RecentApiTest {
         assertTrue(api().agentQuota("b", "c").limitReached == true)
         assertEquals("/bots/b/agents/c/quota", server.takeRequest().path)
         assertEquals("/bots/b/agents/c/codex/usage", server.takeRequest().path)
+    }
+
+    @Test fun claudeQuotaDoesNotFallBackToTheLegacyCodexEndpoint() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404))
+        try { api().agentQuota("b", "cl", legacyCodexFallback = false); fail("expected a 404") }
+        catch (e: ApiException) { assertEquals(404, e.status) }
+        assertEquals("/bots/b/agents/cl/quota", server.takeRequest().path)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun scheduleAttentionDecodesLiveFramesAndIgnoresOptionalFieldsOnControlFrames() = runTest {
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
+            "data: {\"type\":\"attention_ready\"}\n\n" +
+                "data: {\"type\":\"session_attention\",\"bot_id\":\"b\",\"session_id\":\"s\",\"schedule_id\":\"daily\",\"attention_kind\":\"update\",\"title\":\"Daily digest\"}\n\n"))
+        val events = api().sessionAttention().toList()
+        assertEquals("/users/me/attention/events", server.takeRequest().path)
+        assertEquals(SessionAttentionEvent("attention_ready"), events.first())
+        assertEquals(SessionAttentionEvent("session_attention", "b", "s", "daily", "update", "Daily digest"), events.last())
     }
 }

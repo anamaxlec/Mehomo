@@ -9,6 +9,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.memoh.core.designsystem.component.*
 import dev.memoh.core.model.*
@@ -23,8 +25,9 @@ internal fun scheduleBody(original: JsonObject?, basics: JsonObject, execution: 
     if (original == null) return JsonObject(basics + execution)
     val changed = execution.any { (key, value) -> (original[key] ?: if (value is JsonPrimitive && value.isString) JsonPrimitive("") else JsonNull) != value }
     if (!changed) return basics
-    val readonly = setOf("id", "bot_id", "created_at", "updated_at", "current_calls", "name", "description", "command", "pattern", "enabled", "max_calls")
-    return JsonObject(basics + mapOf("execution" to JsonObject(original.filterKeys { it !in readonly } + execution)))
+    val topLevel = setOf("id", "bot_id", "created_at", "updated_at", "current_calls", "name", "description",
+        "command", "pattern", "enabled", "max_calls", "notify_policy", "contact_via_channels")
+    return JsonObject(basics + mapOf("execution" to JsonObject(original.filterKeys { it !in topLevel } + execution)))
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -43,6 +46,10 @@ internal fun ScheduleEditor(schedule: BotSchedule?, state: BotFeatureState, vm: 
     var modelId by remember { mutableStateOf(schedule?.modelId?.takeIf(String::isNotBlank) ?: schedule?.acpModelId.orEmpty()) }
     var effort by remember { mutableStateOf(schedule?.reasoningEffort.orEmpty()) }
     var workdir by remember { mutableStateOf(schedule?.workdirId.orEmpty()) }
+    val initialPolicy = schedule?.notifyPolicy ?: "important"
+    val initialChannelContact = schedule?.contactViaChannels ?: true
+    var notifyPolicy by remember { mutableStateOf(initialPolicy) }
+    var channelContact by remember { mutableStateOf(initialChannelContact) }
     var error by remember { mutableStateOf<String?>(null) }
     val options = state.scheduleOptions
     val effectiveAgent = if (target == "new_session") agentId else options.sessions.firstOrNull { it.id == sessionId }?.botAgentId.orEmpty()
@@ -76,7 +83,9 @@ internal fun ScheduleEditor(schedule: BotSchedule?, state: BotFeatureState, vm: 
                     "acp_model_id" to if (externalModel) modelId else "",
                     "reasoning_effort" to effort, "max_run_seconds" to timeout)
                 vm.saveSchedule(schedule?.id, scheduleBody(wire, apiBody("name" to name.trim(), "description" to description.trim(), "command" to command.trim(),
-                    "pattern" to pattern, "max_calls" to (count?.let(::JsonPrimitive) ?: JsonNull), "enabled" to (schedule?.enabled ?: true)), execution), onDismiss)
+                    "pattern" to pattern, "max_calls" to (count?.let(::JsonPrimitive) ?: JsonNull), "enabled" to (schedule?.enabled ?: true),
+                    "notify_policy" to notifyPolicy.takeIf { it != initialPolicy },
+                    "contact_via_channels" to channelContact.takeIf { it != initialChannelContact }), execution), onDismiss)
             } catch (e: Exception) { error = e.message }
         }, enabled = !state.busy && !state.scheduleOptionsLoading, primary = true)
     }, dismissButton = { TextButton(onDismiss, enabled = !state.busy) { Text("取消") } }, text = {
@@ -116,6 +125,13 @@ internal fun ScheduleEditor(schedule: BotSchedule?, state: BotFeatureState, vm: 
             if (expression != null) Text("${scheduleDescription(expression)}\nBot 时区 · ${options.timezone?.takeIf(String::isNotBlank) ?: "服务端默认"}" + (preview?.let { "\n下次执行 · " + it.format(DateTimeFormatter.ofPattern("MM-dd HH:mm z")) }.orEmpty()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(command, { command = it }, Modifier.fillMaxWidth(), label = { Text("执行任务") }, minLines = 3)
             OutlinedTextField(description, { description = it }, Modifier.fillMaxWidth(), label = { Text("说明") })
+            ScheduleChoice("Memoh 提醒", notifyPolicy, listOf("important" to "仅重要更新", "every_run" to "每次运行后提醒")) { notifyPolicy = it }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("允许通过已配置的社交平台联系我", Modifier.weight(1f))
+                Switch(channelContact, { channelContact = it }, modifier = Modifier.semantics {
+                    contentDescription = "允许通过已配置的社交平台联系我"
+                }, enabled = !state.busy)
+            }
             ScheduleChoice("执行会话", target, listOf("new_session" to "每次新建会话", "existing_session" to "使用已有会话")) { target = it; modelId = ""; effort = "" }
             if (target == "existing_session") ScheduleChoice("目标会话", sessionId, options.sessions.map { it.id to (it.title ?: "未命名会话") }) { sessionId = it; modelId = ""; effort = "" }
             else {

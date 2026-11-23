@@ -5,17 +5,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import dev.memoh.core.model.CodexUsage
+import dev.memoh.core.model.AgentQuota
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Composable
-fun CodexUsagePanel(usage: CodexUsage?, loading: Boolean, error: String?, onRefresh: () -> Unit) {
+fun AgentQuotaPanel(usage: AgentQuota?, loading: Boolean, error: String?, onRefresh: () -> Unit, accountName: String = "ChatGPT") {
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("ChatGPT 账号额度", style = MaterialTheme.typography.titleMedium)
+            Text("$accountName 账号额度", style = MaterialTheme.typography.titleMedium)
             TextButton(onRefresh, enabled = !loading) { Text("刷新") }
         }
         if (loading) LinearWavyProgressIndicator(Modifier.fillMaxWidth())

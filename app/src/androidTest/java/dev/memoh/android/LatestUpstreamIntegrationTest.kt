@@ -4,6 +4,12 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -62,6 +68,127 @@ class LatestUpstreamIntegrationTest {
     private fun open(vm: ManagementViewModel) {
         compose.runOnIdle { vm.open("b", ManagementPage.Agents) }
         compose.waitUntil(8000) { vm.state.value.loaded }
+    }
+
+    @Test fun modelConnectionTestsShowDiagnosticsWithoutReloadingTheModelList() {
+        val upstreamDetail = "HTTP 401 · invalid_api_key"
+        UpstreamFixture { request -> when (request.path) {
+            "/providers" -> UpstreamReply(body = """[{"id":"provider","name":"Fixture LLM","client_type":"openai-completions"}]""")
+            "/models" -> UpstreamReply(body = """[{"id":"model","name":"Fixture Model","model_id":"fixture","provider_id":"provider"}]""")
+            "/providers/provider/test" -> UpstreamReply(body = """{"status":"auth_error","code":"agent.provider_auth_failed","args":{"upstream":"$upstreamDetail"}}""")
+            "/models/model/test" -> UpstreamReply(502, """{"code":"agent.provider_unreachable","args":{"upstream":"upstream timeout"},"request_id":"req-model"}""")
+            else -> UpstreamReply()
+        } }.use { server ->
+            val vm = ManagementViewModel(repository(server))
+            compose.setContent { MemohTheme {
+                val state by vm.state.collectAsState()
+                ManagementScreen(state, vm, {}, {}, {}, {})
+            } }
+            try {
+                compose.runOnIdle { vm.open("b", ManagementPage.Models) }
+                compose.waitUntil(8_000) { vm.state.value.loaded }
+                compose.onNodeWithContentDescription("Fixture LLM操作").performClick()
+                compose.onNodeWithText("测试连接").performClick()
+                compose.waitUntil(8_000) { vm.state.value.connectionTest != null }
+                compose.onNodeWithText("模型服务拒绝了当前凭据，请检查该服务商的 API Key。").assertIsDisplayed()
+                compose.onNodeWithText(upstreamDetail).assertDoesNotExist()
+                compose.onNodeWithText("错误详情").performClick()
+                compose.onNodeWithText(upstreamDetail).assertIsDisplayed()
+                screenshot("provider-test-details")
+                compose.onNodeWithText("完成").performClick()
+
+                compose.onNodeWithText("全部模型").performClick()
+                compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasContentDescription("Fixture Model操作"))
+                compose.onNodeWithContentDescription("Fixture Model操作").performClick()
+                compose.onNodeWithText("测试模型").performClick()
+                compose.waitUntil(8_000) { vm.state.value.connectionTest != null }
+                compose.onNodeWithText("错误详情").performClick()
+                compose.onNodeWithText("upstream timeout").assertIsDisplayed()
+                compose.onNodeWithText("req-model", substring = true).assertIsDisplayed()
+                assertEquals(1, server.requests.count { it.path == "/providers" })
+                assertEquals(1, server.requests.count { it.path == "/models" })
+                assertEquals(listOf("/providers/provider/test", "/models/model/test"),
+                    server.requests.filter { it.method == "POST" }.map { it.path })
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
+    @Test fun channelSettingsUseTheBatchAndKeepExistingCredentialsWhenStreamingIsDisabled() {
+        val credentials = AtomicReference("""{"appId":"fixture","appSecret":"fixture-secret","encryptKey":"keep"}""")
+        UpstreamFixture { request -> when (request.path) {
+            "/channels" -> UpstreamReply(body = """[{"type":"telegram","display_name":"Telegram"},{"type":"feishu","display_name":"飞书","config_schema":{"fields":{"enableStreaming":{"type":"bool","example":true,"order":1},"appSecret":{"type":"secret","required":true,"title":"App Secret","order":2},"encryptKey":{"type":"secret","title":"Encrypt Key","order":3}}}}]""")
+            "/bots/b/channels" -> UpstreamReply(body = """{"items":[{"channel_type":"feishu","credentials":${credentials.get()},"routing":{"keep":"route"}}]}""")
+            "/bots/b/channel/feishu" -> {
+                credentials.set(json.parseToJsonElement(request.body).jsonObject.getValue("credentials").toString())
+                UpstreamReply()
+            }
+            else -> base(request)
+        } }.use { server ->
+            val vm = ManagementViewModel(repository(server))
+            compose.setContent { MemohTheme { val state by vm.state.collectAsState(); ManagementScreen(state, vm, {}, {}, {}, {}) } }
+            try {
+                compose.runOnIdle { vm.open("b", ManagementPage.Channels) }
+                compose.waitUntil(8000) { vm.state.value.loaded }
+                val feishu = compose.onNodeWithTag("channel-row-feishu").assertIsDisplayed()
+                val telegram = compose.onNodeWithTag("channel-row-telegram").assertIsDisplayed()
+                assertTrue(feishu.fetchSemanticsNode().boundsInRoot.top < telegram.fetchSemanticsNode().boundsInRoot.top)
+                feishu.performClick()
+                compose.onNodeWithText("流式回复").assertIsDisplayed()
+                compose.onNodeWithText("fixture-secret").assertDoesNotExist()
+                compose.onNode(isToggleable() and hasAnyAncestor(isDialog())).assertIsOn().performClick().assertIsOff()
+                compose.onNodeWithText("保存").performClick()
+                compose.waitUntil(8000) { vm.state.value.notice == "已保存" }
+                val save = server.requests.single { it.path == "/bots/b/channel/feishu" }
+                assertEquals("PUT", save.method)
+                val payload = json.parseToJsonElement(save.body).jsonObject
+                assertEquals(JsonPrimitive("route"), payload.getValue("routing").jsonObject["keep"])
+                val saved = payload.getValue("credentials").jsonObject
+                assertEquals(JsonPrimitive(false), saved["enableStreaming"])
+                assertEquals(JsonPrimitive("fixture-secret"), saved["appSecret"])
+                assertEquals(JsonPrimitive("keep"), saved["encryptKey"])
+                assertEquals(2, server.requests.count { it.path == "/bots/b/channels" })
+                assertFalse(server.requests.any { it.method == "GET" && it.path.startsWith("/bots/b/channel/") })
+                feishu.performClick()
+                compose.onNode(isToggleable() and hasAnyAncestor(isDialog())).assertIsOff()
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
+    @Test fun missingCredentialsLeaveAConfiguredChannelReadOnly() {
+        UpstreamFixture { request -> when (request.path) {
+            "/channels" -> UpstreamReply(body = """[{"type":"feishu","display_name":"飞书"}]""")
+            "/bots/b/channels" -> UpstreamReply(body = """{"items":[{"channel_type":"feishu","credentials":null}]}""")
+            else -> base(request)
+        } }.use { server ->
+            val vm = ManagementViewModel(repository(server))
+            compose.setContent { MemohTheme { val state by vm.state.collectAsState(); ManagementScreen(state, vm, {}, {}, {}, {}) } }
+            try {
+                compose.runOnIdle { vm.open("b", ManagementPage.Channels) }
+                compose.waitUntil(8000) { vm.state.value.loaded }
+                compose.onNodeWithText("凭据未返回，请刷新").assertIsDisplayed()
+                compose.onNodeWithTag("channel-row-feishu").assert(!hasClickAction())
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
+    @Test fun loginWithAMissingAgentDependencyOpensTheInstallPromptWithoutInstalling() {
+        val agent = JsonObject(grok + ("dependency" to apiBody("dependency_id" to "grok-build")))
+        UpstreamFixture { request -> when (request.path) {
+            "$devicePath/authorize" -> UpstreamReply(409, """{"code":"agent_dependency_missing","args":{"dep_id":"grok-build"}}""")
+            "/bots/b/dependencies/preflight" -> UpstreamReply(body = """{"workspace_state":"running","items":[{"dependency_id":"grok-build","name":"Grok Build","state":"missing"}]}""")
+            else -> base(request)
+        } }.use { server ->
+            val vm = ManagementViewModel(repository(server))
+            compose.setContent { MemohTheme { val state by vm.state.collectAsState(); ManagementScreen(state, vm, {}, {}, {}, {}) } }
+            try {
+                open(vm)
+                compose.runOnIdle { vm.authorizeDeviceAgent(agent) }
+                compose.waitUntil(8000) { vm.state.value.dependencyPrompt != null }
+                compose.onNodeWithText("安装运行依赖").assertIsDisplayed()
+                compose.onNodeWithText("安装并启用").assertIsDisplayed()
+                assertFalse(server.requests.any { it.path.endsWith("/install") || it.method == "PATCH" })
+            } finally { vm.viewModelScope.cancel() }
+        }
     }
 
     @Test fun grokDeviceLoginSurvivesBackAndCompletesWithoutAStagedClaim() {
@@ -214,9 +341,166 @@ class LatestUpstreamIntegrationTest {
                 compose.onNode(hasText("已连接", substring = true)).assertIsDisplayed()
                 compose.onNodeWithText("查看 Codex 的账号额度").assertIsDisplayed().performClick()
                 compose.waitUntil(8000) { server.requests.any { it.path == "/bots/b/agents/c/quota" } }
-                compose.waitUntil(8000) { vm.state.value.codexUsage["c"] != null }
-                assertEquals(30.0, vm.state.value.codexUsage.getValue("c").windows.single().usedPercent, .0)
+                compose.waitUntil(8000) { vm.state.value.agentQuota["c"] != null }
+                assertEquals(30.0, vm.state.value.agentQuota.getValue("c").windows.single().usedPercent, .0)
                 assertFalse(server.requests.any { it.path.endsWith("/codex/usage") })
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
+    @Test fun claudeWorkspaceCodeConnectsTheAccountAndDisplaysModelQuota() {
+        val signedIn = AtomicReference(false)
+        val claude = apiBody("id" to "cl", "name" to "Claude", "runtime" to "claude-code", "enabled" to true,
+            "reports_quota" to true, "metadata" to apiBody("auth" to "claude_account"))
+        val agentPath = "/bots/b/agents/cl"
+        UpstreamFixture { request -> when (request.path) {
+            "/bots/b/agents" -> UpstreamReply(body = apiBody("items" to JsonArray(listOf(claude))).toString())
+            "$agentPath/account" -> UpstreamReply(body = apiBody("signed_in" to signedIn.get()).toString())
+            "$agentPath/login/device/authorize" -> UpstreamReply(body = """{"login_id":"claude-login","code_required":true,"verification_url":"https://example.com/authorize"}""")
+            "$agentPath/login/device/code" -> {
+                signedIn.set(true)
+                UpstreamReply(204, "")
+            }
+            "$agentPath/quota" -> UpstreamReply(body = """{"limit_reached":false,"windows":[{"used_percent":42,"window_minutes":10080,"model":"Sonnet"}]}""")
+            "$agentPath/credential" -> {
+                signedIn.set(false)
+                UpstreamReply(204, "")
+            }
+            else -> base(request)
+        } }.use { server ->
+            val vm = ManagementViewModel(repository(server))
+            compose.setContent { MemohTheme { val state by vm.state.collectAsState(); ManagementScreen(state, vm, {}, {}, {}, {}) } }
+            try {
+                open(vm)
+                compose.waitUntil(8000) { vm.state.value.agentAccounts["cl"]?.signedIn == false }
+                compose.onNodeWithText("查看 Claude 的账号额度").assertDoesNotExist()
+                compose.onNodeWithContentDescription("Claude操作").performClick()
+                compose.onNodeWithText("账号授权").performClick()
+                compose.waitUntil(8000) { vm.state.value.authorization != null }
+                compose.onNodeWithText("打开授权页").assertIsDisplayed()
+                compose.onNodeWithText("连接").assertIsNotEnabled()
+                compose.onNode(hasSetTextAction()).performTextInput("example-code#state")
+                compose.onNodeWithText("连接").performClick()
+                compose.waitUntil(8000) { vm.state.value.authorization == null && vm.state.value.agentAccounts["cl"]?.signedIn == true }
+                val submission = server.requests.single { it.path == "$agentPath/login/device/code" }
+                assertEquals("POST", submission.method)
+                assertEquals(apiBody("login_id" to "claude-login", "code" to "example-code#state"), json.parseToJsonElement(submission.body))
+                assertFalse(server.requests.any { it.path == "/agent-authorizations" || it.path.endsWith("/poll") || it.path.endsWith("/cancel") || it.path.endsWith("/credential/claim") })
+                compose.onNodeWithText("查看 Claude 的账号额度").performClick()
+                compose.waitUntil(8000) { vm.state.value.agentQuota["cl"] != null }
+                compose.onNodeWithText("Claude 账号额度").assertIsDisplayed()
+                compose.onNodeWithText("1 周 · Sonnet").assertIsDisplayed()
+                androidx.test.espresso.Espresso.pressBack()
+                compose.onNodeWithContentDescription("Claude操作").performClick()
+                compose.onNodeWithText("断开认证").performClick()
+                compose.onNodeWithText("确认").performClick()
+                compose.waitUntil(8000) { vm.state.value.agentAccounts["cl"]?.signedIn == false }
+                assertTrue(server.requests.any { it.path == "$agentPath/credential" && it.method == "DELETE" })
+                compose.onNodeWithText("查看 Claude 的账号额度").assertDoesNotExist()
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
+    @Test fun rejectingAClaudeCodeClearsTheAttemptAndAllowsAnotherSignIn() {
+        val claude = apiBody("id" to "cl", "name" to "Claude", "runtime" to "claude-code", "enabled" to true,
+            "metadata" to apiBody("auth" to "claude_account"))
+        val device = "/bots/b/agents/cl/login/device"
+        UpstreamFixture { request -> when (request.path) {
+            "$device/authorize" -> UpstreamReply(body = """{"login_id":"claude-login","code_required":true,"verification_url":"https://example.com/authorize"}""")
+            "$device/code" -> UpstreamReply(400, """{"code":"agent_authorization.code_invalid"}""")
+            "$device/cancel" -> UpstreamReply(204, "")
+            else -> base(request)
+        } }.use { server ->
+            val vm = ManagementViewModel(repository(server))
+            try {
+                open(vm)
+                compose.runOnIdle { vm.authorizeDeviceAgent(claude) }
+                compose.waitUntil(8000) { vm.state.value.authorization != null }
+                compose.runOnIdle { vm.submitAgentAuthorizationCode("wrong-code") }
+                compose.waitUntil(8000) { vm.state.value.error?.contains("授权码无效") == true }
+                assertNull(vm.state.value.authorization)
+                assertFalse(vm.state.value.busy)
+                compose.runOnIdle { vm.authorizeDeviceAgent(claude) }
+                compose.waitUntil(8000) { vm.state.value.authorization != null }
+                compose.runOnIdle { vm.cancelAuthorization() }
+                compose.waitUntil(8000) { server.requests.count { it.path == "$device/cancel" } == 2 }
+                assertEquals(1, server.requests.count { it.path == "$device/code" })
+                assertNull(vm.state.value.authorization)
+            } finally { vm.viewModelScope.cancel() }
+        }
+    }
+
+    @Test fun newAndExistingScheduleDialogsFitNarrowScreensWithLargeText(): Unit = UpstreamFixture { request ->
+        when (request.path) {
+            "/bots/b/schedule" -> UpstreamReply(body = """{"items":[{"id":"daily","name":"日程示例","command":"生成简报","pattern":"0 9 * * *","enabled":true}]}""")
+            "/bots/b/settings" -> UpstreamReply(body = """{"effective_timezone":"Asia/Singapore"}""")
+            "/bots/b/workdirs", "/bots/b/sessions" -> UpstreamReply(body = """{"items":[]}""")
+            "/models" -> UpstreamReply(body = "[]")
+            else -> base(request)
+        }
+    }.use { server ->
+        val vm = BotFeatureViewModel(repository(server))
+        compose.setContent { MemohTheme {
+            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 1.8f)) {
+                val state by vm.state.collectAsState()
+                Box(Modifier.width(320.dp)) { BotFeatureScreen(state, vm) }
+            }
+        } }
+        try {
+            compose.runOnIdle { vm.open("b", BotFeature.Schedules) }
+            compose.waitUntil(8_000) { vm.state.value.hasLoaded }
+            assertNull(vm.state.value.error)
+            compose.onNodeWithText("新建日程").performClick()
+            compose.waitUntil(8_000) { !vm.state.value.scheduleOptionsLoading }
+            compose.onNodeWithText("重复规则").assertExists()
+            for (label in listOf("每隔几分钟", "每小时", "每天", "每周", "每月", "每年", "高级 Cron")) {
+                compose.onNodeWithText(label).performScrollTo().performClick()
+            }
+            compose.onNodeWithText("取消").performClick()
+            compose.onNodeWithContentDescription("日程示例操作").performClick()
+            compose.onNodeWithText("编辑").performClick()
+            compose.waitUntil(8_000) { !vm.state.value.scheduleOptionsLoading }
+            compose.onNodeWithText("编辑日程").assertIsDisplayed()
+            compose.onNodeWithText("取消").performClick()
+        } finally { compose.runOnIdle { vm.viewModelScope.cancel() } }
+    }
+
+    @Test fun scheduleEditorUsesEffectiveTimezoneAndSavesReminderOptionsAtTheTopLevel() {
+        val saved = AtomicReference("""{"id":"daily","name":"日程示例","command":"生成简报","pattern":"0 9 * * *","enabled":true,"notify_policy":"important","contact_via_channels":true}""")
+        UpstreamFixture { request -> when (request.path) {
+            "/bots/b/schedule" -> UpstreamReply(body = """{"items":[${saved.get()}]}""")
+            "/bots/b/schedule/daily" -> {
+                val changes = json.parseToJsonElement(request.body).jsonObject
+                saved.set(JsonObject(json.parseToJsonElement(saved.get()).jsonObject + changes).toString())
+                UpstreamReply(body = saved.get())
+            }
+            "/bots/b/settings" -> UpstreamReply(body = """{"effective_timezone":"Asia/Singapore"}""")
+            "/bots/b/workdirs", "/bots/b/sessions" -> UpstreamReply(body = """{"items":[]}""")
+            "/models" -> UpstreamReply(body = "[]")
+            else -> base(request)
+        } }.use { server ->
+            val vm = BotFeatureViewModel(repository(server))
+            compose.setContent { MemohTheme { val state by vm.state.collectAsState(); BotFeatureScreen(state, vm) } }
+            try {
+                compose.runOnIdle { vm.open("b", BotFeature.Schedules) }
+                compose.waitUntil(8000) { vm.state.value.hasLoaded }
+                compose.onNodeWithContentDescription("日程示例操作").performClick()
+                compose.onNodeWithText("编辑").performClick()
+                compose.waitUntil(8000) { !vm.state.value.scheduleOptionsLoading }
+                compose.onNodeWithText("Bot 时区 · Asia/Singapore", substring = true).assertExists()
+                compose.onNodeWithText("仅重要更新").performScrollTo().performClick()
+                compose.onNodeWithText("每次运行后提醒").performClick()
+                compose.onNodeWithContentDescription("允许通过已配置的社交平台联系我").performScrollTo().performClick()
+                compose.onNodeWithText("保存").performClick()
+                compose.waitUntil(8000) { vm.state.value.schedules.firstOrNull()?.notifyPolicy == "every_run" }
+                val request = server.requests.single { it.method == "PUT" && it.path == "/bots/b/schedule/daily" }
+                val body = json.parseToJsonElement(request.body).jsonObject
+                assertEquals(JsonPrimitive("every_run"), body["notify_policy"])
+                assertEquals(JsonPrimitive(false), body["contact_via_channels"])
+                val execution = body["execution"] as? JsonObject
+                assertFalse(execution?.containsKey("notify_policy") == true)
+                assertFalse(execution?.containsKey("contact_via_channels") == true)
+                assertFalse(server.requests.any { it.path == "/users/me" })
             } finally { vm.viewModelScope.cancel() }
         }
     }

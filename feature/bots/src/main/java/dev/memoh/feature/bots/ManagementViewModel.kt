@@ -5,9 +5,13 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.memoh.core.data.SessionRepository
 import dev.memoh.core.model.Bot
+import dev.memoh.core.model.AgentAccount
 import dev.memoh.core.model.DirectAgentRuntime
+import dev.memoh.core.model.MemohError
+import dev.memoh.core.model.supportsAgentQuota
 import dev.memoh.core.network.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.async
@@ -53,16 +57,43 @@ enum class ManagementPage(val title: String, val description: String) {
 internal fun JsonElement?.obj(): JsonObject = this as? JsonObject ?: JsonObject(emptyMap())
 internal fun JsonObject.text(key: String): String = (get(key) as? JsonPrimitive)?.contentOrNull.orEmpty()
 internal fun JsonObject.flag(key: String, fallback: Boolean = false): Boolean = (get(key) as? JsonPrimitive)?.booleanOrNull ?: fallback
+internal fun JsonObject.usesClaudeAccount(): Boolean =
+    text("runtime") == DirectAgentRuntime.ClaudeCode.id && this["metadata"].obj().text("auth") == DirectAgentRuntime.ClaudeCode.deviceAuthMode
+internal fun JsonObject.supportsAgentQuota(): Boolean =
+    supportsAgentQuota(text("runtime"), this["metadata"].obj().text("auth"), (get("reports_quota") as? JsonPrimitive)?.booleanOrNull)
+
 /** A device-code or workspace sign-in keeps its login inside the Agent, so no credential backs it. */
 internal fun JsonObject.agentConfigured(): Boolean {
     if (text("agent_credential_id").isNotBlank()) return true
     val runtime = DirectAgentRuntime.fromId(text("runtime")) ?: return false
     val auth = this["metadata"].obj().text("auth")
-    if (runtime.authModes.none { it.first == auth }) return false
+    if (runtime.authChoices(auth).none { it.first == auth }) return false
     return !runtime.storesCredential(auth)
 }
 internal fun JsonElement?.objects(key: String? = null): List<JsonObject> =
     ((if (key == null) this else obj()[key]) as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
+
+enum class ConnectionTestStatus { Passed, Unverified, Failed }
+
+data class ConnectionTestResult(
+    val summary: String,
+    val status: ConnectionTestStatus,
+    val problem: MemohError? = null,
+    val latencyMillis: Long? = null,
+    val subject: String = "",
+)
+
+internal fun ModelConnectionProbe.connectionTestResult(): ConnectionTestResult {
+    val (outcome, summary) = when {
+        rejected -> ConnectionTestStatus.Failed to
+            (problem.code?.let { problem.text() } ?: "连接验证失败，请检查 API key 和地址。")
+        status == "unverified" -> ConnectionTestStatus.Unverified to "服务可访问，请测试具体模型以验证调用"
+        accepted -> ConnectionTestStatus.Passed to "测试通过"
+        problem.code != null -> ConnectionTestStatus.Failed to problem.text()
+        else -> ConnectionTestStatus.Unverified to "服务端未确认测试结果"
+    }
+    return ConnectionTestResult(summary, outcome, problem, latencyMillis)
+}
 
 data class ManagementState(
     val botId: String = "", val page: ManagementPage = ManagementPage.Bot,
@@ -71,14 +102,18 @@ data class ManagementState(
     val error: String? = null, val notice: String? = null, val result: JsonElement? = null,
     val authorization: JsonObject? = null,
     val agentOptions: Map<String, JsonObject> = emptyMap(),
-    val codexUsage: Map<String, dev.memoh.core.model.CodexUsage> = emptyMap(),
-    val codexUsageErrors: Map<String, String> = emptyMap(),
-    val codexUsageLoading: Set<String> = emptySet(),
+    val agentAccounts: Map<String, AgentAccount> = emptyMap(),
+    val agentQuota: Map<String, dev.memoh.core.model.AgentQuota> = emptyMap(),
+    val agentQuotaErrors: Map<String, String> = emptyMap(),
+    val agentQuotaLoading: Set<String> = emptySet(),
     val dependencyPrompt: JsonObject? = null,
     val operationLog: String? = null,
     val audio: AudioPreview? = null,
     val cloud: Boolean = false,
     val backupImport: BackupImport? = null,
+    val connectionTest: ConnectionTestResult? = null,
+    val modelImportProblem: MemohError? = null,
+    val modelImportResult: ProviderModelImportResult? = null,
 ) {
     val canManage: Boolean get() = if (page == ManagementPage.Team) teamRole(data["membership"].obj().text("role")) in listOf("owner", "admin") else !page.needsBot || bot?.can("manage") == true
     val canManageBot: Boolean get() = bot?.can("manage") == true
@@ -90,6 +125,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     val state = _state.asStateFlow()
     private var job: Job? = null
     private var authJob: Job? = null
+    private var authorizationCode: CompletableDeferred<String>? = null
     private var authorizationRevision = 0
     private var removalJob: Job? = null
 
@@ -115,8 +151,29 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                 if (generation == repository.generation) _state.update {
                     it.copy(bot = loaded.first, data = loaded.second, loading = false, loaded = true)
                 }
+                readAgentAccounts(api, current, loaded, generation)
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(loading = false, error = errorText(e)) } }
+        }
+    }
+
+    private suspend fun readAgentAccounts(api: MemohApi, current: ManagementState, loaded: Pair<Bot?, Map<String, JsonElement>>, generation: Long) {
+        if (current.page != ManagementPage.Agents || loaded.first?.can("manage") != true || generation != repository.generation) return
+        val agents = loaded.second["agents"].objects("items").filter { it.usesClaudeAccount() }
+        val accounts = coroutineScope {
+            agents.filter { it.flag("enabled") }.map { agent ->
+                async {
+                    val id = agent.text("id")
+                    try { id to api.agentAccount(current.botId, id) }
+                    catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { null }
+                }
+            }.mapNotNull { it.await() }.toMap()
+        }
+        if (generation == repository.generation && state.value.botId == current.botId && state.value.page == current.page) {
+            val signedOut = agents.map { it.text("id") }.filter { accounts[it]?.signedIn == false }
+            _state.update { it.copy(agentAccounts = accounts, agentQuota = it.agentQuota - signedOut,
+                agentQuotaErrors = it.agentQuotaErrors - signedOut) }
         }
     }
 
@@ -269,17 +326,11 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                 catch (e: ApiException) { if (e.status == 404) data["hooks"] = JsonPrimitive("{\"version\":1,\"enabled\":false,\"hooks\":[]}") else throw e }
             }
             ManagementPage.Channels -> {
-                get("channels", "channels")
+                val channels = api.managementRead("channels")
+                data["channels"] = channels
+                data["configs"] = api.botChannelConfigs(current.botId,
+                    channels.objects().map { it.text("type") }.filter(String::isNotBlank))
                 optional("channel-current-user", "users", "me")
-                val configs = mutableMapOf<String, JsonElement>()
-                data["channels"].objects().forEach { channel ->
-                    val type = channel.text("type")
-                    if (type.isNotBlank()) {
-                        try { configs[type] = api.managementRead(*base, "channel", type) }
-                        catch (e: ApiException) { if (e.status != 404) throw e }
-                    }
-                }
-                data["configs"] = JsonObject(configs)
             }
         }
         return bot to data
@@ -308,6 +359,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                     if (response != null) onResult?.invoke(response)
                     if (result && response.obj().text("connection_id").isNotBlank() && response.obj().text("authorization_url").isNotBlank()) watchConnector(response.obj().text("connection_id"))
                 }
+                if (loaded != null) readAgentAccounts(api, current, loaded, generation)
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error = errorText(e)) } }
         }
@@ -330,35 +382,65 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     }
 
     fun importProviderModels(provider: JsonObject, fromEndpoint: Boolean = false) {
-        if (providerManaged(provider)) return
-        write(providerImportPath(provider, fromEndpoint), "POST", apiBody(), result = true)
+        runProviderImport(provider, verifyConnection = false, fromEndpoint = fromEndpoint, showReceipt = true)
+    }
+
+    fun testModelConnection(kind: String, id: String, name: String) {
+        if (state.value.busy || !state.value.canManage) return
+        job?.cancel()
+        val generation = repository.generation
+        job = viewModelScope.launch {
+            _state.update { it.copy(busy = true, error = null, notice = null, result = null, connectionTest = null) }
+            val result = try {
+                val api = repository.api() ?: throw SessionExpiredException()
+                api.modelConnectionProbe(kind, id).connectionTestResult()
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { ConnectionTestResult(errorText(e), ConnectionTestStatus.Failed, (e as? ApiException)?.problem) }
+            if (generation == repository.generation) _state.update { it.copy(busy = false, connectionTest = result.copy(subject = name)) }
+        }
     }
 
     fun prepareProviderModels(provider: JsonObject, verifyConnection: Boolean = true, fromEndpoint: Boolean = false) {
-        if (state.value.busy || providerManaged(provider)) return
+        runProviderImport(provider, verifyConnection, fromEndpoint, showReceipt = false)
+    }
+
+    private fun runProviderImport(provider: JsonObject, verifyConnection: Boolean, fromEndpoint: Boolean, showReceipt: Boolean) {
+        if (state.value.busy || !state.value.canManage || providerManaged(provider)) return
         val current = state.value
         val generation = repository.generation
         job?.cancel()
         job = viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null, notice = null, result = null) }
+            _state.update { it.copy(busy = true, error = null, notice = null, result = null, modelImportProblem = null, modelImportResult = null) }
             try {
                 val api = repository.api() ?: throw SessionExpiredException()
-                val test = if (verifyConnection) api.managementResult(listOf("providers", provider.text("id"), "test")).obj() else null
-                if (test?.text("status") in listOf("auth_error", "error")) throw UserFacingException(test?.text("code")?.takeIf(String::isNotBlank)?.let {
-                    dev.memoh.core.model.errorMessage(it)
-                } ?: "连接验证失败，请检查 API key 和地址。")
-                val imported = api.managementResult(providerImportPath(provider, fromEndpoint), body = apiBody()).obj()
-                val loaded = load(api, current)
-                if (generation == repository.generation) _state.update { it.copy(busy = false, bot = loaded.first, data = loaded.second,
-                    notice = when {
-                        imported["catalog"].obj().flag("stale") -> "目录暂时无法刷新，本次使用缓存。"
-                        test?.text("status") == "unverified" -> "服务可访问，具体模型调用仍需验证。"
-                        test != null && test.text("status") != "ok" -> "已获取模型，连接状态尚未确认。"
-                        else -> null
-                    }) }
+                val test = if (verifyConnection) api.modelConnectionProbe("providers", provider.text("id")) else null
+                if (test?.rejected == true) {
+                    val failure = test.connectionTestResult()
+                    if (generation == repository.generation) _state.update {
+                        it.copy(busy = false, error = failure.summary, modelImportProblem = failure.problem)
+                    }
+                    return@launch
+                }
+                val imported = api.importProviderModels(providerImportPath(provider, fromEndpoint))
+                val loaded = try { load(api, current) } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { null }
+                if (generation == repository.generation) _state.update {
+                    it.copy(busy = false, bot = loaded?.first ?: it.bot, data = loaded?.second ?: it.data,
+                        modelImportResult = imported.takeIf { showReceipt },
+                        notice = when {
+                            loaded == null -> "模型已导入，请刷新页面读取最新配置。"
+                            showReceipt -> null
+                            imported.staleCatalog -> "目录暂时无法刷新，本次使用缓存。"
+                            test?.status == "unverified" -> "服务可访问，具体模型调用仍需验证。"
+                            test != null && !test.accepted -> "已获取模型，连接状态尚未确认。"
+                            else -> null
+                        })
+                }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error =
-                if (!fromEndpoint && e is ApiException && e.status == 404 && providerCatalogSource(provider) != null) "当前服务端不支持模型目录，请升级 Memoh 后重试。" else errorText(e)) } }
+            catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false,
+                error = if (!fromEndpoint && e is ApiException && e.status == 404 && providerCatalogSource(provider) != null)
+                    "当前服务端不支持模型目录，请升级 Memoh 后重试。" else errorText(e),
+                modelImportProblem = (e as? ApiException)?.problem) } }
         }
     }
 
@@ -370,7 +452,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
         if (changes.isEmpty()) { onSaved(); return }
         job?.cancel()
         job = viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null, notice = null) }
+            _state.update { it.copy(busy = true, error = null, notice = null, modelImportProblem = null) }
             var saved = 0
             try {
                 val api = repository.api() ?: throw SessionExpiredException()
@@ -437,8 +519,20 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                     return@startAgentAuthorization
                 }
                 checkCurrent()
-                check(loginId.isNotBlank() && login.text("user_code").isNotBlank()) { "授权服务未返回登录代码" }
+                val needsCode = login.flag("code_required")
+                check(loginId.isNotBlank() && (if (needsCode) login.text("verification_url").isNotBlank() else login.text("user_code").isNotBlank())) {
+                    "授权服务未返回完整的登录信息"
+                }
+                val codeInput = if (needsCode) CompletableDeferred<String>().also { authorizationCode = it } else null
                 _state.update { it.copy(busy = false, authorization = JsonObject(login + ("status" to JsonPrimitive("pending")))) }
+                if (codeInput != null) {
+                    val code = withTimeout(15 * 60 * 1000L) { codeInput.await() }
+                    checkCurrent()
+                    _state.update { it.copy(busy = true) }
+                    api.managementWrite(path + "code", "POST", apiBody("login_id" to loginId, "code" to code))
+                    connected = true
+                    return@startAgentAuthorization
+                }
                 val deadline = System.currentTimeMillis() + 15 * 60 * 1000
                 while (System.currentTimeMillis() < deadline) {
                     delay(2_000)
@@ -460,11 +554,15 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
         }
     }
 
+    fun submitAgentAuthorizationCode(code: String) {
+        if (code.isNotBlank()) authorizationCode?.complete(code.trim())
+    }
+
     private fun startAgentAuthorization(agent: JsonObject, mode: String, action: suspend (MemohApi, suspend () -> Unit) -> Unit) {
         if (state.value.busy || !state.value.canManage) return
         val runtime = DirectAgentRuntime.fromId(agent.text("runtime")) ?: return
         val currentMode = agent["metadata"].obj().text("auth").ifBlank { runtime.defaultAuthMode }
-        if (agent.text("agent_credential_id").isNotBlank() && mode != currentMode) {
+        if ((agent.text("agent_credential_id").isNotBlank() || state.value.agentAccounts[agent.text("id")]?.signedIn == true) && mode != currentMode) {
             _state.update { it.copy(error = "请先断开当前认证，再切换认证方式") }; return
         }
         cancelAuthorization()
@@ -488,12 +586,21 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
                 refresh()
             } catch (e: TimeoutCancellationException) {
                 if (generation == repository.generation && revision == authorizationRevision && state.value.botId == botId)
-                    _state.update { it.copy(busy = false, authorization = null, error = "授权服务响应超时，请重新连接") }
+                    _state.update { it.copy(busy = false, authorization = null, error = "授权已超时，请重新连接") }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
-                if (generation == repository.generation && revision == authorizationRevision && state.value.botId == botId)
-                    _state.update { it.copy(busy = false, authorization = null, error = errorText(e)) }
-            }
+                checkCurrent()
+                val dependency = agent["dependency"].obj().text("dependency_id")
+                val missing = if (e is ApiException && e.problem.code == "agent_dependency_missing" && dependency.isNotBlank()) {
+                    try { repository.api()?.let { agentDependency(it, botId, dependency) }?.takeIf { it.text("state") == "missing" } }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { null }
+                } else null
+                checkCurrent()
+                _state.update { it.copy(busy = false, authorization = null,
+                    dependencyPrompt = missing?.let { dependencyPrompt(agent, dependency, it) },
+                    error = if (missing == null) errorText(e) else null) }
+            } finally { if (revision == authorizationRevision) authorizationCode = null }
         }
     }
 
@@ -546,6 +653,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
     fun cancelAuthorization() {
         val wasAuthorizing = authJob?.isActive == true && state.value.busy
         authorizationRevision++
+        authorizationCode = null
         authJob?.cancel()
         _state.update { it.copy(authorization = null, busy = if (wasAuthorizing) false else it.busy) }
     }
@@ -611,21 +719,21 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
         }
     }
 
-    fun loadCodexUsage(id: String) {
+    fun loadAgentQuota(id: String) {
         val current = state.value
         val agent = current.data["agents"].objects("items").firstOrNull { it.text("id") == id } ?: return
-        if (agent.text("runtime") != "codex" || agent["metadata"].obj().text("auth") != "chatgpt" || id in current.codexUsageLoading) return
+        if (!agent.supportsAgentQuota() || id in current.agentQuotaLoading) return
         val generation = repository.generation
         viewModelScope.launch {
-            _state.update { it.copy(codexUsageLoading = it.codexUsageLoading + id, codexUsageErrors = it.codexUsageErrors - id) }
+            _state.update { it.copy(agentQuotaLoading = it.agentQuotaLoading + id, agentQuotaErrors = it.agentQuotaErrors - id) }
             try {
-                val usage = (repository.api() ?: throw SessionExpiredException()).agentQuota(current.botId, id)
+                val usage = (repository.api() ?: throw SessionExpiredException()).agentQuota(current.botId, id, agent.text("runtime") == DirectAgentRuntime.Codex.id)
                 if (generation == repository.generation && state.value.botId == current.botId)
-                    _state.update { it.copy(codexUsage = it.codexUsage + (id to usage), codexUsageLoading = it.codexUsageLoading - id) }
+                    _state.update { it.copy(agentQuota = it.agentQuota + (id to usage), agentQuotaLoading = it.agentQuotaLoading - id) }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 if (generation == repository.generation && state.value.botId == current.botId)
-                    _state.update { it.copy(codexUsageErrors = it.codexUsageErrors + (id to e.userMessage("额度暂不可用，请重试")), codexUsageLoading = it.codexUsageLoading - id) }
+                    _state.update { it.copy(agentQuotaErrors = it.agentQuotaErrors + (id to e.userMessage("额度暂不可用，请重试")), agentQuotaLoading = it.agentQuotaLoading - id) }
             }
         }
     }
@@ -680,14 +788,12 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
             try {
                 val api = repository.api() ?: error("请先登录")
                 val dependency = agent["dependency"].obj().text("dependency_id")
-                val response = api.managementResult(listOf("bots", bot, "dependencies", "preflight"), body = apiBody("dependency_ids" to listOf(dependency))).obj()
-                val item = response["items"].objects().firstOrNull { it.text("dependency_id") == dependency }.obj()
+                val item = agentDependency(api, bot, dependency)
                 if (generation != repository.generation) return@launch
                 _state.update { it.copy(busy = false) }
-                if (response.text("workspace_state") != "running") error("请先启动 Bot 的云端工作空间")
                 when (item.text("state")) {
                     "satisfied" -> write(listOf("bots", bot, "agents", agent.text("id")), "PATCH", apiBody("enabled" to true))
-                    "missing" -> _state.update { it.copy(dependencyPrompt = apiBody("agent" to agent, "dependency" to dependency, "name" to item.text("name"))) }
+                    "missing" -> _state.update { it.copy(dependencyPrompt = dependencyPrompt(agent, dependency, item)) }
                     "platform_unsupported" -> error("此工作空间的平台不支持 ${item.text("name")}")
                     else -> error("服务端未确认此 Agent 的运行依赖")
                 }
@@ -695,6 +801,16 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
             catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error = errorText(e)) } }
         }
     }
+
+    private suspend fun agentDependency(api: MemohApi, bot: String, dependency: String): JsonObject {
+        val preflight = api.managementResult(listOf("bots", bot, "dependencies", "preflight"),
+            body = apiBody("dependency_ids" to listOf(dependency))).obj()
+        if (preflight.text("workspace_state") != "running") throw UserFacingException("请先启动 Bot 的云端工作空间")
+        return preflight["items"].objects().firstOrNull { it.text("dependency_id") == dependency }.obj()
+    }
+
+    private fun dependencyPrompt(agent: JsonObject, dependency: String, item: JsonObject) =
+        apiBody("agent" to agent, "dependency" to dependency, "name" to item.text("name"))
 
     fun installAgentDependency() {
         val prompt = state.value.dependencyPrompt ?: return
@@ -771,7 +887,7 @@ class ManagementViewModel @Inject constructor(private val repository: SessionRep
             catch (e: Exception) { if (generation == repository.generation) _state.update { it.copy(busy = false, error = errorText(e)) } }
         }
     }
-    fun dismiss() { _state.update { it.copy(error = null, notice = null, result = null) } }
+    fun dismiss() { _state.update { it.copy(error = null, notice = null, result = null, connectionTest = null, modelImportProblem = null, modelImportResult = null) } }
     fun dismissOperationLog() { if (!state.value.busy) _state.update { it.copy(operationLog = null) } }
 
     fun cloudWrite(path: List<String>, method: String, body: JsonObject? = null, removedTeam: Boolean = false, onSaved: () -> Unit = {}) {

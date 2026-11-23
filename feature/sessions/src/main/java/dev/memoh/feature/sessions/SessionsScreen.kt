@@ -331,6 +331,7 @@ fun SessionsScreen(
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "还没有 Bot",
+                                icon = Icons.Filled.SmartToy,
                                 description = "这个账号下还没有可用的 Bot。先在网页端创建一个，它就会出现在这里。",
                             )
                         }
@@ -340,6 +341,7 @@ fun SessionsScreen(
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "没有匹配的内容",
+                                icon = Icons.Filled.Search,
                                 description = if (state.nextCursor != null) "已加载的 ${state.sessions.size} 个会话中没有匹配，可继续加载更早的会话。" else "已搜索全部会话标题，可换个关键词试试。",
                                 action = { if (state.nextCursor != null) Column {
                                     PageFooter(state, onLoadMore)
@@ -353,6 +355,7 @@ fun SessionsScreen(
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "还没有会话",
+                                icon = Icons.AutoMirrored.Filled.Chat,
                                 description = "开始一段对话，Bot 会在它的云电脑上为你工作",
                             )
                         }
@@ -362,6 +365,7 @@ fun SessionsScreen(
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MemohEmptyState(
                                 title = "加载失败",
+                                icon = Icons.Filled.Refresh,
                                 description = "检查网络后重试",
                                 action = { MemohActionButton("重试", Icons.Filled.Refresh, onRetry, primary = true) },
                             )

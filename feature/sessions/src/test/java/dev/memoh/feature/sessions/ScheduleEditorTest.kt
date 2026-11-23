@@ -30,13 +30,18 @@ class ScheduleEditorTest {
         assertEquals("2026-11-01T01:50-04:00[America/New_York]", nextPreset("*/10 * * * *", "America/New_York", ZonedDateTime.parse("2026-11-01T01:45-04:00[America/New_York]")).toString())
     }
     @Test fun `editing basics preserves opaque runtime execution`() {
-        val original = Json.parseToJsonElement("""{"id":"s","name":"old","runtime_type":"acp_agent","acp_agent_id":"claude","acp_model_id":"opus","custom_runtime":{"key":true}}""").jsonObject
+        val original = Json.parseToJsonElement("""{"id":"s","name":"old","runtime_type":"acp_agent","acp_agent_id":"claude","acp_model_id":"opus","custom_runtime":{"key":true},"notify_policy":"important","contact_via_channels":true}""").jsonObject
         val body = scheduleBody(original, apiBody("name" to "new"), apiBody("runtime_type" to "acp_agent", "acp_agent_id" to "claude", "acp_model_id" to "opus"))
         assertFalse("execution" in body)
-        val changed = scheduleBody(original, apiBody("name" to "new"), apiBody("acp_model_id" to "sonnet"))
+        val changed = scheduleBody(original, apiBody("name" to "new", "notify_policy" to "every_run", "contact_via_channels" to false),
+            apiBody("acp_model_id" to "sonnet"))
         assertEquals("claude", changed["execution"]!!.jsonObject["acp_agent_id"]!!.jsonPrimitive.content)
         assertEquals(original["custom_runtime"], changed["execution"]!!.jsonObject["custom_runtime"])
         assertFalse("id" in changed["execution"]!!.jsonObject)
+        assertFalse("notify_policy" in changed["execution"]!!.jsonObject)
+        assertFalse("contact_via_channels" in changed["execution"]!!.jsonObject)
+        assertEquals(JsonPrimitive("every_run"), changed["notify_policy"])
+        assertEquals(JsonPrimitive(false), changed["contact_via_channels"])
     }
     @Test fun `weekly and daily previews follow Bot timezone`() {
         val now = ZonedDateTime.parse("2026-10-03T01:30:00Z")

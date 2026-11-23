@@ -15,13 +15,14 @@ internal fun agentEditor(state: ManagementState, agent: JsonObject?, vm: Managem
     if (id.isNotBlank()) vm.agentOptions(id)
     fun catalog() = vm.state.value.agentOptions[id]?.get("catalog").obj()
     fun direct(values: Map<String, String>) = DirectAgentRuntime.fromId(values["provider"]) != null
-    val credentialAttached = agent?.text("agent_credential_id").orEmpty().isNotBlank()
+    val credentialAttached = agent?.text("agent_credential_id").orEmpty().isNotBlank() ||
+        state.agentAccounts[id]?.signedIn == true
     val currentAuth = metadata.text("auth").ifBlank { DirectAgentRuntime.fromId(provider)?.defaultAuthMode.orEmpty() }
     val fields = listOf(
         FormField("name", "名称", agent?.text("name").orEmpty(), required = true),
         FormField("provider", "Agent", provider, choices = if (agent == null) providers else listOf(provider to (providers.firstOrNull { it.first == provider }?.second ?: provider))),
         FormField("auth", if (credentialAttached) "认证方式（断开认证后可切换）" else "认证方式", currentAuth,
-            choicesFor = { values -> DirectAgentRuntime.fromId(values["provider"])?.authModes.orEmpty()
+            choicesFor = { values -> DirectAgentRuntime.fromId(values["provider"])?.authChoices(currentAuth).orEmpty()
                 .filter { !credentialAttached || it.first == currentAuth } }, visible = ::direct),
         FormField("base_url", "API 地址（空白使用默认）", metadata.text("base_url"), visible = ::direct),
         FormField("model", "默认模型", metadata.text("model"), choicesFor = {
@@ -46,8 +47,11 @@ internal fun agentEditor(state: ManagementState, agent: JsonObject?, vm: Managem
         val next = metadata.toMutableMap().apply {
             put("provider", JsonPrimitive(selected))
             if (direct) {
-                val authChoices = runtime.authModes.map { it.first }
-                put("auth", JsonPrimitive(if (credentialAttached) currentAuth else body.text("auth").takeIf { it in authChoices } ?: runtime.defaultAuthMode))
+                val authChoices = runtime.authChoices(currentAuth).map { it.first }
+                val selectedAuth = if (credentialAttached) currentAuth else body.text("auth").takeIf { it in authChoices } ?: runtime.defaultAuthMode
+                // v1.0.2 reads workspace as claude_account; v1.0.1 still needs the old value.
+                put("auth", JsonPrimitive(if (selectedAuth == "claude_account" && (agent == null || currentAuth != selectedAuth))
+                    "workspace" else selectedAuth))
                 listOf("base_url", "model", "permission_mode", "reasoning_effort").forEach { key ->
                     if (body.text(key).isBlank()) remove(key) else put(key, body.getValue(key))
                 }
@@ -72,15 +76,31 @@ internal fun modelUpdate(model: JsonObject, enabled: Boolean): JsonObject {
 internal fun schemaFields(schema: JsonObject, current: JsonObject, configured: Boolean): List<FormField> =
     schema.entries.map { (key, value) ->
         val field = value.obj()
-        val secret = field.text("type") == "password" || field.flag("secret") || key.contains("api_key") || key.contains("token") || key.contains("secret")
-        val kind = when (field.text("type")) { "boolean" -> FieldKind.Toggle; "integer" -> FieldKind.Number; "number" -> FieldKind.Decimal; "object" -> FieldKind.Object; "array" -> FieldKind.Array; else -> FieldKind.Text }
+        val secret = field.text("type") in setOf("password", "secret") || field.flag("secret") || key.contains("api_key") || key.contains("token") || key.contains("secret")
+        val kind = when (field.text("type")) { "bool", "boolean" -> FieldKind.Toggle; "integer" -> FieldKind.Number; "number" -> FieldKind.Decimal; "object" -> FieldKind.Object; "array" -> FieldKind.Array; else -> FieldKind.Text }
         FormField(key, field.text("title").ifBlank { field.text("label").ifBlank { key } },
-            if (secret) "" else if (kind in listOf(FieldKind.Object, FieldKind.Array)) current[key]?.toString().orEmpty() else current.text(key).ifBlank {
-                field.text("default_value").ifBlank { field.text("default") }.ifBlank { if (kind == FieldKind.Toggle) "false" else "" }
+            if (secret) "" else if (kind == FieldKind.Toggle) {
+                (current.text(key).booleanSetting() ?: field.text("default_value").booleanSetting()
+                    ?: field.text("default").booleanSetting() ?: false).toString()
+            } else if (kind in listOf(FieldKind.Object, FieldKind.Array)) current[key]?.toString().orEmpty() else current.text(key).ifBlank {
+                field.text("default_value").ifBlank { field.text("default") }
             }, kind, choices = (field["enum"] as? JsonArray)?.map { it.jsonPrimitive.content to it.jsonPrimitive.content }.orEmpty(),
             multiline = kind in listOf(FieldKind.Object, FieldKind.Array) || field.text("type") == "textarea" || field.flag("multiline"), secret = secret,
             required = field.flag("required") && !configured, omitBlank = secret && configured)
     }
+
+private fun String.booleanSetting(): Boolean? = when (trim().lowercase()) {
+    "true", "1", "yes", "on" -> true
+    "false", "0", "no", "off" -> false
+    else -> null
+}
+
+internal fun channelCredentialFields(type: String, schema: JsonObject, credentials: JsonObject, configured: Boolean): List<FormField> {
+    if (type != "feishu" || "enableStreaming" !in schema) return schemaFields(schema, credentials, configured)
+    val streaming = credentials.text("enableStreaming").booleanSetting() ?: credentials.text("enable_streaming").booleanSetting() ?: true
+    val current = JsonObject(credentials + ("enableStreaming" to JsonPrimitive(streaming)))
+    return schemaFields(schema, current, configured).map { if (it.key == "enableStreaming") it.copy(label = "流式回复") else it }
+}
 
 internal fun approvalEditor(state: ManagementState, vm: ManagementViewModel): ManagementEditor {
     val settings = state.data["settings"].obj()

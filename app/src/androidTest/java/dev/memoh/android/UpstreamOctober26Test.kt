@@ -249,7 +249,7 @@ class UpstreamOctober26Test {
         assertEquals(1, fixture.creates.get())
     }
 
-    @Test fun aFailedCatalogNeverSilentlyUsesEndpointDiscovery() = Fixture().use { fixture ->
+    @Test fun aFailedCatalogNeverSilentlyUsesEndpointDiscovery(): Unit = Fixture().use { fixture ->
         fixture.catalogStatus.set(503)
         show(fixture)
         compose.onNodeWithText("DeepSeek").performClick()
@@ -260,6 +260,10 @@ class UpstreamOctober26Test {
         compose.onNodeWithContentDescription("DeepSeek操作").performClick()
         compose.onNodeWithText("从接口发现模型").performClick()
         compose.waitUntil(10_000) { fixture.requests.any { it.endsWith("/import-models") } && !fixture.vm.state.value.busy }
+        compose.onNodeWithText("模型已导入").assertIsDisplayed()
+        compose.onNodeWithText("已添加 1 · 已更新 0 · 已跳过 0").assertIsDisplayed()
+        compose.onNodeWithText("查看详情").performClick()
+        compose.onNodeWithText("\"created\": 1", substring = true).assertIsDisplayed()
     }
 
     @Test fun anOldServerOnlyDiscoversModelsAfterAnExplicitChoice() = Fixture(empty = true).use { fixture ->

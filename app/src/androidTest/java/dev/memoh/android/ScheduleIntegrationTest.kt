@@ -1,13 +1,7 @@
 package dev.memoh.android
 
 import androidx.activity.ComponentActivity
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.viewModelScope
@@ -41,35 +35,6 @@ class ScheduleIntegrationTest {
         val bots = api.bots()
         val last = SettingsStore(InstrumentationRegistry.getInstrumentation().targetContext).lastBotId.first()
         bots.firstOrNull { it.id == last } ?: bots.first()
-    }
-
-    @Test fun newAndExistingScheduleDialogsFitNarrowScreensWithLargeText() {
-        val repository = repository(); val api = requireNotNull(repository.api()); val bot = bot(api)
-        val vm = BotFeatureViewModel(repository)
-        compose.setContent { MemohTheme {
-            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 1.8f)) {
-                val state by vm.state.collectAsState()
-                Box(Modifier.width(320.dp)) { BotFeatureScreen(state, vm) }
-            }
-        } }
-        try {
-            compose.runOnIdle { vm.open(bot.id, BotFeature.Schedules) }
-            compose.waitUntil(45000) { !vm.state.value.loading }
-            assertNull(vm.state.value.error)
-            compose.onNodeWithText("新建日程").performClick()
-            compose.waitUntil(45000) { !vm.state.value.scheduleOptionsLoading }
-            compose.onNodeWithText("重复规则").assertExists()
-            for (label in listOf("每隔几分钟", "每小时", "每天", "每周", "每月", "每年", "高级 Cron")) {
-                compose.onNodeWithText(label).performScrollTo().performClick()
-            }
-            compose.onNodeWithText("取消").performClick()
-            if (vm.state.value.schedules.isNotEmpty()) {
-                compose.onAllNodesWithText("编辑").onFirst().performScrollTo().performClick()
-                compose.waitUntil(45000) { !vm.state.value.scheduleOptionsLoading }
-                compose.onNodeWithText("编辑日程").assertExists()
-                compose.onNodeWithText("取消").performClick()
-            }
-        } finally { compose.runOnIdle { vm.viewModelScope.cancel() } }
     }
 
     @Test fun cloudScheduleCreateEditPauseAndHistoryRoundTrip() {

@@ -42,6 +42,19 @@ class ProcessBlockRenderingTest {
     private val exec = UIMessage(8, "tool", name = "exec", toolCallId = "exec-call", running = true,
         input = Json.parseToJsonElement("""{"description":"运行相关验证","command":"./gradlew testDebugUnitTest"}"""), elapsedTimeSeconds = 3.0)
 
+    @Test fun aFinishedTurnShowsTheBackgroundHandoffAndItsProcessId() {
+        val background = exec.copy(running = false,
+            output = Json.parseToJsonElement("""{"structuredContent":{"status":"running_in_background","process_id":"process-42"}}"""))
+        compose.setContent { MemohTheme { Surface { ProcessBlock(listOf(read, background), false, false) } } }
+        compose.onNodeWithText("已转入后台").assertIsDisplayed()
+        compose.onNodeWithText("已探索").performClick()
+        compose.onNodeWithText("运行相关验证").performClick()
+        compose.onNodeWithText("进程 ID  process-42").assertIsDisplayed()
+        compose.onNodeWithText("暂无输出").assertDoesNotExist()
+        compose.onNodeWithText("running_in_background", substring = true).assertDoesNotExist()
+        screenshot("codex-background-command")
+    }
+
     @Test fun disclosureChoicesSurviveCompletionAndStateRestoration() {
         var active by mutableStateOf(true)
         var messages by mutableStateOf(listOf(reasoning, read, exec))

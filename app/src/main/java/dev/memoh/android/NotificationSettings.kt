@@ -64,7 +64,7 @@ fun NotificationSettings(settings: SettingsViewModel) {
                 else settings.setBackgroundMonitor(value)
             }
             NotificationSwitch("本轮结束提醒", done, Icons.Filled.TaskAlt,
-                subtitle = "任务完成或失败时提醒", index = 1, onChange = settings::setNotifyReplyDone)
+                subtitle = "任务完成、失败或日程有更新时提醒", index = 1, onChange = settings::setNotifyReplyDone)
             NotificationSwitch("审批与补充输入提醒", decisions, Icons.Filled.RateReview,
                 subtitle = "需要你处理时提醒", index = 2, tone = ListIconTone.Tertiary,
                 onChange = settings::setNotifyDecisions)

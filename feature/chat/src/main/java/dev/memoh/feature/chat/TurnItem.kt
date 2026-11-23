@@ -278,7 +278,7 @@ internal fun MessageBlock(message: UIMessage, isStreaming: Boolean, isRunActive:
     onToggleDetails: () -> Unit = {}) {
     when (message.type) {
         UIMessage.TYPE_TEXT -> Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.Bottom) {
-            TextBlock(content = message.content, modifier = Modifier.weight(1f))
+            TextBlock(content = message.content, modifier = Modifier.weight(1f), streaming = isStreaming)
             // Keep the same text width when the stream ends, so removing the
             // caret cannot re-wrap the answer and shift every following line.
             Box(Modifier.width(9.dp).padding(start = 2.dp)) {
@@ -288,9 +288,10 @@ internal fun MessageBlock(message: UIMessage, isStreaming: Boolean, isRunActive:
 
         UIMessage.TYPE_REASONING -> ReasoningCard(message = message, isStreaming = isStreaming, onToggleDetails = onToggleDetails)
 
-        UIMessage.TYPE_TOOL -> ToolCard(message = message, isRunActive = isRunActive, onToggleDetails = onToggleDetails)
+        UIMessage.TYPE_TOOL -> if (message.isScheduleNotice) NoticeBar(message.copy(type = UIMessage.TYPE_NOTICE, content = "已发送日程提醒"))
+            else ToolCard(message = message, isRunActive = isRunActive, onToggleDetails = onToggleDetails)
 
-        UIMessage.TYPE_ERROR -> ErrorBanner(message)
+        UIMessage.TYPE_ERROR -> ErrorBanner(message, onToggleDetails = onToggleDetails)
 
         UIMessage.TYPE_NOTICE -> NoticeBar(message)
 

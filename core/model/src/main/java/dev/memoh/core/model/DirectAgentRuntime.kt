@@ -9,10 +9,15 @@ enum class DirectAgentRuntime(
     val deviceAuthMode: String? = null,
 ) {
     Codex("codex", "Codex", listOf("chatgpt" to "ChatGPT 账号", "api_key" to "API key"), "openai_api_key", "chatgpt"),
-    ClaudeCode("claude-code", "Claude Code", listOf("workspace" to "工作空间已有登录", "oauth_token" to "账号 token", "api_key" to "API key"), "anthropic_api_key"),
+    ClaudeCode("claude-code", "Claude Code", listOf("claude_account" to "Claude 账号", "api_key" to "API key"), "anthropic_api_key", "claude_account"),
     GrokBuild("grok-build", "Grok Build", listOf("grok_account" to "Grok 账号", "api_key" to "API key"), "xai_api_key", "grok_account");
 
     val defaultAuthMode: String get() = authModes.first().first
+
+    fun authChoices(currentMode: String): List<Pair<String, String>> =
+        if (this == ClaudeCode && currentMode in listOf("workspace", "oauth_token"))
+            listOf("workspace" to "工作空间已有登录", "oauth_token" to "账号 token", "api_key" to "API key")
+        else authModes
 
     /**
      * A Claude Code workspace login and the device-code sign-ins (a ChatGPT or

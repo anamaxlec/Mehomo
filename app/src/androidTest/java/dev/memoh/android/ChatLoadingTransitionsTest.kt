@@ -8,11 +8,13 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.memoh.core.designsystem.theme.MemohTheme
+import dev.memoh.core.designsystem.component.LocalErrorActionHandler
 import dev.memoh.core.model.*
 import dev.memoh.core.network.SocketStatus
 import dev.memoh.feature.chat.ChatScreen
 import dev.memoh.feature.chat.ChatUiState
 import dev.memoh.feature.chat.PendingTurn
+import dev.memoh.feature.chat.components.ErrorBanner
 import dev.memoh.core.markdown.LocalMarkdownImageLoader
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
@@ -26,14 +28,97 @@ import java.io.File
 class ChatLoadingTransitionsTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
-    private fun show(state: State<ChatUiState>, imageLoader: (suspend (String) -> ByteArray)? = null) {
+    private fun show(state: State<ChatUiState>, imageLoader: (suspend (String) -> ByteArray)? = null, onRetryRuntime: (() -> Unit)? = null) {
         compose.setContent { MemohTheme {
             CompositionLocalProvider(LocalMarkdownImageLoader provides imageLoader) {
             ChatScreen(state.value, {}, {}, {}, {}, {},
+                onRetryRuntime = onRetryRuntime,
                 onApprove = { _, _, _ -> }, onReject = { _, _, _ -> }, onUserInput = { _, _, _ -> },
                 onCancelUserInput = { _, _ -> }, onDismissError = {})
             }
         } }
+    }
+
+    @Test fun snapshotTimeoutOffersRetryWhileTheTranscriptRemainsReadable() {
+        val state = mutableStateOf(ChatUiState(session = Session("stalled"), historyLoading = false,
+            hasMoreHistory = false, socketStatus = SocketStatus.Connected,
+            history = listOf(UITurn(turnId = "saved", role = "user", text = "已经保存的消息"))))
+        var retries = 0
+        compose.mainClock.autoAdvance = false
+        show(state, onRetryRuntime = { retries++ })
+        compose.mainClock.advanceTimeBy(7_900)
+        compose.onNodeWithText("重新同步").assertDoesNotExist()
+        compose.mainClock.advanceTimeBy(300)
+        compose.onNodeWithText("会话状态同步超时").assertIsDisplayed()
+        compose.onNodeWithText("已经保存的消息").assertIsDisplayed()
+        compose.onNodeWithText("重新同步").performClick()
+        compose.mainClock.advanceTimeBy(100)
+        assertEquals(1, retries)
+        compose.onNodeWithText("重新同步").assertDoesNotExist()
+        compose.runOnIdle { state.value = state.value.copy(awaitingSnapshot = false, runtime = RuntimeState(sessionId = "stalled")) }
+        compose.mainClock.advanceTimeBy(8_300)
+        compose.onNodeWithText("会话状态同步超时").assertDoesNotExist()
+        compose.onNodeWithText("已经保存的消息").assertIsDisplayed()
+    }
+
+    @Test fun providerErrorDetailsAreCollapsibleAndCanBeCopied() {
+        var opened: ErrorAction? = null
+        val diagnostic = "HTTP 429 · insufficient_quota"
+        compose.setContent { MemohTheme {
+            CompositionLocalProvider(LocalErrorActionHandler provides { opened = it }) {
+                ErrorBanner(UIMessage(1, "error", code = "agent.provider_quota_exhausted",
+                    args = mapOf("upstream" to diagnostic), requestId = "req-123", traceId = "trace-456"))
+            }
+        } }
+        compose.onNodeWithText("模型服务账户的余额或配额已用尽。").assertIsDisplayed()
+        compose.onNodeWithText("req-123", substring = true).assertDoesNotExist()
+        compose.onNodeWithText(diagnostic).assertDoesNotExist()
+        compose.onNodeWithText("错误详情").performClick()
+        compose.onNodeWithText("req-123", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("trace-456", substring = true).assertIsDisplayed()
+        compose.onNodeWithText(diagnostic).assertIsDisplayed()
+        screenshot("chat-error-details")
+        compose.onNodeWithContentDescription("复制错误").performClick()
+        compose.onNodeWithContentDescription("已复制").assertIsDisplayed()
+        compose.runOnIdle {
+            val clipboard = compose.activity.getSystemService(android.content.ClipboardManager::class.java)
+            val report = clipboard.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+            assertTrue(report.contains("req-123") && report.contains("trace-456"))
+            assertTrue(report.contains(diagnostic))
+            assertEquals(true, clipboard.primaryClipDescription?.extras?.getBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE))
+        }
+        compose.onNodeWithText("收起详情").performClick()
+        compose.onNodeWithText("trace-456", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("模型服务设置").performClick()
+        assertEquals(ErrorAction.Providers, opened)
+    }
+
+    @Test fun returningToLatestResumesFollowingWithoutMovingAReaderDuringUpdates() {
+        val state = mutableStateOf(ChatUiState(session = Session("following"), historyLoading = false,
+            hasMoreHistory = false, awaitingSnapshot = false, socketStatus = SocketStatus.Connected,
+            history = (1..30).map { UITurn(turnId = "turn-$it", role = "user", text = "消息 $it") }))
+        show(state)
+        compose.onNodeWithText("消息 30").assertIsDisplayed()
+        compose.runOnIdle {
+            state.value = state.value.copy(history = state.value.history + UITurn(turnId = "turn-31", role = "user", text = "消息 31"))
+        }
+        compose.onNodeWithText("消息 31").assertIsDisplayed()
+        compose.onNode(hasScrollToIndexAction()).performTouchInput { swipeDown(durationMillis = 600) }
+        compose.onNodeWithContentDescription("回到最新").assertIsDisplayed()
+
+        compose.runOnIdle {
+            state.value = state.value.copy(draft = "正在编辑",
+                history = state.value.history + UITurn(turnId = "turn-32", role = "user", text = "消息 32"))
+        }
+        compose.onNodeWithText("消息 32").assertDoesNotExist()
+        compose.onNodeWithContentDescription("回到最新").performClick()
+        compose.onNodeWithText("消息 32").assertIsDisplayed()
+        compose.onNodeWithContentDescription("回到最新").assertDoesNotExist()
+
+        compose.runOnIdle {
+            state.value = state.value.copy(history = state.value.history + UITurn(turnId = "turn-33", role = "user", text = "消息 33"))
+        }
+        compose.onNodeWithText("消息 33").assertIsDisplayed()
     }
 
     private fun screenshot(name: String) {

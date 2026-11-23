@@ -13,12 +13,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.ButtonGroupScope
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -27,38 +28,38 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import dev.memoh.core.designsystem.component.ErrorDetails
+import dev.memoh.core.designsystem.component.LocalErrorActionHandler
+import dev.memoh.core.designsystem.component.MemohFeedbackCard
 import dev.memoh.core.markdown.MemohMarkdown
+import dev.memoh.core.model.MemohError
 import dev.memoh.core.model.UIMessage
 
-/** Error banner. Never clears the transcript — it reports alongside it. */
 @Composable
-fun ErrorBanner(message: UIMessage, modifier: Modifier = Modifier) {
-    val handler = dev.memoh.core.designsystem.component.LocalErrorActionHandler.current
-    val action = dev.memoh.core.model.MemohError(message.code).action
-    val text = dev.memoh.core.model.errorMessage(message.code, message.args)
+fun ErrorBanner(message: UIMessage, modifier: Modifier = Modifier, onToggleDetails: () -> Unit = {}) {
+    val problem = message.problem
+    ChatErrorCard(problem.text(), problem, modifier, onToggleDetails = onToggleDetails)
+}
+
+@Composable
+internal fun ChatErrorCard(
+    text: String,
+    problem: MemohError?,
+    modifier: Modifier = Modifier,
+    onDismiss: (() -> Unit)? = null,
+    onToggleDetails: () -> Unit = {},
+) {
+    val handler = LocalErrorActionHandler.current
+    val action = problem?.action
     if (text.isBlank()) return
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.errorContainer)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Icon(
-            imageVector = Icons.Filled.ErrorOutline,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onErrorContainer,
-            modifier = Modifier.size(18.dp),
-        )
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onErrorContainer,
-            modifier = Modifier.weight(1f),
-        )
-        if (handler != null && action != null) TextButton({ handler(action) }) { Text(action.title) }
+    MemohFeedbackCard(text, modifier, error = true) {
+        val actions: (ButtonGroupScope.() -> Unit)? = if ((handler != null && action != null) || onDismiss != null) ({
+            if (handler != null && action != null) clickableItem(onClick = { handler(action) }, label = action.title,
+                icon = { Icon(Icons.Filled.Settings, null) })
+            if (onDismiss != null) clickableItem(onClick = onDismiss, label = "知道了",
+                icon = { Icon(Icons.Filled.Check, null) })
+        }) else null
+        ErrorDetails(problem, text, onToggle = onToggleDetails, actions = actions)
     }
 }
 /** Runtime degradation notice — informational, not an error. */
@@ -100,8 +101,8 @@ fun StatusLine(message: UIMessage, modifier: Modifier = Modifier) {
 
 /** The assistant's answer itself: plain Markdown in the reading flow. */
 @Composable
-fun TextBlock(content: String, modifier: Modifier = Modifier) {
-    MemohMarkdown.Markdown(markdown = content, modifier = modifier, singleDollarMath = false,
+fun TextBlock(content: String, modifier: Modifier = Modifier, streaming: Boolean = false) {
+    MemohMarkdown.Markdown(markdown = content, modifier = modifier, singleDollarMath = false, streaming = streaming,
         workspaceImagesAsLinks = true)
 }
 

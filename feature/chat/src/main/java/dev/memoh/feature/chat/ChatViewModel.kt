@@ -71,11 +71,6 @@ data class PendingRegeneration(
     val editFromMessageId: String? = null,
 )
 
-private data class StoppedSend(val runId: String, val turnId: String, val draft: PendingTurn)
-
-private fun RuntimeCurrentRunView.hasVisibleOutput(): Boolean =
-    safeMessages.any { it.type != UIMessage.TYPE_STATUS && it.type != UIMessage.TYPE_ERROR }
-
 /** Forks load their transcript; a newly created conversation can render immediately. */
 data class SessionNavigation(val session: Session, val isNew: Boolean)
 data class CachedSearchNavigation(val accountId: String, val botId: String, val sessionId: String,
@@ -135,10 +130,10 @@ data class ChatUiState(
     val skillCatalogError: String? = null,
     val goal: RuntimeGoal? = null,
     val controlsError: String? = null,
-    val codexUsage: CodexUsage? = null,
-    val codexUsageLoading: Boolean = false,
-    val codexUsageError: String? = null,
-    val codexUsageAgentId: String? = null,
+    val agentQuota: AgentQuota? = null,
+    val agentQuotaLoading: Boolean = false,
+    val agentQuotaError: String? = null,
+    val agentQuotaAgentId: String? = null,
     val notice: String? = null,
     val sessionInfo: SessionInfo? = null,
     val sessionInfoLoading: Boolean = false,
@@ -311,63 +306,10 @@ data class ChatUiState(
         get() {
             val liveTurnId = runtime.run?.turnId ?: return history
             if (liveMessages.isEmpty()) return history
-            return history.filterNot { it.isAssistant && it.turnId == liveTurnId }
+            return history.withoutLiveAssistant(liveTurnId)
         }
 
-    /** Keep rendered output through a completion/new-run frame until REST history arrives. */
-    internal fun withRuntime(next: RuntimeState, awaitingSnapshot: Boolean = this.awaitingSnapshot): ChatUiState {
-        val nextRun = next.run?.takeUnless { it.runId == discardedRunId }
-        val retryAdmitted = regeneration?.let { retry -> nextRun != null &&
-            (nextRun.invocationId == retry.invocationId || nextRun.turnId == retry.acceptedTurnId) } == true
-        val anchorIndex = nextRun?.operation?.replaceFromMessageId?.takeIf(String::isNotBlank)
-            ?.let { anchor -> history.indexOfFirst { it.id == anchor }.takeIf { it >= 0 } }
-            ?: if (retryAdmitted) history.indexOfFirst { turn ->
-                regeneration?.editFromMessageId?.let { turn.id == it }
-                    ?: (turn.isAssistant && turn.turnId == regeneration?.turnId)
-            }.takeIf { it >= 0 } else null
-        val outgoing = when {
-            nextRun?.isTerminal == true && nextRun.safeMessages.isNotEmpty() -> nextRun
-            nextRun?.isTerminal == true || runtime.run?.turnId != nextRun?.turnId -> runtime.run
-            else -> null
-        }?.takeIf { it.configurationOnly != true && it.runId != discardedRunId && it.safeMessages.isNotEmpty() &&
-            (anchorIndex == null || it.runId == nextRun?.runId) }
-        val retained = (anchorIndex?.let(history::take) ?: history).toMutableList()
-        if (outgoing != null) {
-            val users = outgoing.userTurns?.takeIf { it.isNotEmpty() }
-                ?: listOfNotNull(outgoing.requestUserTurn ?: outgoing.operation?.replacementUserTurn)
-            val insertAt = retained.indexOfFirst { it.isAssistant && it.turnId == outgoing.turnId }
-                .takeIf { it >= 0 } ?: retained.size
-            val missingUsers = users.map { user ->
-                UITurn(turnId = user.turnId, turnPosition = user.turnPosition, role = "user", id = user.id,
-                    text = user.text, attachments = user.attachments, timestamp = user.timestamp,
-                    userMessageKind = user.userMessageKind, skillActivation = user.skillActivation,
-                    reply = user.reply, forward = user.forward, senderDisplayName = user.senderDisplayName)
-            }.filterNot { user -> retained.any { it.isUser && (it.listKey == user.listKey || user.id == null && it.turnId == user.turnId) } }
-            retained.addAll(insertAt, missingUsers)
-            val assistantIndex = retained.indexOfFirst { it.isAssistant && it.turnId == outgoing.turnId }
-            if (assistantIndex >= 0) {
-                val persisted = retained[assistantIndex]
-                // Completed snapshots contain original model text; persisted history
-                // already includes archived image URLs and publication failures.
-                if (!(outgoing.status == "completed" && outgoing.operation == null &&
-                        !persisted.id.isNullOrBlank() && persisted.safeMessages.any { message ->
-                            message.type == "text" && dev.memoh.core.markdown.MemohMarkdown.hasPublishedMedia(message.content)
-                        })) {
-                    retained[assistantIndex] = persisted.copy(messages = outgoing.safeMessages)
-                }
-            } else {
-                retained += UITurn(turnId = outgoing.turnId, turnPosition = outgoing.turnPosition,
-                    role = "assistant", messages = outgoing.safeMessages, timestamp = outgoing.updatedAt.orEmpty())
-            }
-        }
-        val updated = copy(runtime = next, history = retained, awaitingSnapshot = awaitingSnapshot,
-            regeneration = regeneration.takeUnless { retryAdmitted })
-        val visibleUsers = updated.history.filter { it.isUser } + updated.liveUserTurns
-        return updated.copy(pending = pending.filterNot { pending ->
-            visibleUsers.any { user -> user.turnId == pending.acceptedTurnId } ||
-                next.run?.invocationId == pending.invocationId && visibleUsers.any { it.turnId == next.run?.turnId }
-        })
-    }
+
 }
 
 /**
@@ -625,6 +567,10 @@ class ChatViewModel @Inject constructor(
         val session = _state.value.session ?: return
         if (invalidateCurrent) _state.update { it.copy(awaitingSnapshot = true) }
         socket?.subscribe(session.id, cursor = null)
+    }
+
+    fun retryRuntimeSync() {
+        if (state.value.awaitingSnapshot && state.value.socketStatus == SocketStatus.Connected) resubscribe()
     }
 
     private fun onStreamEvent(event: UIStreamEvent) {
@@ -946,7 +892,7 @@ class ChatViewModel @Inject constructor(
             "runtime_type" to if (agentId == null) "model" else null))
         skillCatalogJob?.cancel()
         _state.update { it.copy(session = updated, selectedAgentId = updated.botAgentId,
-            codexUsageLoading = false, codexUsage = null, codexUsageError = null, codexUsageAgentId = null,
+            agentQuotaLoading = false, agentQuota = null, agentQuotaError = null, agentQuotaAgentId = null,
             controls = null, controlsError = null, controlsLoading = false,
             skillCatalog = emptyList(), skillCatalogLoading = false, skillCatalogError = null,
             selectedModelId = updated.preferredChatModelId, models = emptyList(), modelCatalogLoading = true, modelProviders = emptyList(), reasoningEffort = updated.preferredReasoningEffort, awaitingSnapshot = true) }
@@ -1143,22 +1089,22 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    fun refreshCodexUsage() {
+    fun refreshAgentQuota() {
         val current = state.value
-        val agent = current.agents.firstOrNull { it.id == current.selectedAgentId && it.hasCodexUsage } ?: return
-        if (current.codexUsageLoading && current.codexUsageAgentId == agent.id) return
+        val agent = current.agents.firstOrNull { it.id == current.selectedAgentId && it.supportsAgentQuota } ?: return
+        if (current.agentQuotaLoading && current.agentQuotaAgentId == agent.id) return
         val generation = repository.generation
         viewModelScope.launch {
-            _state.update { it.copy(codexUsageLoading = true, codexUsageError = null,
-                codexUsage = it.codexUsage.takeIf { _ -> it.codexUsageAgentId == agent.id }, codexUsageAgentId = agent.id) }
+            _state.update { it.copy(agentQuotaLoading = true, agentQuotaError = null,
+                agentQuota = it.agentQuota.takeIf { _ -> it.agentQuotaAgentId == agent.id }, agentQuotaAgentId = agent.id) }
             try {
-                val usage = (repository.api() ?: throw SessionExpiredException()).agentQuota(current.botId, agent.id)
+                val usage = (repository.api() ?: throw SessionExpiredException()).agentQuota(current.botId, agent.id, agent.runtime == DirectAgentRuntime.Codex.id)
                 if (generation == repository.generation && state.value.session?.id == current.session?.id && state.value.selectedAgentId == agent.id)
-                    _state.update { it.copy(codexUsage = usage, codexUsageLoading = false) }
+                    _state.update { it.copy(agentQuota = usage, agentQuotaLoading = false) }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 if (generation == repository.generation && state.value.session?.id == current.session?.id && state.value.selectedAgentId == agent.id)
-                    _state.update { it.copy(codexUsageLoading = false, codexUsageError = e.userMessage("额度暂不可用，请重试")) }
+                    _state.update { it.copy(agentQuotaLoading = false, agentQuotaError = e.userMessage("额度暂不可用，请重试")) }
             }
         }
     }
@@ -1218,48 +1164,11 @@ class ChatViewModel @Inject constructor(
                         if (generation != repository.generation) return@fold
                         val active = _state.value
                         if (active.botId != botId || active.session?.id != session.id) return@fold
-                        val restore = stop?.takeIf { stoppedSend === it && active.runtime.run?.runId == it.runId &&
-                            page.items.none { turn -> turn.turnId == it.turnId } }
-                        if (stop != null && stoppedSend === stop) stoppedSend = null
-                        val rollbackEdit = active.runtime.run?.takeIf { completed ->
-                            before == null && completed.isTerminal && completed.status != RunStatus.COMPLETED &&
-                                !completed.hasVisibleOutput() && completed.operation?.kind == "edit" &&
-                                page.items.any { it.id == completed.operation?.replaceFromMessageId && it.isUser } &&
-                                page.items.none { it.turnId == completed.turnId }
-                        }
-                        val editError = rollbackEdit?.takeIf { it.status != RunStatus.ABORTED && active.error == null }
-                        val editProblem = editError?.let { failed ->
-                            val code = failed.errorCode ?: failed.safeMessages.lastOrNull { it.type == UIMessage.TYPE_ERROR }?.code
-                            code?.let { MemohError(code = it) }
-                        }
-                        val discardTurn = restore?.turnId ?: rollbackEdit?.turnId
-                        _state.update { current ->
-                            val existing = if (discardTurn == null) current.history else current.history.filterNot { it.turnId == discardTurn }
-                            val merged = if (before == null) {
-                                if (replace || current.offlineSyncedAt != null) page.items else mergeLatestHistory(existing, page.items)
-                            } else {
-                                // Older page goes in front; keep chronological order.
-                                page.items + existing
-                            }
-                            current.copy(
-                                offlineSyncedAt = null,
-                                history = merged.distinctBy { it.listKey },
-                                discardedRunId = restore?.runId ?: rollbackEdit?.runId ?: current.discardedRunId,
-                                draft = restore?.let { mergeDraftText(it.draft.text, current.draft) } ?: current.draft,
-                                attachments = if (restore == null) current.attachments else restore.draft.attachments + current.attachments,
-                                error = if (editError == null) current.error else editProblem?.text() ?: "未能保存修改，请重试",
-                                errorProblem = if (editError == null) current.errorProblem else editProblem,
-                                historyLoading = false,
-                                historyError = if (before == null) null else current.historyError,
-                                olderHistoryError = null,
-                                loadingMore = false,
-                                // A known history start stays known when newer replies arrive.
-                                hasMoreHistory = (before != null || replace || current.hasMoreHistory) && page.items.any { pageTurn ->
-                                    before == null || current.history.none { it.listKey == pageTurn.listKey }
-                                } && page.items.any { !it.id.isNullOrBlank() },
-                            )
-                        }
-                        if (restore != null) {
+                        val pendingStop = stop?.takeIf { stoppedSend === it }
+                        val updated = active.withHistoryPage(page.items, before, replace, pendingStop)
+                        if (pendingStop != null) stoppedSend = null
+                        _state.value = updated.state
+                        if (updated.restoredDraft) {
                             draftRevision++
                             persistDraft()
                         }
@@ -1491,9 +1400,6 @@ class ChatViewModel @Inject constructor(
         }
         activeSocket.abort(runId = run.runId, sessionId = session.id)
     }
-
-    private fun mergeDraftText(previous: String, current: String): String =
-        listOf(previous, current).filter(String::isNotBlank).joinToString("\n")
 
     /** Approves or rejects a pending tool decision. */
     fun respondToApproval(

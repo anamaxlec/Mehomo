@@ -2,6 +2,9 @@ package dev.memoh.feature.chat
 
 import dev.memoh.core.model.UIMessage
 import dev.memoh.feature.chat.components.isCompletedQuestion
+import dev.memoh.feature.chat.components.toolResult
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 internal data class AssistantRenderItem(
     val key: String,
@@ -12,7 +15,11 @@ internal data class AssistantRenderItem(
 }
 
 private val UIMessage.isProcessMessage: Boolean
-    get() = type == UIMessage.TYPE_REASONING || type == UIMessage.TYPE_TOOL && !isCompletedQuestion(this)
+    get() = type == UIMessage.TYPE_REASONING || type == UIMessage.TYPE_TOOL && !isCompletedQuestion(this) && !isScheduleNotice
+
+internal val UIMessage.isScheduleNotice: Boolean
+    get() = type == UIMessage.TYPE_TOOL && name == "notify_user" &&
+        (toolResult(this)["status"] as? JsonPrimitive)?.contentOrNull in setOf("notified", "already_notified")
 
 /** Text and decisions keep their place; only consecutive process steps are folded together. */
 internal fun assistantRenderItems(turnId: String, messages: List<UIMessage>): List<AssistantRenderItem> {

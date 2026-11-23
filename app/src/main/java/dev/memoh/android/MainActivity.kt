@@ -22,6 +22,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -103,7 +104,9 @@ class MainActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
     }
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splash = installSplashScreen()
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) splash.animateMemohExit()
         if (savedInstanceState?.getString("shared_id") != null) sharedContent = SharedContent(
             savedInstanceState.getString("shared_id")!!, savedInstanceState.getString("shared_text").orEmpty(),
             savedInstanceState.getStringArrayList("shared_uris").orEmpty().map(Uri::parse))

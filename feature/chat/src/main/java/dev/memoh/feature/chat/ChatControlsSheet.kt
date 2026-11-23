@@ -12,14 +12,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.memoh.core.designsystem.component.MemohBottomSheet
 import dev.memoh.core.designsystem.component.MemohActionButton
 import dev.memoh.core.designsystem.component.MemohFormDialog
 import dev.memoh.core.designsystem.component.MemohComposerSurface
 import dev.memoh.core.designsystem.component.MemohComposerTextField
 import dev.memoh.core.model.QueueItem
+import dev.memoh.core.model.DirectAgentRuntime
 import dev.memoh.core.model.RuntimeModeState
-import dev.memoh.core.model.hasCodexUsage
-import dev.memoh.core.designsystem.component.CodexUsagePanel
+import dev.memoh.core.model.supportsAgentQuota
+import dev.memoh.core.designsystem.component.AgentQuotaPanel
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -34,15 +36,12 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
     LaunchedEffect(Unit) {
         while (true) { viewModel.refreshControls(); delay(5000) }
     }
-    val usageSupported = state.agents.any { it.id == state.selectedAgentId && it.hasCodexUsage }
+    val quotaAgent = state.agents.firstOrNull { it.id == state.selectedAgentId && it.supportsAgentQuota }
+    val usageSupported = quotaAgent != null
     LaunchedEffect(state.selectedAgentId, usageSupported) {
-        if (usageSupported) while (true) { viewModel.refreshCodexUsage(); delay(60_000) }
+        if (usageSupported) while (true) { viewModel.refreshAgentQuota(); delay(60_000) }
     }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-    ) {
+    MemohBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().heightIn(max = 600.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("会话控制", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
@@ -53,8 +52,9 @@ fun ChatControlsSheet(state: ChatUiState, viewModel: ChatViewModel, onDismiss: (
                 }
             }
             state.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
-            if (usageSupported) CodexUsagePanel(state.codexUsage.takeIf { state.codexUsageAgentId == state.selectedAgentId },
-                state.codexUsageLoading, state.codexUsageError, viewModel::refreshCodexUsage)
+            if (usageSupported) AgentQuotaPanel(state.agentQuota.takeIf { state.agentQuotaAgentId == state.selectedAgentId },
+                state.agentQuotaLoading, state.agentQuotaError, viewModel::refreshAgentQuota,
+                accountName = if (quotaAgent?.runtime == DirectAgentRuntime.ClaudeCode.id) "Claude" else "ChatGPT")
             state.commandOutput?.let { ControlCard("执行结果", Icons.Filled.Terminal) { Text(it, style = MaterialTheme.typography.bodyMedium) } }
             ControlCard("消息队列", Icons.Filled.Queue) {
                 Text("后续消息在当前任务结束后执行；插话交给正在运行的任务处理。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

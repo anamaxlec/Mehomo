@@ -1,8 +1,15 @@
 package dev.memoh.core.network
 
+import dev.memoh.core.model.MemohError
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.coroutines.flow.Flow
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -18,8 +25,71 @@ fun managementPath(vararg segments: String): String =
 suspend fun MemohApi.managementRead(vararg segments: String): JsonElement =
     call(managementPath(*segments), "GET", null, deserializer = JsonElement.serializer())
 
+suspend fun MemohApi.botChannelConfigs(botId: String, channelTypes: List<String>): JsonObject {
+    val batch = try {
+        managementRead("bots", botId, "channels")
+    } catch (e: ApiException) {
+        if (e.status != 404 || e.problem.code !in setOf(null, "http.not_found")) throw e
+        return JsonObject(buildMap {
+            for (type in channelTypes) {
+                try { put(type, managementRead("bots", botId, "channel", type)) }
+                catch (e: ApiException) { if (e.status != 404) throw e }
+            }
+        })
+    }
+    val items = (batch as? JsonObject)?.get("items") as? JsonArray
+        ?: throw UserFacingException("无法读取渠道配置，请刷新后重试")
+    return JsonObject(items.associate { item ->
+        val config = item as? JsonObject
+        val type = (config?.get("channel_type") as? JsonPrimitive)?.contentOrNull
+        if (config == null || type.isNullOrBlank()) throw UserFacingException("无法读取渠道配置，请刷新后重试")
+        type to config
+    })
+}
+
 suspend fun MemohApi.managementResult(path: List<String>, method: String = "POST", body: JsonObject? = null): JsonElement =
     call(managementPath(*path.toTypedArray()), method, body?.toString(), deserializer = JsonElement.serializer())
+
+data class ModelConnectionProbe(
+    val status: String?,
+    val accepted: Boolean,
+    val latencyMillis: Long?,
+    val problem: MemohError,
+) {
+    val rejected: Boolean get() = status == "error" || status == "auth_error"
+}
+
+data class ProviderModelImportResult(
+    val created: Int?,
+    val updated: Int?,
+    val skipped: Int?,
+    val staleCatalog: Boolean,
+    val details: JsonObject,
+)
+
+suspend fun MemohApi.modelConnectionProbe(kind: String, id: String): ModelConnectionProbe {
+    val data = managementResult(listOf(kind, id, "test")) as? JsonObject ?: JsonObject(emptyMap())
+    val status = (data["status"] as? JsonPrimitive)?.contentOrNull
+    return ModelConnectionProbe(
+        status = status,
+        accepted = status == "ok" || (data["success"] as? JsonPrimitive)?.booleanOrNull == true ||
+            (data["ok"] as? JsonPrimitive)?.booleanOrNull == true,
+        latencyMillis = (data["latency_ms"] as? JsonPrimitive)?.longOrNull,
+        problem = MemohError.parse(data),
+    )
+}
+
+suspend fun MemohApi.importProviderModels(path: List<String>): ProviderModelImportResult {
+    val data = managementResult(path, body = apiBody()) as? JsonObject ?: JsonObject(emptyMap())
+    val catalog = data["catalog"] as? JsonObject
+    return ProviderModelImportResult(
+        created = (data["created"] as? JsonPrimitive)?.intOrNull,
+        updated = (data["updated"] as? JsonPrimitive)?.intOrNull,
+        skipped = (data["skipped"] as? JsonPrimitive)?.intOrNull,
+        staleCatalog = (catalog?.get("stale") as? JsonPrimitive)?.booleanOrNull == true,
+        details = data,
+    )
+}
 
 suspend fun MemohApi.managementWrite(path: List<String>, method: String, body: JsonObject? = null) {
     call(managementPath(*path.toTypedArray()), method, body?.toString(), deserializer = Unit.serializer())
